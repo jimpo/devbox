@@ -1,0 +1,168 @@
+#cloud-config
+#
+# Shared base provisioning for every devbox-managed project VM. Ships with
+# devbox itself (devbox.py resolves this file via Path(__file__).parent, so
+# it works out of the box under `uv tool install --editable .`) and is
+# merged with the project's own optional .devbox/cloud-config.yaml before
+# being handed to virt-install. See devbox's README for the merge algorithm.
+#
+# %DEVBOX_USER%, %DEVBOX_SSH_PUBKEY%, %DEVBOX_JJ_NAME%, %DEVBOX_JJ_EMAIL%,
+# %DEVBOX_REPO_MODE%, %DEVBOX_REPO_DIR%, %DEVBOX_REPO_URL% are substituted by
+# literal %TOKEN% replacement (not {{...}}, which collides with cloud-init's
+# own jinja syntax and with valid YAML flow-mapping syntax) BEFORE this file
+# is parsed as YAML - this comment itself is stripped during that parse, and
+# devbox prepends a fresh #cloud-config header to the merged result.
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - zsh
+  - vim
+  - python3          # used by the `jimpo` oh-my-zsh theme's prompt_pwd
+  - curl
+  - git
+  - git-lfs          # gitconfig declares the lfs clean/smudge filters
+  - ca-certificates
+
+# `- default` also creates the cloud image's default `ubuntu` user (key-only,
+# no password) as a fallback; %DEVBOX_USER% is the account you actually log
+# in as.
+users:
+  - default
+  - name: "%DEVBOX_USER%"
+    groups: [sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /usr/bin/zsh
+    lock_passwd: true
+    ssh_authorized_keys:
+      - "%DEVBOX_SSH_PUBKEY%"
+
+write_files:
+  # Make provisioned tools (jj / claude / a project's own rustup, etc.)
+  # available to NON-interactive bash (e.g. Claude Code's Bash tool). PAM
+  # exports BASH_ENV from /etc/environment into the user's shells. The
+  # referenced file is written by provision-common.sh below, which runs
+  # after %DEVBOX_USER%'s home directory exists (the write_files module runs
+  # before the users module, so we can't write directly into $HOME here).
+  - path: /etc/environment
+    append: true
+    content: |
+      BASH_ENV=/home/%DEVBOX_USER%/.bash_env
+
+  # Neutral location (the dev user's home doesn't exist yet at write_files
+  # time). Executed as %DEVBOX_USER% from runcmd below.
+  - path: /usr/local/bin/provision-common.sh
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+
+      cat > "$HOME/.bash_env" <<'BENV'
+      [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+      case ":$PATH:" in
+        *":$HOME/.local/bin:"*) ;;
+        *) export PATH="$HOME/.local/bin:$PATH" ;;
+      esac
+      BENV
+      mkdir -p "$HOME/.local/bin"
+      export PATH="$HOME/.local/bin:$PATH"
+
+      # -------------------------------------------------------------------
+      # jj (jujutsu) - a pinned prebuilt release, independent of any
+      # project's own language toolchain (jj identity + repo bootstrap below
+      # must work for every project, including non-Rust ones). Bump by hand;
+      # see https://github.com/jj-vcs/jj/releases
+      # -------------------------------------------------------------------
+      JJ_VERSION="0.43.0"
+      curl -fsSL -o /tmp/jj.tar.gz \
+        "https://github.com/jj-vcs/jj/releases/download/v${JJ_VERSION}/jj-v${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+      tar -xzf /tmp/jj.tar.gz -C /tmp ./jj
+      install -Dm755 /tmp/jj "$HOME/.local/bin/jj"
+      rm -f /tmp/jj.tar.gz /tmp/jj
+
+      jj config set --user user.name "%DEVBOX_JJ_NAME%"
+      jj config set --user user.email "%DEVBOX_JJ_EMAIL%"
+
+      # -------------------------------------------------------------------
+      # Claude Code (native installer -> ~/.local/bin/claude) + plugins
+      # common to every project. A project's own cloud-config.yaml can
+      # install more plugins from its own runcmd, which always runs after
+      # this script (see devbox's README for the merge/ordering rules).
+      # -------------------------------------------------------------------
+      curl -fsSL https://claude.ai/install.sh | bash
+      claude plugin marketplace add anthropics/claude-plugins-official
+      claude plugin install github
+      claude plugin install linear
+
+      # -------------------------------------------------------------------
+      # Dotfiles from github.com/jimpo/configenv
+      # (gitconfig + vimrc + oh-my-zsh `jimpo` theme only; NOT the other
+      #  custom zsh settings: aliases.zsh / settings.zsh / direnv.zsh)
+      # -------------------------------------------------------------------
+      CFG="$(mktemp -d)"
+      git clone --depth 1 https://github.com/jimpo/configenv "$CFG"
+      cp "$CFG/gitconfig" "$HOME/.gitconfig"
+      cp "$CFG/vimrc" "$HOME/.vimrc"
+
+      if [ ! -d "$HOME/.oh-my-zsh" ]; then
+        RUNZSH=no CHSH=no KEEP_ZSHRC=no \
+          sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+      fi
+      mkdir -p "$HOME/.oh-my-zsh/custom/themes"
+      cp "$CFG/oh-my-zsh/custom/themes/jimpo.zsh-theme" "$HOME/.oh-my-zsh/custom/themes/"
+      sed -i 's/^ZSH_THEME=.*/ZSH_THEME="jimpo"/' "$HOME/.zshrc"
+      # The jimpo theme's RPS1 renders a vi INS/CMD indicator that needs the
+      # vi-mode plugin's KEYMAP - enable it (but not the other custom plugins).
+      sed -i 's/^plugins=.*/plugins=(git vi-mode)/' "$HOME/.zshrc"
+
+      if ! grep -q 'devbox common env' "$HOME/.zshrc"; then
+        cat >> "$HOME/.zshrc" <<'ZRC'
+
+      # --- devbox common env ---
+      [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+      export PATH="$HOME/.local/bin:$PATH"
+      ZRC
+      fi
+      rm -rf "$CFG"
+
+      # -------------------------------------------------------------------
+      # vim plugins (vim-plug): base16-vim / vim-go / rust.vim
+      # -------------------------------------------------------------------
+      curl -fLo "$HOME/.vim/autoload/plug.vim" --create-dirs \
+        https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
+      vim -E -s -u "$HOME/.vimrc" +PlugInstall +qall || true
+
+      # -------------------------------------------------------------------
+      # Repo bootstrap (.devbox/config.toml [repo]): "clone" pulls an
+      # existing repo via jj; "push" leaves an empty colocated jj+git repo
+      # ready to receive `jj git push --remote sandbox -b main` from the
+      # host; "none" skips this entirely.
+      # -------------------------------------------------------------------
+      case "%DEVBOX_REPO_MODE%" in
+        clone)
+          if [ ! -d "$HOME/%DEVBOX_REPO_DIR%" ]; then
+            jj git clone "%DEVBOX_REPO_URL%" "$HOME/%DEVBOX_REPO_DIR%"
+          fi
+          ;;
+        push)
+          if [ ! -d "$HOME/%DEVBOX_REPO_DIR%" ]; then
+            git init --initial-branch=main "$HOME/%DEVBOX_REPO_DIR%"
+            (cd "$HOME/%DEVBOX_REPO_DIR%" \
+              && jj git init --colocate \
+              && git config receive.denyCurrentBranch updateInstead)
+          fi
+          ;;
+        none) ;;
+        *)
+          echo "unknown DEVBOX_REPO_MODE: %DEVBOX_REPO_MODE%" >&2
+          exit 1
+          ;;
+      esac
+
+      echo "common provisioning complete"
+
+runcmd:
+  - [ runuser, -l, "%DEVBOX_USER%", -c,
+      "bash /usr/local/bin/provision-common.sh 2>&1 | tee /home/%DEVBOX_USER%/provision-common.log" ]

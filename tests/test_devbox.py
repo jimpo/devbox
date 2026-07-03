@@ -29,6 +29,8 @@ def test_global_config_defaults_when_missing(tmp_path):
     assert gc.vcpus == devbox.DEFAULT_VCPUS
     assert gc.memory_mib == devbox.DEFAULT_MEMORY_MIB
     assert gc.disk_gb == devbox.DEFAULT_DISK_GB
+    assert gc.jj_name is None
+    assert gc.jj_email is None
 
 
 def test_global_config_overrides(tmp_path):
@@ -48,6 +50,10 @@ disk_gb = 20
 
 [ssh]
 pubkey_path = "~/.ssh/other.pub"
+
+[jj]
+name = "Alice Example"
+email = "alice@example.com"
 """)
     gc = devbox.GlobalConfig.load(path)
     assert gc.libvirt_uri == "qemu:///session"
@@ -58,6 +64,8 @@ pubkey_path = "~/.ssh/other.pub"
     assert gc.memory_mib == 4096
     assert gc.disk_gb == 20
     assert gc.ssh_pubkey_path == devbox.Path("~/.ssh/other.pub").expanduser()
+    assert gc.jj_name == "Alice Example"
+    assert gc.jj_email == "alice@example.com"
 
 
 def test_global_config_partial_override_keeps_other_defaults(tmp_path):
@@ -72,41 +80,50 @@ def test_global_config_partial_override_keeps_other_defaults(tmp_path):
 # ---- project marker resolution -------------------------------------------
 @pytest.fixture
 def global_config():
-    return devbox.GlobalConfig.load(devbox.Path("/nonexistent"))
+    gc = devbox.GlobalConfig.load(devbox.Path("/nonexistent"))
+    gc.jj_name = "Alice Example"
+    gc.jj_email = "alice@example.com"
+    return gc
 
 
-def test_find_marker_dir_at_start(tmp_path):
-    (tmp_path / devbox.PROJECT_MARKER).write_text('name = "x"\n')
-    assert devbox.find_marker_dir(tmp_path) == tmp_path.resolve()
+def _write_marker(root, content, local=False):
+    devbox_dir = root / devbox.PROJECT_MARKER_DIR
+    devbox_dir.mkdir(parents=True, exist_ok=True)
+    (devbox_dir / devbox.PROJECT_CONFIG_FILE).write_text(content)
 
 
-def test_find_marker_dir_walks_up(tmp_path):
-    (tmp_path / devbox.PROJECT_MARKER).write_text('name = "x"\n')
+def test_find_project_dir_at_start(tmp_path):
+    _write_marker(tmp_path, 'name = "x"\n')
+    assert devbox.find_project_dir(tmp_path) == tmp_path.resolve()
+
+
+def test_find_project_dir_walks_up(tmp_path):
+    _write_marker(tmp_path, 'name = "x"\n')
     deep = tmp_path / "a" / "b" / "c"
     deep.mkdir(parents=True)
-    assert devbox.find_marker_dir(deep) == tmp_path.resolve()
+    assert devbox.find_project_dir(deep) == tmp_path.resolve()
 
 
-def test_find_marker_dir_missing_dies(tmp_path):
+def test_find_project_dir_missing_dies(tmp_path):
     with pytest.raises(SystemExit):
-        devbox.find_marker_dir(tmp_path)
+        devbox.find_project_dir(tmp_path)
 
 
 def test_resolve_project_basic(tmp_path, global_config):
-    (tmp_path / devbox.PROJECT_MARKER).write_text(
-        'name = "myproj"\ncloud_init = "cloud-init/user-data.yaml"\n'
-    )
+    _write_marker(tmp_path, 'name = "myproj"\n')
     project = devbox.resolve_project(tmp_path, global_config)
     assert project.name == "myproj"
-    assert project.cloud_init == tmp_path.resolve() / "cloud-init" / "user-data.yaml"
+    assert project.cloud_config is None  # no .devbox/cloud-config.yaml written
     assert project.vcpus == global_config.vcpus
     assert project.memory_mib == global_config.memory_mib
     assert project.disk_gb == global_config.disk_gb
+    assert project.repo.mode == "none"
 
 
 def test_resolve_project_overrides_defaults(tmp_path, global_config):
-    (tmp_path / devbox.PROJECT_MARKER).write_text(
-        'name = "myproj"\ncloud_init = "ci.yaml"\nvcpus = 2\nmemory_mib = 2048\ndisk_gb = 10\nuser = "alice"\n'
+    _write_marker(
+        tmp_path,
+        'name = "myproj"\nvcpus = 2\nmemory_mib = 2048\ndisk_gb = 10\nuser = "alice"\n',
     )
     project = devbox.resolve_project(tmp_path, global_config)
     assert project.vcpus == 2
@@ -115,66 +132,221 @@ def test_resolve_project_overrides_defaults(tmp_path, global_config):
     assert project.user == "alice"
 
 
-def test_resolve_project_local_overrides_name(tmp_path, global_config):
-    (tmp_path / devbox.PROJECT_MARKER).write_text(
-        'name = "shared-name"\ncloud_init = "ci.yaml"\n'
-    )
-    (tmp_path / devbox.PROJECT_MARKER_LOCAL).write_text('name = "my-own-vm"\n')
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.name == "my-own-vm"
-    # fields not present in .local are still inherited from the committed marker
-    assert project.cloud_init == tmp_path.resolve() / "ci.yaml"
-
-
-def test_resolve_project_local_only_directory_wins_over_parent_base(tmp_path, global_config):
-    # A directory with only .devbox.local.toml still wins over a .devbox.toml
-    # further up the tree - the walk stops at the first directory with *either* marker.
-    (tmp_path / devbox.PROJECT_MARKER).write_text('name = "parent"\ncloud_init = "ci.yaml"\n')
-    child = tmp_path / "child"
-    child.mkdir()
-    (child / devbox.PROJECT_MARKER_LOCAL).write_text('name = "child-local"\n')
-    project = devbox.resolve_project(child, global_config)
-    assert project.name == "child-local"
-
-
 def test_resolve_project_missing_name_dies(tmp_path, global_config):
-    (tmp_path / devbox.PROJECT_MARKER).write_text('cloud_init = "ci.yaml"\n')
+    _write_marker(tmp_path, "")
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
 
-def test_resolve_project_no_cloud_init_is_none(tmp_path, global_config):
-    (tmp_path / devbox.PROJECT_MARKER).write_text('name = "myproj"\n')
+def test_resolve_project_cloud_config_present(tmp_path, global_config):
+    _write_marker(tmp_path, 'name = "myproj"\n')
+    cloud_config = tmp_path / devbox.PROJECT_MARKER_DIR / devbox.PROJECT_CLOUD_CONFIG_FILE
+    cloud_config.write_text("packages: []\n")
     project = devbox.resolve_project(tmp_path, global_config)
-    assert project.cloud_init is None
+    assert project.cloud_config == cloud_config
 
 
-# ---- cloud-init templating -------------------------------------------------
-def test_render_cloud_init_substitutes_tokens(tmp_path):
-    ci = tmp_path / "user-data.yaml"
-    ci.write_text("users:\n  - name: %DEVBOX_USER%\n    ssh_authorized_keys:\n      - %DEVBOX_SSH_PUBKEY%\n")
-    pubkey = tmp_path / "id_ed25519.pub"
-    pubkey.write_text("ssh-ed25519 AAAAtest user@host\n")
+# ---- [repo] validation -----------------------------------------------------
+def test_resolve_project_repo_defaults_to_none(tmp_path, global_config):
+    _write_marker(tmp_path, 'name = "myproj"\n')
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.repo == devbox.RepoConfig(mode="none", dir="", url=None)
 
-    rendered = devbox.render_cloud_init(ci, "alice", pubkey)
+
+def test_resolve_project_repo_clone_mode(tmp_path, global_config):
+    _write_marker(
+        tmp_path,
+        'name = "myproj"\n[repo]\nmode = "clone"\ndir = "myrepo"\nurl = "https://example.com/myrepo"\n',
+    )
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.repo == devbox.RepoConfig(mode="clone", dir="myrepo", url="https://example.com/myrepo")
+
+
+def test_resolve_project_repo_push_mode(tmp_path, global_config):
+    _write_marker(tmp_path, 'name = "myproj"\n[repo]\nmode = "push"\ndir = "myrepo"\n')
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.repo == devbox.RepoConfig(mode="push", dir="myrepo", url=None)
+
+
+def test_resolve_project_repo_invalid_mode_dies(tmp_path, global_config):
+    _write_marker(tmp_path, 'name = "myproj"\n[repo]\nmode = "bogus"\ndir = "myrepo"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_repo_clone_missing_url_dies(tmp_path, global_config):
+    _write_marker(tmp_path, 'name = "myproj"\n[repo]\nmode = "clone"\ndir = "myrepo"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_repo_missing_dir_dies(tmp_path, global_config):
+    _write_marker(tmp_path, 'name = "myproj"\n[repo]\nmode = "push"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_repo_push_with_url_dies(tmp_path, global_config):
+    _write_marker(
+        tmp_path,
+        'name = "myproj"\n[repo]\nmode = "push"\ndir = "myrepo"\nurl = "https://example.com/myrepo"\n',
+    )
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+# ---- merge_cloud_config -----------------------------------------------------
+def test_merge_cloud_config_concatenates_list_keys_common_first():
+    common = {"packages": ["zsh", "vim"], "runcmd": ["common-step"]}
+    project = {"packages": ["clang"], "runcmd": ["project-step"]}
+    merged = devbox.merge_cloud_config(common, project)
+    assert merged["packages"] == ["zsh", "vim", "clang"]
+    assert merged["runcmd"] == ["common-step", "project-step"]
+
+
+def test_merge_cloud_config_scalar_key_project_overrides():
+    common = {"package_update": True, "hostname": "common-host"}
+    project = {"hostname": "project-host"}
+    merged = devbox.merge_cloud_config(common, project)
+    assert merged["hostname"] == "project-host"
+    assert merged["package_update"] is True
+
+
+def test_merge_cloud_config_keeps_common_only_keys():
+    common = {"packages": ["zsh"]}
+    merged = devbox.merge_cloud_config(common, {})
+    assert merged["packages"] == ["zsh"]
+
+
+def test_merge_cloud_config_type_mismatch_dies():
+    common = {"packages": ["zsh"]}
+    project = {"packages": "vim"}  # should be a list, not a string
+    with pytest.raises(SystemExit):
+        devbox.merge_cloud_config(common, project)
+
+
+# ---- render_cloud_config ----------------------------------------------------
+@pytest.fixture
+def common_template(tmp_path, monkeypatch):
+    path = tmp_path / "common-cloud-config.yaml"
+    path.write_text(
+        "packages:\n  - zsh\n"
+        "users:\n  - name: \"%DEVBOX_USER%\"\n    ssh_authorized_keys:\n      - \"%DEVBOX_SSH_PUBKEY%\"\n"
+        "write_files:\n"
+        "  - path: /tmp/jj-identity\n"
+        "    content: |\n"
+        "      %DEVBOX_JJ_NAME% <%DEVBOX_JJ_EMAIL%>\n"
+        "runcmd:\n"
+        "  - [\"echo\", \"%DEVBOX_REPO_MODE%\", \"%DEVBOX_REPO_DIR%\", \"%DEVBOX_REPO_URL%\"]\n"
+    )
+    monkeypatch.setattr(devbox, "COMMON_CLOUD_CONFIG_PATH", path)
+    return path
+
+
+@pytest.fixture
+def pubkey(tmp_path):
+    path = tmp_path / "id_ed25519.pub"
+    path.write_text("ssh-ed25519 AAAAtest user@host\n")
+    return path
+
+
+def _project(cloud_config=None, mode="none", dir="", url=None):
+    return devbox.ProjectConfig(
+        name="test-project", cloud_config=cloud_config, user="alice",
+        vcpus=6, memory_mib=1024, disk_gb=10,
+        repo=devbox.RepoConfig(mode=mode, dir=dir, url=url),
+    )
+
+
+def test_render_cloud_config_substitutes_tokens(common_template, pubkey):
+    gc = devbox.GlobalConfig(
+        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
+        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
+        ssh_pubkey_path=pubkey, jj_name="Alice Example", jj_email="alice@example.com",
+    )
+    rendered = devbox.render_cloud_config(_project(mode="clone", dir="myrepo", url="https://example.com/x"), gc)
+    assert "%DEVBOX_" not in rendered
     assert "name: alice" in rendered
     assert "ssh-ed25519 AAAAtest user@host" in rendered
-    assert "%DEVBOX_USER%" not in rendered
-    assert "%DEVBOX_SSH_PUBKEY%" not in rendered
+    assert "Alice Example <alice@example.com>" in rendered
+    import yaml
+    assert yaml.safe_load(rendered)["runcmd"][0] == ["echo", "clone", "myrepo", "https://example.com/x"]
 
 
-def test_render_cloud_init_missing_file_dies(tmp_path):
-    pubkey = tmp_path / "id_ed25519.pub"
-    pubkey.write_text("key\n")
+def test_render_cloud_config_has_cloud_config_header(common_template, pubkey):
+    gc = devbox.GlobalConfig(
+        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
+        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
+        ssh_pubkey_path=pubkey, jj_name="Alice Example", jj_email="alice@example.com",
+    )
+    rendered = devbox.render_cloud_config(_project(), gc)
+    assert rendered.startswith("#cloud-config\n")
+
+
+def test_render_cloud_config_hostname_defaults_from_project_name(common_template, pubkey):
+    gc = devbox.GlobalConfig(
+        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
+        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
+        ssh_pubkey_path=pubkey, jj_name="Alice Example", jj_email="alice@example.com",
+    )
+    rendered = devbox.render_cloud_config(_project(), gc)
+    import yaml
+    assert yaml.safe_load(rendered)["hostname"] == "test-project"
+
+
+def test_render_cloud_config_merges_project_fragment(common_template, pubkey, tmp_path):
+    cloud_config = tmp_path / "cloud-config.yaml"
+    cloud_config.write_text("packages:\n  - build-essential\nhostname: project-hostname\n")
+    gc = devbox.GlobalConfig(
+        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
+        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
+        ssh_pubkey_path=pubkey, jj_name="Alice Example", jj_email="alice@example.com",
+    )
+    rendered = devbox.render_cloud_config(_project(cloud_config=cloud_config), gc)
+    import yaml
+    parsed = yaml.safe_load(rendered)
+    assert parsed["packages"] == ["zsh", "build-essential"]
+    assert parsed["hostname"] == "project-hostname"  # project overrides the setdefault
+
+
+def test_render_cloud_config_missing_jj_name_dies_when_no_host_fallback(common_template, pubkey, monkeypatch):
+    # No [jj] name in global config, and no `jj` binary on the host to fall back to.
+    monkeypatch.setattr(devbox.shutil, "which", lambda name: None)
+    gc = devbox.GlobalConfig(
+        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
+        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
+        ssh_pubkey_path=pubkey, jj_name=None, jj_email="alice@example.com",
+    )
     with pytest.raises(SystemExit):
-        devbox.render_cloud_init(tmp_path / "missing.yaml", "alice", pubkey)
+        devbox.render_cloud_config(_project(), gc)
 
 
-def test_render_cloud_init_missing_pubkey_dies(tmp_path):
-    ci = tmp_path / "user-data.yaml"
-    ci.write_text("x: %DEVBOX_USER%\n")
+def test_render_cloud_config_falls_back_to_host_jj_config(common_template, pubkey, monkeypatch):
+    # No [jj] name/email in global config - falls back to `jj config get`.
+    monkeypatch.setattr(devbox.shutil, "which", lambda name: "/usr/bin/jj")
+    monkeypatch.setattr(
+        devbox.subprocess, "run",
+        lambda args, **k: subprocess.CompletedProcess(
+            args, 0, {"user.name": "Host Jj Name", "user.email": "host@example.com"}[args[-1]] + "\n", "",
+        ),
+    )
+    gc = devbox.GlobalConfig(
+        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
+        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
+        ssh_pubkey_path=pubkey, jj_name=None, jj_email=None,
+    )
+    rendered = devbox.render_cloud_config(_project(), gc)
+    assert "Host Jj Name <host@example.com>" in rendered
+
+
+def test_render_cloud_config_missing_pubkey_dies(common_template, tmp_path):
+    gc = devbox.GlobalConfig(
+        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
+        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
+        ssh_pubkey_path=tmp_path / "missing.pub", jj_name="Alice Example", jj_email="alice@example.com",
+    )
     with pytest.raises(SystemExit):
-        devbox.render_cloud_init(ci, "alice", tmp_path / "missing.pub")
+        devbox.render_cloud_config(_project(), gc)
 
 
 # ---- fetch_verified_checksum -----------------------------------------------

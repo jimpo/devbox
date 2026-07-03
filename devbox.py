@@ -1,12 +1,14 @@
 """devbox: a global, multi-project dev-sandbox VM manager (libvirt + cloud-init).
 
-Each project supplies its own cloud-init config via a `.devbox.toml` marker
-file (see README.md); all projects share one cached base VM image and one
-global config at ~/.config/devbox/config.toml.
+Each project supplies an optional cloud-config fragment via a `.devbox/`
+marker directory (see README.md), merged onto devbox's own common
+cloud-config template (dotfiles, jj, Claude Code, base packages); all
+projects share one cached base VM image and one global config at
+~/.config/devbox/config.toml.
 
 `create` uses virt-install --cloud-init to build/attach a NoCloud seed from
-the project's cloud-init file, so cloud-init provisions the box on first
-boot. `up`/`stop` only start/shut down an already-defined domain.
+the merged cloud-config, so cloud-init provisions the box on first boot.
+`up`/`stop` only start/shut down an already-defined domain.
 
 Requirements (Debian/Ubuntu/Pop!_OS):
     sudo apt install virtinst libvirt-daemon-system qemu-system-x86
@@ -37,8 +39,13 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-PROJECT_MARKER = ".devbox.toml"
-PROJECT_MARKER_LOCAL = ".devbox.local.toml"
+import yaml
+
+PROJECT_MARKER_DIR = ".devbox"
+PROJECT_CONFIG_FILE = "config.toml"                # .devbox/config.toml
+PROJECT_CLOUD_CONFIG_FILE = "cloud-config.yaml"    # .devbox/cloud-config.yaml (optional)
+COMMON_CLOUD_CONFIG_PATH = Path(__file__).parent / "common-cloud-config.yaml"
+REPO_MODES = ("none", "clone", "push")
 
 GLOBAL_CONFIG_PATH = Path.home() / ".config" / "devbox" / "config.toml"
 SSH_DIR = Path.home() / ".config" / "devbox" / "ssh"
@@ -83,6 +90,8 @@ class GlobalConfig:
     memory_mib: int
     disk_gb: int
     ssh_pubkey_path: Path
+    jj_name: Optional[str]
+    jj_email: Optional[str]
 
     @classmethod
     def load(cls, path: Path = GLOBAL_CONFIG_PATH) -> "GlobalConfig":
@@ -93,6 +102,7 @@ class GlobalConfig:
         base_image = data.get("base_image", {})
         defaults = data.get("defaults", {})
         ssh = data.get("ssh", {})
+        jj = data.get("jj", {})
         return cls(
             libvirt_uri=data.get("libvirt_uri", DEFAULT_LIBVIRT_URI),
             network=data.get("network", DEFAULT_NETWORK),
@@ -102,18 +112,32 @@ class GlobalConfig:
             memory_mib=defaults.get("memory_mib", DEFAULT_MEMORY_MIB),
             disk_gb=defaults.get("disk_gb", DEFAULT_DISK_GB),
             ssh_pubkey_path=Path(ssh.get("pubkey_path", DEFAULT_SSH_PUBKEY_PATH)).expanduser(),
+            # No built-in default, unlike every other field above - there's no
+            # sensible guess for a person's identity. Validated lazily inside
+            # render_cloud_config, not here, so subcommands that never render
+            # cloud-config (ip/ssh/status/...) don't need [jj] set at all.
+            jj_name=jj.get("name"),
+            jj_email=jj.get("email"),
         )
 
 
 # ---- project config / resolution --------------------------------------------
 @dataclasses.dataclass
+class RepoConfig:
+    mode: str                    # "none" | "clone" | "push"
+    dir: str                     # "" when mode == "none"
+    url: Optional[str]           # set only when mode == "clone"
+
+
+@dataclasses.dataclass
 class ProjectConfig:
     name: str
-    cloud_init: Optional[Path]  # absolute path, resolved relative to the marker file
+    cloud_config: Optional[Path]  # .devbox/cloud-config.yaml, if present (now optional)
     user: str
     vcpus: int
     memory_mib: int
     disk_gb: int
+    repo: RepoConfig
 
 
 def _load_toml(path: Path) -> dict:
@@ -121,43 +145,53 @@ def _load_toml(path: Path) -> dict:
         return tomllib.load(f)
 
 
-def find_marker_dir(start: Path) -> Path:
-    """Walk upward from `start` (like git looking for .git) for a devbox marker.
-
-    A directory qualifies if it has either marker file; the first one found
-    (nearest to `start`) wins.
-    """
+def find_project_dir(start: Path) -> Path:
+    """Walk upward from `start` (like git looking for .git) for a devbox marker
+    (a directory containing `.devbox/config.toml`)."""
     cur = start.resolve()
     while True:
-        if (cur / PROJECT_MARKER_LOCAL).is_file() or (cur / PROJECT_MARKER).is_file():
+        if (cur / PROJECT_MARKER_DIR / PROJECT_CONFIG_FILE).is_file():
             return cur
         if cur.parent == cur:
-            die(f"no {PROJECT_MARKER} found in {start} or any parent directory "
-                f"(pass -C/--project-dir, or add a marker file to the project)")
+            die(f"no {PROJECT_MARKER_DIR}/{PROJECT_CONFIG_FILE} found in {start} or any "
+                f"parent directory (pass -C/--project-dir, or add a marker file to the project)")
         cur = cur.parent
 
 
-def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
-    marker_dir = find_marker_dir(start)
-    base_path = marker_dir / PROJECT_MARKER
-    local_path = marker_dir / PROJECT_MARKER_LOCAL
+def _resolve_repo_config(data: dict, config_path: Path) -> RepoConfig:
+    repo_data = data.get("repo", {})
+    mode = repo_data.get("mode", "none")
+    if mode not in REPO_MODES:
+        die(f"{config_path}: [repo] mode must be one of {REPO_MODES} (got {mode!r})")
+    repo_dir = repo_data.get("dir", "")
+    if mode != "none" and not repo_dir:
+        die(f"{config_path}: [repo] dir is required when mode = \"{mode}\"")
+    url = repo_data.get("url")
+    if mode == "clone" and not url:
+        die(f"{config_path}: [repo] url is required when mode = \"clone\"")
+    if mode != "clone" and url:
+        die(f"{config_path}: [repo] url is only used when mode = \"clone\" (mode is \"{mode}\")")
+    return RepoConfig(mode=mode, dir=repo_dir, url=url)
 
-    data = _load_toml(base_path) if base_path.is_file() else {}
-    if local_path.is_file():
-        # .devbox.local.toml overrides whichever fields it sets (typically just `name`).
-        data = {**data, **_load_toml(local_path)}
+
+def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
+    marker_dir = find_project_dir(start)
+    devbox_dir = marker_dir / PROJECT_MARKER_DIR
+    config_path = devbox_dir / PROJECT_CONFIG_FILE
+    data = _load_toml(config_path)
 
     if "name" not in data:
-        die(f"{marker_dir}: marker is missing required field 'name'")
+        die(f"{config_path}: missing required field 'name'")
 
-    cloud_init = data.get("cloud_init")
+    cloud_config_path = devbox_dir / PROJECT_CLOUD_CONFIG_FILE
     return ProjectConfig(
         name=data["name"],
-        cloud_init=(marker_dir / cloud_init) if cloud_init else None,
+        cloud_config=cloud_config_path if cloud_config_path.is_file() else None,
         user=data.get("user", os.environ.get("USER", "")),
         vcpus=data.get("vcpus", global_config.vcpus),
         memory_mib=data.get("memory_mib", global_config.memory_mib),
         disk_gb=data.get("disk_gb", global_config.disk_gb),
+        repo=_resolve_repo_config(data, config_path),
     )
 
 
@@ -226,17 +260,118 @@ def fetch_verified_checksum(image_url: str) -> str:
     die(f"{filename} not listed in {sums_url}")
 
 
-# ---- cloud-init templating ----------------------------------------------------
-def render_cloud_init(cloud_init_path: Path, user: str, pubkey_path: Path) -> str:
+# ---- cloud-config templating ---------------------------------------------------
+# Cloud-config keys whose values get concatenated (common-first) rather than
+# whole-value-overridden when merging the common template with a project's
+# fragment. Order matters: common's write_files/runcmd install jj, dotfiles,
+# and ~/.local/bin before any project-specific step that might assume they
+# already exist.
+LIST_MERGE_KEYS = {"packages", "write_files", "runcmd", "bootcmd", "users", "groups"}
+
+
+def substitute_tokens(text: str, tokens: dict) -> str:
     """Literal token substitution (not {{...}}, which collides with cloud-init's
     own jinja syntax and with valid YAML flow-mapping syntax)."""
-    if not cloud_init_path.is_file():
-        die(f"cloud-init file not found: {cloud_init_path}")
-    if not pubkey_path.is_file():
-        die(f"SSH public key not found: {pubkey_path}")
-    text = cloud_init_path.read_text()
-    pubkey = pubkey_path.read_text().strip()
-    return text.replace("%DEVBOX_USER%", user).replace("%DEVBOX_SSH_PUBKEY%", pubkey)
+    for key, value in tokens.items():
+        text = text.replace(f"%{key}%", value)
+    return text
+
+
+def _load_cloud_config_yaml(text: str, source: Path) -> dict:
+    data = yaml.safe_load(text) or {}
+    if not isinstance(data, dict):
+        die(f"{source}: expected a YAML mapping at the top level (cloud-config format)")
+    return data
+
+
+def merge_cloud_config(common: dict, project: dict) -> dict:
+    """`common` provisions first; `project` layers on top. Keys in
+    LIST_MERGE_KEYS are concatenated common-then-project; every other
+    top-level key is a whole-value override (project replaces common if
+    present) - no recursive/deep merge of nested dicts."""
+    merged = dict(common)
+    for key, project_value in project.items():
+        if key in LIST_MERGE_KEYS:
+            common_value = merged.get(key, [])
+            if not isinstance(common_value, list) or not isinstance(project_value, list):
+                die(f"cloud-config key '{key}' must be a YAML list in both the common "
+                    f"template and the project's cloud-config.yaml")
+            merged[key] = [*common_value, *project_value]
+        else:
+            merged[key] = project_value
+    return merged
+
+
+def _represent_multiline_str(dumper: yaml.Dumper, data: str) -> yaml.ScalarNode:
+    style = "|" if "\n" in data else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+
+
+class _CloudConfigDumper(yaml.SafeDumper):
+    pass
+
+
+_CloudConfigDumper.add_representer(str, _represent_multiline_str)
+
+
+def _jj_config_get(key: str) -> Optional[str]:
+    """Best-effort read of the host's own jj config (e.g. user.name/user.email)."""
+    if not shutil.which("jj"):
+        return None
+    r = subprocess.run(["jj", "config", "get", key], capture_output=True, text=True)
+    value = r.stdout.strip()
+    return value if r.returncode == 0 and value else None
+
+
+def resolve_jj_identity(gc: GlobalConfig) -> tuple:
+    """[jj] name/email from global config, falling back to the host's own
+    `jj config get user.name`/`user.email` if unset."""
+    name = gc.jj_name or _jj_config_get("user.name")
+    email = gc.jj_email or _jj_config_get("user.email")
+    if name is None or email is None:
+        die("could not determine jj identity: set [jj] name/email in "
+            f"{GLOBAL_CONFIG_PATH}, or configure it on this host with "
+            "`jj config set --user user.name/user.email` (devbox falls back to that "
+            "if [jj] isn't set)")
+    return name, email
+
+
+def render_cloud_config(project: ProjectConfig, gc: GlobalConfig) -> str:
+    jj_name, jj_email = resolve_jj_identity(gc)
+    if not gc.ssh_pubkey_path.is_file():
+        die(f"SSH public key not found: {gc.ssh_pubkey_path}")
+    if not COMMON_CLOUD_CONFIG_PATH.is_file():
+        die(f"devbox internal error: common cloud-config template not found at "
+            f"{COMMON_CLOUD_CONFIG_PATH} (broken install?)")
+
+    tokens = {
+        "DEVBOX_USER": project.user,
+        "DEVBOX_SSH_PUBKEY": gc.ssh_pubkey_path.read_text().strip(),
+        "DEVBOX_JJ_NAME": jj_name,
+        "DEVBOX_JJ_EMAIL": jj_email,
+        "DEVBOX_REPO_MODE": project.repo.mode,
+        "DEVBOX_REPO_DIR": project.repo.dir,
+        "DEVBOX_REPO_URL": project.repo.url or "",
+    }
+
+    common_text = substitute_tokens(COMMON_CLOUD_CONFIG_PATH.read_text(), tokens)
+    common = _load_cloud_config_yaml(common_text, COMMON_CLOUD_CONFIG_PATH)
+
+    if project.cloud_config is not None:
+        project_text = substitute_tokens(project.cloud_config.read_text(), tokens)
+        project_data = _load_cloud_config_yaml(project_text, project.cloud_config)
+    else:
+        project_data = {}
+
+    merged = merge_cloud_config(common, project_data)
+    merged.setdefault("hostname", project.name)
+
+    body = yaml.dump(merged, Dumper=_CloudConfigDumper, sort_keys=False, default_flow_style=False)
+    # yaml.safe_load drops comments, so the magic first-line marker cloud-init's
+    # NoCloud datasource relies on to recognize this as cloud-config does not
+    # survive a parse->dump round trip. Without it, the VM boots but is
+    # silently never provisioned - no error anywhere.
+    return "#cloud-config\n" + body
 
 
 def truncate_known_hosts() -> None:
@@ -252,8 +387,6 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
     for binary in ("virt-install", "virsh"):
         if not shutil.which(binary):
             die(f"'{binary}' not found. Install: sudo apt install virtinst libvirt-daemon-system qemu-system-x86")
-    if project.cloud_init is None:
-        die("project marker is missing 'cloud_init'")
 
     if domain_state(gc.libvirt_uri, project.name) is not None:
         die(f"domain '{project.name}' is already defined; run `devbox destroy` first")
@@ -284,7 +417,7 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
         # libvirt-qemu (and we'd no longer be allowed to chmod it), which is fine.
         img.chmod(0o644)
 
-    rendered = render_cloud_init(project.cloud_init, project.user, gc.ssh_pubkey_path)
+    rendered = render_cloud_config(project, gc)
     fd, tmp_path = tempfile.mkstemp(prefix="devbox-cloud-init-", suffix=".yaml")
     try:
         with os.fdopen(fd, "w") as f:
