@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "devbox"
+version = "0.1.0"
+description = "Global, multi-project dev-sandbox VM manager (libvirt + cloud-init)"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+devbox = "devbox:main"
+
+[tool.hatch.build.targets.wheel]
+py-modules = ["devbox"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
