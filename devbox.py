@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -44,6 +45,13 @@ SSH_DIR = Path.home() / ".config" / "devbox" / "ssh"
 KNOWN_HOSTS_PATH = SSH_DIR / "known_hosts"
 SSH_USER_CONFIG = Path.home() / ".ssh" / "config"
 
+# Canonical's cloud-image signing key, installed by the `ubuntu-cloudimage-keyring`
+# apt package. Used to verify the SHA256SUMS file fetched alongside the base
+# image, instead of pinning a checksum in devbox itself: the `release` build at
+# a given URL is mutable (Canonical overwrites it in place on respins), so a
+# hand-pinned hash inevitably goes stale.
+CLOUDIMAGE_KEYRING_PATH = Path("/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg")
+
 # Built-in fallbacks for any key not set in the (optional) global config, so
 # `devbox` works with zero global setup. Override via ~/.config/devbox/config.toml.
 DEFAULT_LIBVIRT_URI = "qemu:///system"
@@ -53,7 +61,6 @@ DEFAULT_BASE_IMAGE_URL = (
     "https://cloud-images.ubuntu.com/releases/26.04/release/"
     "ubuntu-26.04-server-cloudimg-amd64.img"
 )
-DEFAULT_BASE_IMAGE_SHA256 = "0c9fb915bab0b36b361d3bf8aeae2115dda19d81a306656964de048033481670"
 DEFAULT_VCPUS = 6
 DEFAULT_MEMORY_MIB = 12288
 DEFAULT_DISK_GB = 60
@@ -72,7 +79,6 @@ class GlobalConfig:
     network: str
     cache_dir: Path
     base_image_url: str
-    base_image_sha256: str
     vcpus: int
     memory_mib: int
     disk_gb: int
@@ -92,7 +98,6 @@ class GlobalConfig:
             network=data.get("network", DEFAULT_NETWORK),
             cache_dir=Path(data.get("cache_dir", DEFAULT_CACHE_DIR)).expanduser(),
             base_image_url=base_image.get("url", DEFAULT_BASE_IMAGE_URL),
-            base_image_sha256=base_image.get("sha256", DEFAULT_BASE_IMAGE_SHA256),
             vcpus=defaults.get("vcpus", DEFAULT_VCPUS),
             memory_mib=defaults.get("memory_mib", DEFAULT_MEMORY_MIB),
             disk_gb=defaults.get("disk_gb", DEFAULT_DISK_GB),
@@ -185,6 +190,42 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def fetch_verified_checksum(image_url: str) -> str:
+    """Fetch SHA256SUMS + SHA256SUMS.gpg from alongside `image_url`, verify the
+    signature against Canonical's cloud-image signing key, and return the
+    checksum for the image's filename."""
+    if not shutil.which("gpgv"):
+        die("'gpgv' not found. Install: sudo apt install gnupg")
+    if not CLOUDIMAGE_KEYRING_PATH.is_file():
+        die(f"{CLOUDIMAGE_KEYRING_PATH} not found. Install: sudo apt install ubuntu-cloudimage-keyring")
+
+    filename = Path(image_url).name
+    sums_url = urllib.parse.urljoin(image_url, "SHA256SUMS")
+    sig_url = urllib.parse.urljoin(image_url, "SHA256SUMS.gpg")
+    with urllib.request.urlopen(sums_url) as resp:
+        sums = resp.read()
+    with urllib.request.urlopen(sig_url) as resp:
+        sig = resp.read()
+
+    with tempfile.TemporaryDirectory(prefix="devbox-checksums-") as tmpdir:
+        sums_path = Path(tmpdir) / "SHA256SUMS"
+        sig_path = Path(tmpdir) / "SHA256SUMS.gpg"
+        sums_path.write_bytes(sums)
+        sig_path.write_bytes(sig)
+        r = subprocess.run(
+            ["gpgv", "--keyring", str(CLOUDIMAGE_KEYRING_PATH), str(sig_path), str(sums_path)],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            die(f"GPG verification of {sums_url} failed:\n{r.stderr}")
+
+    for line in sums.decode().splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == filename:
+            return parts[0]
+    die(f"{filename} not listed in {sums_url}")
+
+
 # ---- cloud-init templating ----------------------------------------------------
 def render_cloud_init(cloud_init_path: Path, user: str, pubkey_path: Path) -> str:
     """Literal token substitution (not {{...}}, which collides with cloud-init's
@@ -223,16 +264,18 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
             f"  sudo virsh -c {gc.libvirt_uri} net-start {gc.network} "
             f"&& sudo virsh -c {gc.libvirt_uri} net-autostart {gc.network}")
 
-    # base cloud image (cached, checksum-verified, shared across all projects)
+    # base cloud image (cached, checksum-verified via GPG-signed SHA256SUMS,
+    # shared across all projects)
+    expected_sha256 = fetch_verified_checksum(gc.base_image_url)
     gc.cache_dir.mkdir(parents=True, exist_ok=True)
     gc.cache_dir.chmod(0o755)
     img = gc.cache_dir / Path(gc.base_image_url).name
-    if not img.is_file() or sha256_file(img) != gc.base_image_sha256:
+    if not img.is_file() or sha256_file(img) != expected_sha256:
         print(f"==> Downloading base image ({gc.base_image_url}) ...")
         tmp = img.with_name(img.name + ".tmp")
         with urllib.request.urlopen(gc.base_image_url) as resp, tmp.open("wb") as out:
             shutil.copyfileobj(resp, out, 1 << 20)
-        if sha256_file(tmp) != gc.base_image_sha256:
+        if sha256_file(tmp) != expected_sha256:
             tmp.unlink()
             die("downloaded image failed SHA256 verification")
         tmp.replace(img)

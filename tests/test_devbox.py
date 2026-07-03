@@ -1,6 +1,22 @@
+import subprocess
+
 import pytest
 
 import devbox
+
+
+class _FakeResponse:
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self):
+        return self._data
 
 
 # ---- GlobalConfig -------------------------------------------------------
@@ -10,7 +26,6 @@ def test_global_config_defaults_when_missing(tmp_path):
     assert gc.network == devbox.DEFAULT_NETWORK
     assert gc.cache_dir == devbox.Path(devbox.DEFAULT_CACHE_DIR)
     assert gc.base_image_url == devbox.DEFAULT_BASE_IMAGE_URL
-    assert gc.base_image_sha256 == devbox.DEFAULT_BASE_IMAGE_SHA256
     assert gc.vcpus == devbox.DEFAULT_VCPUS
     assert gc.memory_mib == devbox.DEFAULT_MEMORY_MIB
     assert gc.disk_gb == devbox.DEFAULT_DISK_GB
@@ -25,7 +40,6 @@ cache_dir = "/tmp/custom-cache"
 
 [base_image]
 url = "https://example.com/image.img"
-sha256 = "deadbeef"
 
 [defaults]
 vcpus = 2
@@ -40,7 +54,6 @@ pubkey_path = "~/.ssh/other.pub"
     assert gc.network == "custom-net"
     assert gc.cache_dir == devbox.Path("/tmp/custom-cache")
     assert gc.base_image_url == "https://example.com/image.img"
-    assert gc.base_image_sha256 == "deadbeef"
     assert gc.vcpus == 2
     assert gc.memory_mib == 4096
     assert gc.disk_gb == 20
@@ -162,3 +175,70 @@ def test_render_cloud_init_missing_pubkey_dies(tmp_path):
     ci.write_text("x: %DEVBOX_USER%\n")
     with pytest.raises(SystemExit):
         devbox.render_cloud_init(ci, "alice", tmp_path / "missing.pub")
+
+
+# ---- fetch_verified_checksum -----------------------------------------------
+def test_fetch_verified_checksum_missing_gpgv(monkeypatch):
+    monkeypatch.setattr(devbox.shutil, "which", lambda name: None)
+    with pytest.raises(SystemExit):
+        devbox.fetch_verified_checksum("https://example.com/dir/image.img")
+
+
+def test_fetch_verified_checksum_missing_keyring(monkeypatch, tmp_path):
+    monkeypatch.setattr(devbox.shutil, "which", lambda name: "/usr/bin/gpgv")
+    monkeypatch.setattr(devbox, "CLOUDIMAGE_KEYRING_PATH", tmp_path / "missing.gpg")
+    with pytest.raises(SystemExit):
+        devbox.fetch_verified_checksum("https://example.com/dir/image.img")
+
+
+def test_fetch_verified_checksum_success(monkeypatch, tmp_path):
+    keyring = tmp_path / "keyring.gpg"
+    keyring.write_bytes(b"fake-keyring")
+    monkeypatch.setattr(devbox.shutil, "which", lambda name: "/usr/bin/gpgv")
+    monkeypatch.setattr(devbox, "CLOUDIMAGE_KEYRING_PATH", keyring)
+
+    sums = (
+        b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa *other-file.img\n"
+        b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef *image.img\n"
+    )
+
+    def fake_urlopen(url):
+        return _FakeResponse(b"fake-signature" if url.endswith("SHA256SUMS.gpg") else sums)
+
+    monkeypatch.setattr(devbox.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        devbox.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""),
+    )
+
+    checksum = devbox.fetch_verified_checksum("https://example.com/dir/image.img")
+    assert checksum == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+
+def test_fetch_verified_checksum_gpg_verification_fails(monkeypatch, tmp_path):
+    keyring = tmp_path / "keyring.gpg"
+    keyring.write_bytes(b"fake-keyring")
+    monkeypatch.setattr(devbox.shutil, "which", lambda name: "/usr/bin/gpgv")
+    monkeypatch.setattr(devbox, "CLOUDIMAGE_KEYRING_PATH", keyring)
+    monkeypatch.setattr(devbox.urllib.request, "urlopen", lambda url: _FakeResponse(b"data"))
+    monkeypatch.setattr(
+        devbox.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "bad signature"),
+    )
+    with pytest.raises(SystemExit):
+        devbox.fetch_verified_checksum("https://example.com/dir/image.img")
+
+
+def test_fetch_verified_checksum_filename_not_listed(monkeypatch, tmp_path):
+    keyring = tmp_path / "keyring.gpg"
+    keyring.write_bytes(b"fake-keyring")
+    monkeypatch.setattr(devbox.shutil, "which", lambda name: "/usr/bin/gpgv")
+    monkeypatch.setattr(devbox, "CLOUDIMAGE_KEYRING_PATH", keyring)
+    sums = b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef *other-file.img\n"
+    monkeypatch.setattr(devbox.urllib.request, "urlopen", lambda url: _FakeResponse(sums))
+    monkeypatch.setattr(
+        devbox.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""),
+    )
+    with pytest.raises(SystemExit):
+        devbox.fetch_verified_checksum("https://example.com/dir/image.img")

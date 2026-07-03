@@ -10,10 +10,12 @@ locate their own markers.
 
 - Debian/Ubuntu/Pop!_OS with libvirt + qemu:
   ```
-  sudo apt install virtinst libvirt-daemon-system qemu-system-x86
+  sudo apt install virtinst libvirt-daemon-system qemu-system-x86 ubuntu-cloudimage-keyring
   ```
   Run as a user in the `libvirt` group (so `qemu:///system` works without
-  sudo), or invoke `devbox` with sudo.
+  sudo), or invoke `devbox` with sudo. `ubuntu-cloudimage-keyring` provides
+  Canonical's signing key at `/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg`,
+  used by `devbox create` to verify the base image's checksum (see below).
 - [`uv`](https://docs.astral.sh/uv/) — `devbox` has no external Python
   dependencies, but `uv` manages its install and runtime environment.
 
@@ -44,7 +46,6 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
 
    [base_image]
    url = "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img"
-   sha256 = "0c9fb915bab0b36b361d3bf8aeae2115dda19d81a306656964de048033481670"
 
    [defaults]
    vcpus = 6
@@ -54,6 +55,15 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    [ssh]
    pubkey_path = "~/.ssh/id_ed25519.pub"
    ```
+
+   There's no `sha256` field: `devbox create` fetches `SHA256SUMS` +
+   `SHA256SUMS.gpg` from alongside the image URL, verifies the signature
+   against Canonical's cloud-image signing key (`gpgv` +
+   `ubuntu-cloudimage-keyring`, from Requirements above), and uses the
+   checksum it lists. This avoids pinning a hash by hand — `.../release/...`
+   URLs are mutable (Canonical overwrites the file in place on respins), so
+   a hand-pinned checksum inevitably goes stale and breaks `create` until
+   someone updates it.
 2. **SSH `Include`** — `devbox host` (see "jj sync" below) appends `Include
    ~/.config/devbox/ssh/*.conf` to `~/.ssh/config` the first time it runs, so
    there's nothing to do here manually; it's idempotent.
