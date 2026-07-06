@@ -35,6 +35,15 @@ than guessing. Everything else in the global config (base image,
 vcpus/memory/disk defaults, ssh pubkey path) has a sensible built-in
 default and usually needs no setup either.
 
+GitHub auth is separate and never required: `[github] token`, no host
+fallback — deliberately a fine-grained PAT the user scopes themselves in
+devbox's config, not whatever `gh auth login` session happens to exist on
+the host. It only matters for private repos or pushing back to GitHub from
+inside the sandbox — `devbox create` just prints a note and continues if
+it's unset, which is fine for public repos. If the project needs one and
+`[github].token` isn't set, ask the user to add it rather than pulling a
+token from anywhere else.
+
 ## 3. Decide the repo bootstrap mode
 
 Ask: does the project already have a git remote (something to `jj git
@@ -50,7 +59,7 @@ clone`)?
   devbox host                                     # prints alias, e.g. devbox-<name>
   jj git remote add sandbox ssh://<alias>/home/<user>/<dir>
   jj bookmark set main -r @ --allow-backwards     # bookmark name MUST be "main"
-  jj git push --remote sandbox --allow-new -b main
+  jj git push --remote sandbox -b main
   ```
   The bookmark name **must** be exactly `main` — the sandbox repo is
   initialized with `git init --initial-branch=main`, and
@@ -122,9 +131,9 @@ template and driven by `[repo]` above. Every other top-level key (e.g.
 defaults `hostname` to the project's `name`.
 
 `%DEVBOX_USER%`, `%DEVBOX_SSH_PUBKEY%`, `%DEVBOX_JJ_NAME%`,
-`%DEVBOX_JJ_EMAIL%`, `%DEVBOX_REPO_MODE%`, `%DEVBOX_REPO_DIR%`,
-`%DEVBOX_REPO_URL%` are available as literal `%TOKEN%` substitutions in this
-file, same as the common template.
+`%DEVBOX_JJ_EMAIL%`, `%DEVBOX_GITHUB_TOKEN%`, `%DEVBOX_REPO_MODE%`,
+`%DEVBOX_REPO_DIR%`, `%DEVBOX_REPO_URL%` are available as literal `%TOKEN%`
+substitutions in this file, same as the common template.
 
 ## 6. Exclude `.devbox/` locally
 

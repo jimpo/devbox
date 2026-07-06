@@ -7,11 +7,12 @@
 # being handed to virt-install. See devbox's README for the merge algorithm.
 #
 # %DEVBOX_USER%, %DEVBOX_SSH_PUBKEY%, %DEVBOX_JJ_NAME%, %DEVBOX_JJ_EMAIL%,
-# %DEVBOX_REPO_MODE%, %DEVBOX_REPO_DIR%, %DEVBOX_REPO_URL% are substituted by
-# literal %TOKEN% replacement (not {{...}}, which collides with cloud-init's
-# own jinja syntax and with valid YAML flow-mapping syntax) BEFORE this file
-# is parsed as YAML - this comment itself is stripped during that parse, and
-# devbox prepends a fresh #cloud-config header to the merged result.
+# %DEVBOX_GITHUB_TOKEN%, %DEVBOX_REPO_MODE%, %DEVBOX_REPO_DIR%,
+# %DEVBOX_REPO_URL% are substituted by literal %TOKEN% replacement (not
+# {{...}}, which collides with cloud-init's own jinja syntax and with valid
+# YAML flow-mapping syntax) BEFORE this file is parsed as YAML - this
+# comment itself is stripped during that parse, and devbox prepends a fresh
+# #cloud-config header to the merged result.
 
 package_update: true
 package_upgrade: false
@@ -24,6 +25,7 @@ packages:
   - git
   - git-lfs          # gitconfig declares the lfs clean/smudge filters
   - ca-certificates
+  - gh               # GitHub CLI; also used as git's HTTPS credential helper
 
 # `- default` also creates the cloud image's default `ubuntu` user (key-only,
 # no password) as a fallback; %DEVBOX_USER% is the account you actually log
@@ -133,6 +135,18 @@ write_files:
       curl -fLo "$HOME/.vim/autoload/plug.vim" --create-dirs \
         https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
       vim -E -s -u "$HOME/.vimrc" +PlugInstall +qall || true
+
+      # -------------------------------------------------------------------
+      # GitHub auth (best-effort): wires up `gh` and git/jj HTTPS auth for
+      # github.com if [github].token (a fine-grained PAT) was set in
+      # devbox's global config. Skipped entirely if unset - cloning a public
+      # repo works fine unauthenticated. Runs before the repo bootstrap below
+      # so a "clone" of a private repo can succeed.
+      # -------------------------------------------------------------------
+      if [ -n "%DEVBOX_GITHUB_TOKEN%" ]; then
+        echo "%DEVBOX_GITHUB_TOKEN%" | gh auth login --with-token
+        gh auth setup-git
+      fi
 
       # -------------------------------------------------------------------
       # Repo bootstrap (.devbox/config.toml [repo]): "clone" pulls an

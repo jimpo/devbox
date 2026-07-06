@@ -31,6 +31,7 @@ def test_global_config_defaults_when_missing(tmp_path):
     assert gc.disk_gb == devbox.DEFAULT_DISK_GB
     assert gc.jj_name is None
     assert gc.jj_email is None
+    assert gc.github_token is None
 
 
 def test_global_config_overrides(tmp_path):
@@ -54,6 +55,9 @@ pubkey_path = "~/.ssh/other.pub"
 [jj]
 name = "Alice Example"
 email = "alice@example.com"
+
+[github]
+token = "ghp_exampletoken"
 """)
     gc = devbox.GlobalConfig.load(path)
     assert gc.libvirt_uri == "qemu:///session"
@@ -66,6 +70,7 @@ email = "alice@example.com"
     assert gc.ssh_pubkey_path == devbox.Path("~/.ssh/other.pub").expanduser()
     assert gc.jj_name == "Alice Example"
     assert gc.jj_email == "alice@example.com"
+    assert gc.github_token == "ghp_exampletoken"
 
 
 def test_global_config_partial_override_keeps_other_defaults(tmp_path):
@@ -236,6 +241,7 @@ def common_template(tmp_path, monkeypatch):
         "  - path: /tmp/jj-identity\n"
         "    content: |\n"
         "      %DEVBOX_JJ_NAME% <%DEVBOX_JJ_EMAIL%>\n"
+        "      github-token: %DEVBOX_GITHUB_TOKEN%\n"
         "runcmd:\n"
         "  - [\"echo\", \"%DEVBOX_REPO_MODE%\", \"%DEVBOX_REPO_DIR%\", \"%DEVBOX_REPO_URL%\"]\n"
     )
@@ -258,38 +264,34 @@ def _project(cloud_config=None, mode="none", dir="", url=None):
     )
 
 
-def test_render_cloud_config_substitutes_tokens(common_template, pubkey):
-    gc = devbox.GlobalConfig(
+def _global_config(pubkey_path, jj_name="Alice Example", jj_email="alice@example.com",
+                    github_token="ghp_testtoken"):
+    return devbox.GlobalConfig(
         libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
         base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
-        ssh_pubkey_path=pubkey, jj_name="Alice Example", jj_email="alice@example.com",
+        ssh_pubkey_path=pubkey_path, jj_name=jj_name, jj_email=jj_email, github_token=github_token,
     )
+
+
+def test_render_cloud_config_substitutes_tokens(common_template, pubkey):
+    gc = _global_config(pubkey)
     rendered = devbox.render_cloud_config(_project(mode="clone", dir="myrepo", url="https://example.com/x"), gc)
     assert "%DEVBOX_" not in rendered
     assert "name: alice" in rendered
     assert "ssh-ed25519 AAAAtest user@host" in rendered
     assert "Alice Example <alice@example.com>" in rendered
+    assert "github-token: ghp_testtoken" in rendered
     import yaml
     assert yaml.safe_load(rendered)["runcmd"][0] == ["echo", "clone", "myrepo", "https://example.com/x"]
 
 
 def test_render_cloud_config_has_cloud_config_header(common_template, pubkey):
-    gc = devbox.GlobalConfig(
-        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
-        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
-        ssh_pubkey_path=pubkey, jj_name="Alice Example", jj_email="alice@example.com",
-    )
-    rendered = devbox.render_cloud_config(_project(), gc)
+    rendered = devbox.render_cloud_config(_project(), _global_config(pubkey))
     assert rendered.startswith("#cloud-config\n")
 
 
 def test_render_cloud_config_hostname_defaults_from_project_name(common_template, pubkey):
-    gc = devbox.GlobalConfig(
-        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
-        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
-        ssh_pubkey_path=pubkey, jj_name="Alice Example", jj_email="alice@example.com",
-    )
-    rendered = devbox.render_cloud_config(_project(), gc)
+    rendered = devbox.render_cloud_config(_project(), _global_config(pubkey))
     import yaml
     assert yaml.safe_load(rendered)["hostname"] == "test-project"
 
@@ -297,12 +299,7 @@ def test_render_cloud_config_hostname_defaults_from_project_name(common_template
 def test_render_cloud_config_merges_project_fragment(common_template, pubkey, tmp_path):
     cloud_config = tmp_path / "cloud-config.yaml"
     cloud_config.write_text("packages:\n  - build-essential\nhostname: project-hostname\n")
-    gc = devbox.GlobalConfig(
-        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
-        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
-        ssh_pubkey_path=pubkey, jj_name="Alice Example", jj_email="alice@example.com",
-    )
-    rendered = devbox.render_cloud_config(_project(cloud_config=cloud_config), gc)
+    rendered = devbox.render_cloud_config(_project(cloud_config=cloud_config), _global_config(pubkey))
     import yaml
     parsed = yaml.safe_load(rendered)
     assert parsed["packages"] == ["zsh", "build-essential"]
@@ -312,11 +309,7 @@ def test_render_cloud_config_merges_project_fragment(common_template, pubkey, tm
 def test_render_cloud_config_missing_jj_name_dies_when_no_host_fallback(common_template, pubkey, monkeypatch):
     # No [jj] name in global config, and no `jj` binary on the host to fall back to.
     monkeypatch.setattr(devbox.shutil, "which", lambda name: None)
-    gc = devbox.GlobalConfig(
-        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
-        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
-        ssh_pubkey_path=pubkey, jj_name=None, jj_email="alice@example.com",
-    )
+    gc = _global_config(pubkey, jj_name=None)
     with pytest.raises(SystemExit):
         devbox.render_cloud_config(_project(), gc)
 
@@ -330,23 +323,37 @@ def test_render_cloud_config_falls_back_to_host_jj_config(common_template, pubke
             args, 0, {"user.name": "Host Jj Name", "user.email": "host@example.com"}[args[-1]] + "\n", "",
         ),
     )
-    gc = devbox.GlobalConfig(
-        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
-        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
-        ssh_pubkey_path=pubkey, jj_name=None, jj_email=None,
-    )
+    gc = _global_config(pubkey, jj_name=None, jj_email=None)
     rendered = devbox.render_cloud_config(_project(), gc)
     assert "Host Jj Name <host@example.com>" in rendered
 
 
 def test_render_cloud_config_missing_pubkey_dies(common_template, tmp_path):
-    gc = devbox.GlobalConfig(
-        libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
-        base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
-        ssh_pubkey_path=tmp_path / "missing.pub", jj_name="Alice Example", jj_email="alice@example.com",
-    )
+    gc = _global_config(tmp_path / "missing.pub")
     with pytest.raises(SystemExit):
         devbox.render_cloud_config(_project(), gc)
+
+
+# ---- resolve_github_token ---------------------------------------------------
+def test_resolve_github_token_from_config():
+    gc = _global_config(devbox.Path("/nonexistent"), github_token="ghp_fromconfig")
+    assert devbox.resolve_github_token(gc) == "ghp_fromconfig"
+
+
+def test_resolve_github_token_none_when_unset_is_not_fatal():
+    # An unresolved GitHub token must NOT raise - it's best-effort (public
+    # repos / non-"clone" [repo] modes never need it).
+    gc = _global_config(devbox.Path("/nonexistent"), github_token=None)
+    assert devbox.resolve_github_token(gc) is None
+
+
+def test_render_cloud_config_empty_token_when_unset(common_template, pubkey, capsys):
+    gc = _global_config(pubkey, github_token=None)
+    rendered = devbox.render_cloud_config(_project(), gc)
+    import yaml
+    content = yaml.safe_load(rendered)["write_files"][0]["content"]
+    assert content.splitlines()[1] == "github-token: "
+    assert "no GitHub token found" in capsys.readouterr().out
 
 
 # ---- fetch_verified_checksum -----------------------------------------------

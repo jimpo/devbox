@@ -92,6 +92,7 @@ class GlobalConfig:
     ssh_pubkey_path: Path
     jj_name: Optional[str]
     jj_email: Optional[str]
+    github_token: Optional[str] = None
 
     @classmethod
     def load(cls, path: Path = GLOBAL_CONFIG_PATH) -> "GlobalConfig":
@@ -103,6 +104,7 @@ class GlobalConfig:
         defaults = data.get("defaults", {})
         ssh = data.get("ssh", {})
         jj = data.get("jj", {})
+        github = data.get("github", {})
         return cls(
             libvirt_uri=data.get("libvirt_uri", DEFAULT_LIBVIRT_URI),
             network=data.get("network", DEFAULT_NETWORK),
@@ -112,6 +114,9 @@ class GlobalConfig:
             memory_mib=defaults.get("memory_mib", DEFAULT_MEMORY_MIB),
             disk_gb=defaults.get("disk_gb", DEFAULT_DISK_GB),
             ssh_pubkey_path=Path(ssh.get("pubkey_path", DEFAULT_SSH_PUBKEY_PATH)).expanduser(),
+            # A fine-grained PAT the user scopes themselves. Left unset, the
+            # sandbox just gets no GitHub HTTPS auth (fine for public repos).
+            github_token=github.get("token"),
             # No built-in default, unlike every other field above - there's no
             # sensible guess for a person's identity. Validated lazily inside
             # render_cloud_config, not here, so subcommands that never render
@@ -336,8 +341,21 @@ def resolve_jj_identity(gc: GlobalConfig) -> tuple:
     return name, email
 
 
+def resolve_github_token(gc: GlobalConfig) -> Optional[str]:
+    """[github] token from global config. Best-effort, not required: cloning
+    a public repo or [repo] mode "push"/"none" never need GitHub HTTPS auth
+    in the sandbox at all."""
+    return gc.github_token
+
+
 def render_cloud_config(project: ProjectConfig, gc: GlobalConfig) -> str:
     jj_name, jj_email = resolve_jj_identity(gc)
+    github_token = resolve_github_token(gc)
+    if github_token is None:
+        print("note: no GitHub token found ([github].token in global config) - "
+              "the sandbox will have no GitHub HTTPS auth. Fine for cloning public "
+              "repos; set one up if the project needs a private repo or gh/git "
+              "pushes to GitHub.")
     if not gc.ssh_pubkey_path.is_file():
         die(f"SSH public key not found: {gc.ssh_pubkey_path}")
     if not COMMON_CLOUD_CONFIG_PATH.is_file():
@@ -349,6 +367,7 @@ def render_cloud_config(project: ProjectConfig, gc: GlobalConfig) -> str:
         "DEVBOX_SSH_PUBKEY": gc.ssh_pubkey_path.read_text().strip(),
         "DEVBOX_JJ_NAME": jj_name,
         "DEVBOX_JJ_EMAIL": jj_email,
+        "DEVBOX_GITHUB_TOKEN": github_token or "",
         "DEVBOX_REPO_MODE": project.repo.mode,
         "DEVBOX_REPO_DIR": project.repo.dir,
         "DEVBOX_REPO_URL": project.repo.url or "",

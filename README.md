@@ -61,6 +61,9 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    [jj]
    name = "Jim Posen"
    email = "jim.posen@gmail.com"
+
+   [github]
+   token = "ghp_..."
    ```
 
    `[jj]` is optional — if unset, `devbox create` falls back to the host's
@@ -71,6 +74,23 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    devbox's common cloud-config template always runs
    `jj config set --user user.name/user.email` in the sandbox, using
    whichever source resolved.
+
+   `[github]` is also optional, but **has no host fallback** (unlike
+   `[jj]`) — deliberately: use a
+   [fine-grained personal access token](https://github.com/settings/personal-access-tokens)
+   scoped to just the repos the sandbox needs, not whatever broad-scoped
+   session `gh auth login` happens to have cached on the host. An unresolved
+   GitHub token is never fatal: it's only used to wire up `gh auth login` +
+   `gh auth setup-git` in the sandbox (so `git`/`jj git`/`gh` against
+   `github.com` authenticate transparently), which is only needed for
+   private repos or pushing back to GitHub from inside the sandbox. Cloning
+   a public repo works fine with no token at all — `devbox create` just
+   prints a note and moves on if it's unset. The token is embedded directly
+   in the rendered cloud-config (same mechanism as the SSH pubkey/jj
+   identity) and ends up in plaintext inside the sandbox's `gh` config — an
+   accepted trade-off for a personal, single-user VM (mitigated by scoping
+   the PAT narrowly in the first place), same as this project's Docker
+   sandbox counterpart already does with `GITHUB_PERSONAL_ACCESS_TOKEN`.
 
    There's no `sha256` field: `devbox create` fetches `SHA256SUMS` +
    `SHA256SUMS.gpg` from alongside the image URL, verifies the signature
@@ -121,18 +141,18 @@ entirely optional: if a project needs nothing beyond dotfiles/jj/Claude
 Code/base packages, skip this file.
 
 Both files support the same `%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%` (plus
-`%DEVBOX_JJ_NAME%`/`%DEVBOX_JJ_EMAIL%`/`%DEVBOX_REPO_MODE%`/
-`%DEVBOX_REPO_DIR%`/`%DEVBOX_REPO_URL%`) placeholders as the common
-template, filled in by literal text substitution before parsing (not
-`{{...}}`, which collides with cloud-init's own jinja syntax and with valid
-YAML flow-mapping syntax).
+`%DEVBOX_JJ_NAME%`/`%DEVBOX_JJ_EMAIL%`/`%DEVBOX_GITHUB_TOKEN%`/
+`%DEVBOX_REPO_MODE%`/`%DEVBOX_REPO_DIR%`/`%DEVBOX_REPO_URL%`) placeholders
+as the common template, filled in by literal text substitution before
+parsing (not `{{...}}`, which collides with cloud-init's own jinja syntax
+and with valid YAML flow-mapping syntax).
 
 ### How cloud-config merging works
 
 devbox ships its own `common-cloud-config.yaml` (packages, the dev user,
-jj install + identity, Claude Code + `github`/`linear` plugins, dotfiles,
-and the `[repo]`-driven clone/push bootstrap). `devbox create` merges it
-with the project's optional `.devbox/cloud-config.yaml`:
+jj install + identity, GitHub auth (`gh`) + Claude Code `github`/`linear`
+plugins, dotfiles, and the `[repo]`-driven clone/push bootstrap). `devbox
+create` merges it with the project's optional `.devbox/cloud-config.yaml`:
 
 - `%TOKEN%` substitution happens on each file's raw text independently,
   *before* either is parsed as YAML.
