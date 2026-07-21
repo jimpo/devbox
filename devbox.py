@@ -21,8 +21,12 @@ or invoke with sudo.
     devbox ssh [args...]       # ssh into the VM
     devbox status              # cloud-init progress + tail provision.log
     devbox provision           # re-run the provisioning script over SSH (reconverge)
+    devbox list                # list devbox-managed instances on this host
     devbox host                # refresh the SSH alias used for jj-sync
     devbox destroy             # tear down, removing the overlay disk
+
+An instance is no longer the same thing as a project: a project is a label,
+and `--name` targets a specific instance (default: the project's libvirt one).
 """
 from __future__ import annotations
 
@@ -38,6 +42,8 @@ import tempfile
 import tomllib
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -60,6 +66,19 @@ CLOUD_INIT_PROVISION_PATH = "/usr/local/bin/provision-common.sh"
 # Provisioning output log, under the dev user's $HOME on the box - written by
 # both the first-boot runcmd and `devbox provision`, and tailed by `devbox status`.
 PROVISION_LOG = "provision.log"
+
+# Providers a project can launch instances on. libvirt is the only one for now;
+# the AWS provider lands in JIM-66. `provider` in a project's config and the
+# `--provider` flag are validated against this.
+DEFAULT_PROVIDER = "libvirt"
+PROVIDERS = ("libvirt",)
+
+# libvirt domain <metadata> stamp: how `devbox list` tells its own domains apart
+# from every other domain on the host (the equivalent of cfleet's EC2 tags).
+# Written at create, read back at list. The namespace URI is an opaque, stable
+# identifier - it need not resolve to anything.
+DEVBOX_METADATA_NS = "https://github.com/jimpo/devbox"
+DEVBOX_METADATA_KEY = "devbox"
 
 GLOBAL_CONFIG_PATH = Path.home() / ".config" / "devbox" / "config.toml"
 SSH_DIR = Path.home() / ".config" / "devbox" / "ssh"
@@ -150,7 +169,8 @@ class RepoConfig:
 
 @dataclasses.dataclass
 class ProjectConfig:
-    name: str
+    project: str                  # label/tag on instances (default: marker dir basename)
+    provider: str                 # default provider for a bare `create` ("libvirt")
     cloud_config: Optional[Path]  # .devbox/cloud-config.yaml, if present (now optional)
     user: str
     vcpus: int
@@ -199,12 +219,23 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
     config_path = devbox_dir / PROJECT_CONFIG_FILE
     data = _load_toml(config_path)
 
-    if "name" not in data:
-        die(f"{config_path}: missing required field 'name'")
+    # `name` used to be "the VM"; an instance is no longer a project (a project
+    # can now have several). Fail loudly rather than silently ignoring a stale
+    # field so the mismatch is obvious.
+    if "name" in data:
+        die(f"{config_path}: 'name' is no longer a project field - an instance is "
+            f"not a project. Remove it; the project defaults to the directory name "
+            f"('{marker_dir.name}', override with 'project = ...'). Address a specific "
+            f"instance with --name.")
+
+    provider = data.get("provider", DEFAULT_PROVIDER)
+    if provider not in PROVIDERS:
+        die(f"{config_path}: provider must be one of {PROVIDERS} (got {provider!r})")
 
     cloud_config_path = devbox_dir / PROJECT_CLOUD_CONFIG_FILE
     return ProjectConfig(
-        name=data["name"],
+        project=data.get("project", marker_dir.name),
+        provider=provider,
         cloud_config=cloud_config_path if cloud_config_path.is_file() else None,
         user=data.get("user", os.environ.get("USER", "")),
         vcpus=data.get("vcpus", global_config.vcpus),
@@ -212,6 +243,14 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         disk_gb=data.get("disk_gb", global_config.disk_gb),
         repo=_resolve_repo_config(data, config_path),
     )
+
+
+def resolve_instance(args: argparse.Namespace, project: ProjectConfig) -> str:
+    """Which instance a command targets. Explicit --name wins; otherwise the
+    project's bare-named libvirt default (= the project name). Cloud instances
+    are always named, so they only ever match via --name - that seam is here for
+    when the AWS provider lands (JIM-66); today every instance is libvirt."""
+    return args.name or project.project
 
 
 # ---- libvirt helpers ---------------------------------------------------------
@@ -233,6 +272,115 @@ def get_ip(uri: str, name: str) -> Optional[str]:
         if len(parts) >= 4 and parts[2] == "ipv4":
             return parts[3].split("/")[0]
     return None
+
+
+# ---- libvirt <metadata> stamp & instance discovery ---------------------------
+def build_metadata_xml(project: str, provider: str, created_at: str) -> str:
+    """The <devbox> element stamped into a domain's <metadata> at create."""
+    dev = ET.Element("devbox", {"xmlns": DEVBOX_METADATA_NS})
+    ET.SubElement(dev, "project").text = project
+    ET.SubElement(dev, "provider").text = provider
+    ET.SubElement(dev, "createdAt").text = created_at
+    ET.SubElement(dev, "managedBy").text = "devbox"
+    return ET.tostring(dev, encoding="unicode")
+
+
+def stamp_domain(uri: str, name: str, project: str, provider: str, created_at: str) -> None:
+    """Mark a freshly-created domain as devbox-managed. Written to both the live
+    and persistent config: `list` reads a running domain's *live* XML, so a
+    config-only stamp would leave a just-created (running) box invisible until it
+    was restarted."""
+    xml = build_metadata_xml(project, provider, created_at)
+    r = virsh(uri, "metadata", name, "--live", "--config",
+              "--uri", DEVBOX_METADATA_NS, "--key", DEVBOX_METADATA_KEY, "--set", xml,
+              check=False, capture=True)
+    if r.returncode != 0:
+        # e.g. domain not live yet - at least persist to the config so the stamp
+        # isn't lost (it'll apply to the live XML on next start).
+        virsh(uri, "metadata", name, "--config",
+              "--uri", DEVBOX_METADATA_NS, "--key", DEVBOX_METADATA_KEY, "--set", xml,
+              check=False)
+
+
+def read_domain_instance(uri: str, name: str) -> Optional[dict]:
+    """Parse a domain's XML for the devbox stamp + its resources. Returns None
+    for domains that aren't devbox-managed (no stamp) or can't be read - that's
+    how `list` filters the host's unrelated domains out."""
+    r = virsh(uri, "dumpxml", name, check=False, capture=True)
+    if r.returncode != 0:
+        return None
+    try:
+        root = ET.fromstring(r.stdout)
+    except ET.ParseError:
+        return None
+    meta = root.find("metadata")
+    dev = meta.find(f"{{{DEVBOX_METADATA_NS}}}devbox") if meta is not None else None
+    if dev is None:
+        return None  # not a devbox-managed domain
+
+    def stamp(tag: str) -> Optional[str]:
+        el = dev.find(f"{{{DEVBOX_METADATA_NS}}}{tag}")
+        return el.text if el is not None else None
+
+    def intval(tag: str) -> Optional[int]:
+        el = root.find(tag)
+        return int(el.text) if el is not None and el.text and el.text.isdigit() else None
+
+    return {
+        "name": name,
+        "project": stamp("project"),
+        "provider": stamp("provider") or "libvirt",
+        "created_at": stamp("createdAt"),
+        "vcpus": intval("vcpu"),
+        "memory_kib": intval("memory"),  # <memory> is the allocated max, in KiB
+    }
+
+
+def list_libvirt_instances(uri: str) -> list:
+    """Every devbox-managed libvirt domain on this host, with state attached."""
+    r = virsh(uri, "list", "--all", "--name", check=False, capture=True)
+    instances = []
+    for name in (r.stdout or "").split():
+        info = read_domain_instance(uri, name)
+        if info is None:
+            continue
+        info["state"] = domain_state(uri, name) or "unknown"
+        instances.append(info)
+    instances.sort(key=lambda i: i["name"])
+    return instances
+
+
+def _format_resources(vcpus: Optional[int], memory_kib: Optional[int]) -> str:
+    if vcpus is None or memory_kib is None:
+        return "?"
+    return f"{vcpus} vCPU / {memory_kib / (1024 * 1024):g} GiB"
+
+
+def _format_age(created_at: Optional[str]) -> str:
+    """Coarse age since create (m/h/d). Note: this is time-since-`devbox create`,
+    a stand-in for uptime - close for the common create-once-keep-running box,
+    but it doesn't reset across stop/start (precise guest uptime needs the guest
+    agent, out of scope). Shown only for running instances."""
+    if not created_at:
+        return "?"
+    try:
+        created = datetime.fromisoformat(created_at)
+    except ValueError:
+        return "?"
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    secs = max(0, int((datetime.now(timezone.utc) - created).total_seconds()))
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
+
+
+def _print_table(rows: list) -> None:
+    widths = [max(len(str(row[i])) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        print("  ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
 
 
 def sha256_file(path: Path) -> str:
@@ -429,7 +577,9 @@ def render_cloud_config(project: ProjectConfig, gc: GlobalConfig) -> str:
         project_data = {}
 
     merged = merge_cloud_config(common, project_data)
-    merged.setdefault("hostname", project.name)
+    # The default libvirt instance is bare-named = the project, so its hostname
+    # is the project name unless a fragment overrides it.
+    merged.setdefault("hostname", project.project)
 
     body = yaml.dump(merged, Dumper=_CloudConfigDumper, sort_keys=False, default_flow_style=False)
     # yaml.safe_load drops comments, so the magic first-line marker cloud-init's
@@ -449,12 +599,26 @@ def truncate_known_hosts() -> None:
 
 # ---- subcommands --------------------------------------------------------------
 def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    provider = args.provider or project.provider
+    if provider not in PROVIDERS:
+        die(f"provider '{provider}' is not supported yet (AWS lands in JIM-66); "
+            f"choose one of {PROVIDERS}")
+    # libvirt's one instance per project is the bare-named default (= project);
+    # arbitrary --name is reserved for cloud instances, which don't exist yet.
+    if args.name:
+        die("libvirt instances are the project's bare default (name = the project); "
+            "--name is reserved for cloud instances, not supported yet (JIM-66)")
+    name = project.project
+
     for binary in ("virt-install", "virsh"):
         if not shutil.which(binary):
             die(f"'{binary}' not found. Install: sudo apt install virtinst libvirt-daemon-system qemu-system-x86")
 
-    if domain_state(gc.libvirt_uri, project.name) is not None:
-        die(f"domain '{project.name}' is already defined; run `devbox destroy` first")
+    # Global-uniqueness of the instance name. The union of providers is just
+    # libvirt today, so an existing domain of this name (devbox-managed or not)
+    # is the whole check; the AWS provider will extend it.
+    if domain_state(gc.libvirt_uri, name) is not None:
+        die(f"domain '{name}' is already defined; run `devbox destroy` first")
 
     net = virsh(gc.libvirt_uri, "net-info", gc.network, check=False, capture=True).stdout or ""
     if "Active:" not in net or "yes" not in net.lower().split("active:")[-1].splitlines()[0]:
@@ -490,11 +654,11 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
 
         # virt-install makes a qcow2 overlay (in the default pool, via libvirtd)
         # backed by the cached image, builds the NoCloud seed, and boots it.
-        print(f"==> Creating domain '{project.name}' ...")
+        print(f"==> Creating domain '{name}' ...")
         subprocess.run([
             "virt-install",
             "--connect", gc.libvirt_uri,
-            "--name", project.name,
+            "--name", name,
             "--memory", str(project.memory_mib),
             "--vcpus", str(project.vcpus),
             "--cpu", "host-passthrough",
@@ -509,67 +673,78 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
     finally:
         os.unlink(tmp_path)
 
+    # Stamp the domain so `devbox list` recognizes it (and, from day one,
+    # records provider + created-at for a future auto-stop reaper).
+    stamp_domain(gc.libvirt_uri, name, project.project, provider,
+                 datetime.now(timezone.utc).isoformat())
+
     truncate_known_hosts()
 
     print(f"""
-==> '{project.name}' is booting. cloud-init provisioning runs on first boot (several minutes).
+==> '{name}' is booting. cloud-init provisioning runs on first boot (several minutes).
 
   IP:        devbox -C {args.project_dir or '.'} ip
   SSH:       devbox -C {args.project_dir or '.'} ssh
   Progress:  devbox -C {args.project_dir or '.'} status
-  Console:   virsh -c {gc.libvirt_uri} console {project.name}   # ctrl-] to exit
+  Console:   virsh -c {gc.libvirt_uri} console {name}   # ctrl-] to exit
 """)
 
 
 def cmd_up(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    state = domain_state(gc.libvirt_uri, project.name)
+    name = resolve_instance(args, project)
+    state = domain_state(gc.libvirt_uri, name)
     if state is None:
-        die(f"domain '{project.name}' is not defined; run `devbox create` first")
+        die(f"domain '{name}' is not defined; run `devbox create` first")
     if state == "running":
-        print(f"domain '{project.name}' is already running.")
+        print(f"domain '{name}' is already running.")
         return
-    print(f"==> starting '{project.name}' ...")
-    virsh(gc.libvirt_uri, "start", project.name)
+    print(f"==> starting '{name}' ...")
+    virsh(gc.libvirt_uri, "start", name)
 
 
 def cmd_stop(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    state = domain_state(gc.libvirt_uri, project.name)
+    name = resolve_instance(args, project)
+    state = domain_state(gc.libvirt_uri, name)
     if state is None:
-        die(f"domain '{project.name}' is not defined; run `devbox create` first")
+        die(f"domain '{name}' is not defined; run `devbox create` first")
     if state != "running":
-        print(f"domain '{project.name}' is already stopped ({state}).")
+        print(f"domain '{name}' is already stopped ({state}).")
         return
-    print(f"==> stopping '{project.name}' ...")
-    virsh(gc.libvirt_uri, "shutdown", project.name)
+    print(f"==> stopping '{name}' ...")
+    virsh(gc.libvirt_uri, "shutdown", name)
 
 
 def cmd_destroy(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    virsh(gc.libvirt_uri, "destroy", project.name, check=False)
+    name = resolve_instance(args, project)
+    virsh(gc.libvirt_uri, "destroy", name, check=False)
     # --nvram is rejected by older libvirt without nvram; retry without it.
-    if virsh(gc.libvirt_uri, "undefine", project.name, "--remove-all-storage", "--nvram",
+    if virsh(gc.libvirt_uri, "undefine", name, "--remove-all-storage", "--nvram",
              check=False, capture=True).returncode != 0:
-        virsh(gc.libvirt_uri, "undefine", project.name, "--remove-all-storage", check=False)
-    print(f"Destroyed '{project.name}' (cached base image left in {gc.cache_dir}).")
+        virsh(gc.libvirt_uri, "undefine", name, "--remove-all-storage", check=False)
+    print(f"Destroyed '{name}' (cached base image left in {gc.cache_dir}).")
 
 
 def cmd_ip(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    ip = get_ip(gc.libvirt_uri, project.name)
+    name = resolve_instance(args, project)
+    ip = get_ip(gc.libvirt_uri, name)
     if not ip:
-        die(f"no IPv4 lease for '{project.name}' yet (still booting?). Try again shortly.")
+        die(f"no IPv4 lease for '{name}' yet (still booting?). Try again shortly.")
     print(ip)
 
 
 def cmd_ssh(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    ip = get_ip(gc.libvirt_uri, project.name)
+    name = resolve_instance(args, project)
+    ip = get_ip(gc.libvirt_uri, name)
     if not ip:
-        die(f"no IPv4 lease for '{project.name}' yet (still booting?).")
+        die(f"no IPv4 lease for '{name}' yet (still booting?).")
     os.execvp("ssh", ["ssh", f"{project.user}@{ip}", *args.ssh_args])
 
 
 def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    ip = get_ip(gc.libvirt_uri, project.name)
+    name = resolve_instance(args, project)
+    ip = get_ip(gc.libvirt_uri, name)
     if not ip:
-        die(f"no IPv4 lease for '{project.name}' yet (still booting?).")
+        die(f"no IPv4 lease for '{name}' yet (still booting?).")
     subprocess.run([
         "ssh", f"{project.user}@{ip}",
         "cloud-init status --long; echo ---; tail -n 80 ~/provision.log 2>/dev/null",
@@ -577,17 +752,18 @@ def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
 
 
 def cmd_provision(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    state = domain_state(gc.libvirt_uri, project.name)
+    name = resolve_instance(args, project)
+    state = domain_state(gc.libvirt_uri, name)
     if state is None:
-        die(f"domain '{project.name}' is not defined; run `devbox create` first")
+        die(f"domain '{name}' is not defined; run `devbox create` first")
     if state != "running":
-        die(f"domain '{project.name}' is not running ({state}); run `devbox up` first")
-    ip = get_ip(gc.libvirt_uri, project.name)
+        die(f"domain '{name}' is not running ({state}); run `devbox up` first")
+    ip = get_ip(gc.libvirt_uri, name)
     if not ip:
-        die(f"no IPv4 lease for '{project.name}' yet (still booting?).")
+        die(f"no IPv4 lease for '{name}' yet (still booting?).")
 
     script = render_provision_script(project, gc)
-    print(f"==> re-running provisioning on '{project.name}' ({ip}) ...")
+    print(f"==> re-running provisioning on '{name}' ({ip}) ...")
     # Pipe the rendered script over stdin, save it on the box, and run it,
     # tee'ing to ~/provision.log (the same log `devbox status` tails). Run under
     # `bash -c` with pipefail so a provisioning failure propagates through the
@@ -606,18 +782,39 @@ def cmd_provision(args: argparse.Namespace, gc: GlobalConfig, project: ProjectCo
             f"or ~/{PROVISION_LOG} on the box")
 
 
-def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    ip = get_ip(gc.libvirt_uri, project.name)
-    if not ip:
-        die(f"no IPv4 lease for '{project.name}' yet (still booting?).")
+def cmd_list(args: argparse.Namespace, gc: GlobalConfig, project: Optional[ProjectConfig]) -> None:
+    # Global view: every devbox-managed instance on this host, across projects.
+    # libvirt-only for now; the AWS half (account-wide) is unioned in at JIM-66.
+    instances = list_libvirt_instances(gc.libvirt_uri)
+    if not instances:
+        print("No devbox-managed instances.")
+        return
+    rows = [("NAME", "PROVIDER", "PROJECT", "STATE", "RESOURCES", "UP")]
+    for i in instances:
+        rows.append((
+            i["name"],
+            i["provider"],
+            i["project"] or "—",
+            i["state"],
+            _format_resources(i["vcpus"], i["memory_kib"]),
+            _format_age(i["created_at"]) if i["state"] == "running" else "—",
+        ))
+    _print_table(rows)
 
-    alias = f"devbox-{project.name}"
+
+def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    name = resolve_instance(args, project)
+    ip = get_ip(gc.libvirt_uri, name)
+    if not ip:
+        die(f"no IPv4 lease for '{name}' yet (still booting?).")
+
+    alias = f"devbox-{name}"
     SSH_DIR.mkdir(parents=True, exist_ok=True)
     if not KNOWN_HOSTS_PATH.is_file():
         KNOWN_HOSTS_PATH.write_text("")
         KNOWN_HOSTS_PATH.chmod(0o600)
 
-    host_conf = SSH_DIR / f"{project.name}.conf"
+    host_conf = SSH_DIR / f"{name}.conf"
     host_conf.write_text(
         f"Host {alias}\n"
         f"    HostName {ip}\n"
@@ -645,12 +842,18 @@ def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Manage per-project dev-sandbox VMs (libvirt + cloud-init).")
-    # Defined before add_subparsers so -C can't be swallowed by ssh's argparse.REMAINDER.
+    # Defined before add_subparsers so they can't be swallowed by ssh's
+    # argparse.REMAINDER: `devbox --name foo ssh -- -v`.
     p.add_argument("-C", "--project-dir", type=Path, default=None,
                     help="project directory to resolve the devbox marker from (default: cwd)")
+    p.add_argument("--name", default=None,
+                    help="target a specific instance by name (default: the project's libvirt instance)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("create", help="download image, define + first-boot the VM").set_defaults(func=cmd_create)
+    c = sub.add_parser("create", help="download image, define + first-boot the VM")
+    c.add_argument("--provider", choices=PROVIDERS, default=None,
+                    help=f"provider to launch on (default: the project's, else {DEFAULT_PROVIDER})")
+    c.set_defaults(func=cmd_create)
     sub.add_parser("up", help="start an already-defined, shut-off VM").set_defaults(func=cmd_up)
     sub.add_parser("stop", help="gracefully shut down a running VM").set_defaults(func=cmd_stop)
     sub.add_parser("destroy", help="tear down the VM and its overlay disk").set_defaults(func=cmd_destroy)
@@ -660,11 +863,16 @@ def main() -> None:
     s.set_defaults(func=cmd_ssh)
     sub.add_parser("status", help="show cloud-init progress + provision log").set_defaults(func=cmd_status)
     sub.add_parser("provision", help="re-run the provisioning script over SSH (reconverge a running VM)").set_defaults(func=cmd_provision)
+    # Global view - doesn't resolve a project (works anywhere).
+    sub.add_parser("list", help="list devbox-managed instances on this host").set_defaults(func=cmd_list, needs_project=False)
     sub.add_parser("host", help="refresh the SSH alias used for jj-sync, print the alias name").set_defaults(func=cmd_host)
 
     args = p.parse_args()
     global_config = GlobalConfig.load()
-    project = resolve_project(args.project_dir or Path.cwd(), global_config)
+    # Most commands operate within a project; `list` is global and skips it.
+    project = None
+    if getattr(args, "needs_project", True):
+        project = resolve_project(args.project_dir or Path.cwd(), global_config)
     args.func(args, global_config, project)
 
 

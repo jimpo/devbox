@@ -12,17 +12,19 @@ uv tool install --editable .     # point the live `devbox` command at this check
 ## Testing scope
 
 `tests/` only exercises pure logic: global/project config loading and
-merging (`GlobalConfig.load`, `resolve_project`), marker walk-up resolution,
-and cloud-config token substitution + YAML merging (`merge_cloud_config`,
-`render_cloud_config`). It does not and cannot exercise
-`create`/`up`/`stop`/`destroy`/`host`/`provision` end-to-end, or the actual
-content of the provisioning script `provision-common.sh` (jj install,
-dotfiles, Claude Code, repo bootstrap) — those need a real libvirt daemon and
-a booted VM, which isn't available in CI or a sandboxed agent environment.
-The tests do cover that `render_cloud_config` injects the (token-substituted)
-script into the seed's `write_files` and that `render_provision_script`
-substitutes its tokens, but not that the script's steps actually work on a
-box. Verify changes to those subcommands, to `common-cloud-config.yaml`, or
+merging (`GlobalConfig.load`, `resolve_project`, `resolve_instance`), marker
+walk-up resolution, cloud-config token substitution + YAML merging
+(`merge_cloud_config`, `render_cloud_config`), and the libvirt `<metadata>`
+stamp/parse + `list` formatting (`build_metadata_xml`, `read_domain_instance`
+with a monkeypatched `virsh`, `_format_resources`/`_format_age`). It does not
+and cannot exercise `create`/`up`/`stop`/`destroy`/`host`/`provision`/`list`
+end-to-end, or the actual content of the provisioning script
+`provision-common.sh` (jj install, dotfiles, Claude Code, repo bootstrap) —
+those need a real libvirt daemon and a booted VM, which isn't available in CI
+or a sandboxed agent environment. The tests do cover that `render_cloud_config`
+injects the (token-substituted) script into the seed's `write_files` and that
+`render_provision_script` substitutes its tokens, but not that the script's
+steps actually work on a box. Verify changes to those subcommands, to `common-cloud-config.yaml`, or
 to `provision-common.sh`, by reading the `virsh`/`virt-install` invocations
 and the rendered cloud-config carefully; if you have access to a real libvirt
 setup, exercise them by hand (`devbox create` + `devbox status` through to

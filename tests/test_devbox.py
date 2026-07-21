@@ -115,9 +115,10 @@ def test_find_project_dir_missing_dies(tmp_path):
 
 
 def test_resolve_project_basic(tmp_path, global_config):
-    _write_marker(tmp_path, 'name = "myproj"\n')
+    _write_marker(tmp_path, 'project = "myproj"\n')
     project = devbox.resolve_project(tmp_path, global_config)
-    assert project.name == "myproj"
+    assert project.project == "myproj"
+    assert project.provider == "libvirt"
     assert project.cloud_config is None  # no .devbox/cloud-config.yaml written
     assert project.vcpus == global_config.vcpus
     assert project.memory_mib == global_config.memory_mib
@@ -125,10 +126,17 @@ def test_resolve_project_basic(tmp_path, global_config):
     assert project.repo.mode == "none"
 
 
+def test_resolve_project_defaults_project_to_dirname(tmp_path, global_config):
+    # No `project` key -> defaults to the marker directory's basename.
+    _write_marker(tmp_path, "")
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.project == tmp_path.resolve().name
+
+
 def test_resolve_project_overrides_defaults(tmp_path, global_config):
     _write_marker(
         tmp_path,
-        'name = "myproj"\nvcpus = 2\nmemory_mib = 2048\ndisk_gb = 10\nuser = "alice"\n',
+        'project = "myproj"\nvcpus = 2\nmemory_mib = 2048\ndisk_gb = 10\nuser = "alice"\n',
     )
     project = devbox.resolve_project(tmp_path, global_config)
     assert project.vcpus == 2
@@ -137,14 +145,21 @@ def test_resolve_project_overrides_defaults(tmp_path, global_config):
     assert project.user == "alice"
 
 
-def test_resolve_project_missing_name_dies(tmp_path, global_config):
-    _write_marker(tmp_path, "")
+def test_resolve_project_legacy_name_field_dies(tmp_path, global_config):
+    # `name` used to be the VM; it's now a migration error, not silently ignored.
+    _write_marker(tmp_path, 'name = "myproj"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_invalid_provider_dies(tmp_path, global_config):
+    _write_marker(tmp_path, 'provider = "gcp"\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
 
 def test_resolve_project_cloud_config_present(tmp_path, global_config):
-    _write_marker(tmp_path, 'name = "myproj"\n')
+    _write_marker(tmp_path, 'project = "myproj"\n')
     cloud_config = tmp_path / devbox.PROJECT_MARKER_DIR / devbox.PROJECT_CLOUD_CONFIG_FILE
     cloud_config.write_text("packages: []\n")
     project = devbox.resolve_project(tmp_path, global_config)
@@ -153,7 +168,7 @@ def test_resolve_project_cloud_config_present(tmp_path, global_config):
 
 # ---- [repo] validation -----------------------------------------------------
 def test_resolve_project_repo_defaults_to_none(tmp_path, global_config):
-    _write_marker(tmp_path, 'name = "myproj"\n')
+    _write_marker(tmp_path, 'project = "myproj"\n')
     project = devbox.resolve_project(tmp_path, global_config)
     assert project.repo == devbox.RepoConfig(mode="none", dir="", url=None)
 
@@ -161,32 +176,32 @@ def test_resolve_project_repo_defaults_to_none(tmp_path, global_config):
 def test_resolve_project_repo_clone_mode(tmp_path, global_config):
     _write_marker(
         tmp_path,
-        'name = "myproj"\n[repo]\nmode = "clone"\ndir = "myrepo"\nurl = "https://example.com/myrepo"\n',
+        '[repo]\nmode = "clone"\ndir = "myrepo"\nurl = "https://example.com/myrepo"\n',
     )
     project = devbox.resolve_project(tmp_path, global_config)
     assert project.repo == devbox.RepoConfig(mode="clone", dir="myrepo", url="https://example.com/myrepo")
 
 
 def test_resolve_project_repo_push_mode(tmp_path, global_config):
-    _write_marker(tmp_path, 'name = "myproj"\n[repo]\nmode = "push"\ndir = "myrepo"\n')
+    _write_marker(tmp_path, '[repo]\nmode = "push"\ndir = "myrepo"\n')
     project = devbox.resolve_project(tmp_path, global_config)
     assert project.repo == devbox.RepoConfig(mode="push", dir="myrepo", url=None)
 
 
 def test_resolve_project_repo_invalid_mode_dies(tmp_path, global_config):
-    _write_marker(tmp_path, 'name = "myproj"\n[repo]\nmode = "bogus"\ndir = "myrepo"\n')
+    _write_marker(tmp_path, '[repo]\nmode = "bogus"\ndir = "myrepo"\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
 
 def test_resolve_project_repo_clone_missing_url_dies(tmp_path, global_config):
-    _write_marker(tmp_path, 'name = "myproj"\n[repo]\nmode = "clone"\ndir = "myrepo"\n')
+    _write_marker(tmp_path, '[repo]\nmode = "clone"\ndir = "myrepo"\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
 
 def test_resolve_project_repo_missing_dir_dies(tmp_path, global_config):
-    _write_marker(tmp_path, 'name = "myproj"\n[repo]\nmode = "push"\n')
+    _write_marker(tmp_path, '[repo]\nmode = "push"\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
@@ -194,7 +209,7 @@ def test_resolve_project_repo_missing_dir_dies(tmp_path, global_config):
 def test_resolve_project_repo_push_with_url_dies(tmp_path, global_config):
     _write_marker(
         tmp_path,
-        'name = "myproj"\n[repo]\nmode = "push"\ndir = "myrepo"\nurl = "https://example.com/myrepo"\n',
+        '[repo]\nmode = "push"\ndir = "myrepo"\nurl = "https://example.com/myrepo"\n',
     )
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
@@ -264,7 +279,7 @@ def pubkey(tmp_path):
 
 def _project(cloud_config=None, mode="none", dir="", url=None):
     return devbox.ProjectConfig(
-        name="test-project", cloud_config=cloud_config, user="alice",
+        project="test-project", provider="libvirt", cloud_config=cloud_config, user="alice",
         vcpus=6, memory_mib=1024, disk_gb=10,
         repo=devbox.RepoConfig(mode=mode, dir=dir, url=url),
     )
@@ -377,6 +392,78 @@ def test_render_cloud_config_empty_token_when_unset(common_template, pubkey, cap
     content = yaml.safe_load(rendered)["write_files"][0]["content"]
     assert content.splitlines()[1] == "github-token: "
     assert "no GitHub token found" in capsys.readouterr().out
+
+
+# ---- instance identity / resolution ----------------------------------------
+def test_resolve_instance_defaults_to_project():
+    import argparse
+    args = argparse.Namespace(name=None)
+    assert devbox.resolve_instance(args, _project()) == "test-project"
+
+
+def test_resolve_instance_name_overrides():
+    import argparse
+    args = argparse.Namespace(name="foo-gpu")
+    assert devbox.resolve_instance(args, _project()) == "foo-gpu"
+
+
+# ---- libvirt <metadata> stamp -----------------------------------------------
+def _domain_xml(metadata_inner="", vcpu=6, memory_kib=12582912):
+    return (
+        "<domain type='kvm'>"
+        "<name>demo</name>"
+        f"<memory unit='KiB'>{memory_kib}</memory>"
+        f"<vcpu placement='static'>{vcpu}</vcpu>"
+        f"<metadata>{metadata_inner}</metadata>"
+        "</domain>"
+    )
+
+
+def test_build_metadata_xml_roundtrips_through_reader(monkeypatch):
+    stamp = devbox.build_metadata_xml("myproj", "libvirt", "2026-07-21T10:00:00+00:00")
+    dumpxml = _domain_xml(metadata_inner=stamp, vcpu=4, memory_kib=8388608)
+    monkeypatch.setattr(
+        devbox, "virsh",
+        lambda uri, *a, **k: subprocess.CompletedProcess(a, 0, dumpxml, ""),
+    )
+    info = devbox.read_domain_instance("qemu:///system", "demo")
+    assert info == {
+        "name": "demo", "project": "myproj", "provider": "libvirt",
+        "created_at": "2026-07-21T10:00:00+00:00", "vcpus": 4, "memory_kib": 8388608,
+    }
+
+
+def test_read_domain_instance_skips_unmanaged(monkeypatch):
+    # A domain with no devbox stamp is not ours -> None (filtered out of `list`).
+    monkeypatch.setattr(
+        devbox, "virsh",
+        lambda uri, *a, **k: subprocess.CompletedProcess(a, 0, _domain_xml(), ""),
+    )
+    assert devbox.read_domain_instance("qemu:///system", "demo") is None
+
+
+def test_read_domain_instance_none_when_undefined(monkeypatch):
+    monkeypatch.setattr(
+        devbox, "virsh",
+        lambda uri, *a, **k: subprocess.CompletedProcess(a, 1, "", "no domain"),
+    )
+    assert devbox.read_domain_instance("qemu:///system", "demo") is None
+
+
+# ---- list formatting --------------------------------------------------------
+def test_format_resources():
+    assert devbox._format_resources(6, 12582912) == "6 vCPU / 12 GiB"
+    assert devbox._format_resources(None, None) == "?"
+
+
+def test_format_age_buckets():
+    from datetime import datetime, timezone, timedelta
+    assert devbox._format_age(None) == "?"
+    assert devbox._format_age("not-a-date") == "?"
+    now = datetime.now(timezone.utc)
+    assert devbox._format_age((now - timedelta(minutes=30)).isoformat()).endswith("m")
+    assert devbox._format_age((now - timedelta(hours=3)).isoformat()) == "3h"
+    assert devbox._format_age((now - timedelta(days=2)).isoformat()) == "2d"
 
 
 # ---- fetch_verified_checksum -----------------------------------------------

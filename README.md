@@ -112,7 +112,9 @@ to other contributors — there's nothing project-shareable in here, it's
 purely this machine's VM config):
 
 ```toml
-name = "my-project-dev"     # libvirt domain name
+# project = "my-project"    # a label on this project's instances
+#                           # (default: the directory's basename)
+# provider = "libvirt"      # default provider for a bare `devbox create`
 # user, vcpus, memory_mib, disk_gb optionally override the global [defaults]
 
 [repo]                      # optional; omit entirely for no repo bootstrap
@@ -120,6 +122,15 @@ mode = "clone"               # "clone" | "push"
 dir = "my-project"           # created at ~/<dir> in the sandbox
 url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
 ```
+
+A **project** is a label, not a machine: it can have several instances. The
+default one is a libvirt domain **bare-named = the project**, which `devbox
+create` (no args) makes. `--name` targets a specific instance for any command;
+without it, commands act on the project's libvirt default. (Named/cloud
+instances arrive with the AWS provider — for now libvirt is the only provider
+and each project has just its one bare default.) Every config key is optional;
+an empty `config.toml` is a valid marker. `name` is no longer a field — devbox
+errors if it's present, to flag the migration.
 
 `[repo]` drives how the sandbox gets your code, via devbox's common
 cloud-config template (see below) — no project needs to author this by hand:
@@ -179,7 +190,8 @@ SSH against an already-booted box (reconverge) without a destroy+create.
 
 | Command | Behavior |
 |---|---|
-| `devbox create` | Download/verify the shared base image if needed (cached globally), render + merge the cloud-config (common template + project fragment), define + first-boot the domain. Errors if a domain with this name is already defined — run `destroy` first. |
+| `devbox create` | Download/verify the shared base image if needed (cached globally), render + merge the cloud-config (common template + project fragment), define + first-boot the domain (bare-named = the project), and stamp it with devbox `<metadata>`. Errors if a domain with this name is already defined (global-uniqueness) — run `destroy` first. |
+| `devbox list` | List devbox-managed instances on this host — name, provider, project, state, resources, uptime. Global (doesn't need to be run inside a project); filters libvirt domains by the devbox `<metadata>` stamp. |
 | `devbox up` | Start an already-defined, shut-off domain. Errors if undefined — run `create` first. |
 | `devbox stop` | Gracefully shut down (ACPI) a running domain. |
 | `devbox destroy` | Tear down the domain and its overlay disk (the cached base image is left alone). |
@@ -189,8 +201,10 @@ SSH against an already-booted box (reconverge) without a destroy+create.
 | `devbox provision` | Re-run the provisioning script (`provision-common.sh`) over SSH against a running domain — reconverge (add a package, bump jj, add a plugin) without destroy+create. Idempotent; tees to `~/provision.log`. |
 | `devbox host` | Refresh the SSH alias used for jj-sync (below); prints the alias name. |
 
-Every subcommand accepts `-C/--project-dir PATH` (before the subcommand) to
-resolve a project other than the current directory.
+Every subcommand accepts `-C/--project-dir PATH` and `--name NAME` (both
+before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
+resolves a project other than the current directory; `--name` targets a
+specific instance instead of the project's libvirt default.
 
 **Changing a project's cloud-config (common template or `.devbox/cloud-config.yaml`)
 only takes effect via `destroy` + `create`, never `up`** — cloud-init's
@@ -202,9 +216,10 @@ GitHub token, `[repo]`) reconverge without a rebuild. Changes to the parts
 that live in `common-cloud-config.yaml` itself (packages, the user, YAML
 structure) still need `destroy` + `create`.
 
-### Project resolution
+### Project & instance resolution
 
-Every subcommand resolves "which VM" the same way:
+Instance-operating subcommands first find the **project** (except `list`,
+which is global and skips this):
 
 1. Start at `-C PATH` if given, else the current directory.
 2. Walk upward (like `git` searching for `.git`) looking for
@@ -212,6 +227,10 @@ Every subcommand resolves "which VM" the same way:
 3. The first directory that has it wins.
 4. No marker found up to `/` → error telling you to pass `-C` or add a
    `.devbox/config.toml` to the project.
+
+Then they resolve **which instance** within it: an explicit `--name` wins;
+otherwise the project's libvirt default (bare-named = the project). Daily use
+(one local VM per project) never needs `--name`.
 
 ## jj sync: exchanging commits with the sandbox
 
