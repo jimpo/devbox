@@ -584,6 +584,66 @@ def test_fetch_verified_checksum_filename_not_listed(monkeypatch, tmp_path):
         devbox.fetch_verified_checksum("https://example.com/dir/image.img")
 
 
+# ---- jj sync ----------------------------------------------------------------
+def _cp(argv, code=0, out="", err=""):
+    return subprocess.CompletedProcess(argv, code, out, err)
+
+
+def test_ensure_jj_remote_adds_when_missing(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if argv[:4] == ["jj", "git", "remote", "list"]:
+            return _cp(argv, 0, "origin git@github.com:me/x\n")
+        return _cp(argv, 0)
+
+    monkeypatch.setattr(devbox.subprocess, "run", fake_run)
+    devbox.cli._ensure_jj_remote(tmp_path, "devbox-foo", "ssh://devbox-foo/home/u/x")
+    assert ["jj", "git", "remote", "add", "devbox-foo", "ssh://devbox-foo/home/u/x"] in calls
+
+
+def test_ensure_jj_remote_updates_when_url_differs(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if argv[:4] == ["jj", "git", "remote", "list"]:
+            return _cp(argv, 0, "devbox-foo ssh://devbox-foo/home/u/OLD\n")
+        return _cp(argv, 0)
+
+    monkeypatch.setattr(devbox.subprocess, "run", fake_run)
+    devbox.cli._ensure_jj_remote(tmp_path, "devbox-foo", "ssh://devbox-foo/home/u/NEW")
+    assert ["jj", "git", "remote", "set-url", "devbox-foo", "ssh://devbox-foo/home/u/NEW"] in calls
+
+
+def test_ensure_jj_remote_noop_when_same(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if argv[:4] == ["jj", "git", "remote", "list"]:
+            return _cp(argv, 0, "devbox-foo ssh://same\n")
+        return _cp(argv, 0)
+
+    monkeypatch.setattr(devbox.subprocess, "run", fake_run)
+    devbox.cli._ensure_jj_remote(tmp_path, "devbox-foo", "ssh://same")
+    assert calls == [["jj", "git", "remote", "list"]]  # no add/set-url
+
+
+def test_ensure_jj_remote_not_a_repo_dies(monkeypatch, tmp_path):
+    monkeypatch.setattr(devbox.subprocess, "run", lambda argv, **kw: _cp(argv, 1, "", "not a repo"))
+    with pytest.raises(SystemExit):
+        devbox.cli._ensure_jj_remote(tmp_path, "devbox-foo", "ssh://x")
+
+
+def test_cmd_sync_without_repo_dies():
+    import argparse
+    gc = _global_config(devbox.Path("/nonexistent"))
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_sync(argparse.Namespace(name=None, project_dir=None), gc, _project(mode="none"))
+
+
 # ---- AWS config -------------------------------------------------------------
 def test_global_config_aws_section(tmp_path):
     path = tmp_path / "config.toml"

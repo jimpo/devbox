@@ -9,6 +9,7 @@ Provider seam.
     devbox status              # cloud-init progress + tail provision.log
     devbox provision           # re-run the provisioning script over SSH (reconverge)
     devbox list                # list devbox-managed instances on this host
+    devbox sync                # jj git fetch the instance's work into the host repo
     devbox host                # refresh the SSH alias used for jj-sync
     devbox destroy             # tear down, removing the overlay disk
 
@@ -28,8 +29,8 @@ from typing import Optional
 
 from .cloudconfig import PROVISION_LOG, render_cloud_config, render_provision_script
 from .config import (DEFAULT_PROVIDER, GlobalConfig, KNOWN_HOSTS_PATH, PROVIDERS,
-                     ProjectConfig, SSH_DIR, SSH_USER_CONFIG, resolve_instance,
-                     resolve_project)
+                     ProjectConfig, SSH_DIR, SSH_USER_CONFIG, find_project_dir,
+                     resolve_instance, resolve_project)
 from .providers import InstanceSpec, all_providers, get_provider
 from .util import die
 
@@ -250,12 +251,11 @@ def cmd_list(args: argparse.Namespace, gc: GlobalConfig, project: Optional[Proje
     _print_table(rows)
 
 
-def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name = resolve_instance(args, project)
-    ip = get_provider(project.provider, gc).address(name)
-    if not ip:
-        die(f"no address for '{name}' yet (still booting?).")
-
+def _refresh_ssh_alias(name: str, ip: str, user: str) -> str:
+    """Write/refresh the `devbox-<name>` SSH alias (host, user, dedicated
+    known-hosts) that jj-sync addresses the instance through, and return it.
+    Provider-agnostic - `ip` is whatever the provider resolved (libvirt DHCP
+    lease or EC2 public IP)."""
     alias = f"devbox-{name}"
     SSH_DIR.mkdir(parents=True, exist_ok=True)
     if not KNOWN_HOSTS_PATH.is_file():
@@ -266,7 +266,7 @@ def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
     host_conf.write_text(
         f"Host {alias}\n"
         f"    HostName {ip}\n"
-        f"    User {project.user}\n"
+        f"    User {user}\n"
         f"    UserKnownHostsFile {KNOWN_HOSTS_PATH}\n"
         f"    StrictHostKeyChecking accept-new\n"
     )
@@ -284,7 +284,61 @@ def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
         SSH_USER_CONFIG.write_text(f"{include_line}\n")
         SSH_USER_CONFIG.chmod(0o600)
 
-    print(alias)
+    return alias
+
+
+def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    name = resolve_instance(args, project)
+    ip = get_provider(project.provider, gc).address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+    print(_refresh_ssh_alias(name, ip, project.user))
+
+
+def _ensure_jj_remote(repo_dir: Path, remote: str, url: str) -> None:
+    """Idempotently point a jj git remote named `remote` at `url` in the host's
+    local repo - add it if missing, re-point it if the URL drifted (a new IP =>
+    a new alias target isn't at play here since we key on the stable alias, but
+    the repo path can change if [repo] dir changes)."""
+    listing = subprocess.run(["jj", "git", "remote", "list"], cwd=repo_dir,
+                             capture_output=True, text=True)
+    if listing.returncode != 0:
+        die(f"`jj git remote list` failed in {repo_dir} - is this a jj repo? "
+            f"Run `devbox sync` from your project's jj checkout (or pass -C).")
+    current = None
+    for line in listing.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == remote:
+            current = parts[1]
+            break
+    if current is None:
+        subprocess.run(["jj", "git", "remote", "add", remote, url], cwd=repo_dir, check=True)
+    elif current != url:
+        subprocess.run(["jj", "git", "remote", "set-url", remote, url], cwd=repo_dir, check=True)
+
+
+def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    # Unified jj-remote sync: refresh the SSH alias (address via the provider,
+    # so this is identical for libvirt or AWS), ensure the local jj remote points
+    # at the instance's colocated repo, and fetch. `[repo]` is project-level, so
+    # any instance in the project is synced the same way.
+    if project.repo.mode == "none" or not project.repo.dir:
+        die("this project has no [repo] configured (set [repo] mode/dir); nothing to sync")
+    name = resolve_instance(args, project)
+    ip = get_provider(project.provider, gc).address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+
+    alias = _refresh_ssh_alias(name, ip, project.user)
+    remote_url = f"ssh://{alias}/home/{project.user}/{project.repo.dir}"
+    repo_dir = find_project_dir(args.project_dir or Path.cwd())
+    _ensure_jj_remote(repo_dir, alias, remote_url)
+
+    print(f"==> jj git fetch from '{alias}' ({remote_url}) ...")
+    result = subprocess.run(["jj", "git", "fetch", "--remote", alias], cwd=repo_dir)
+    if result.returncode != 0:
+        die("jj git fetch failed")
+    print(f"fetched. Check out an agent bookmark with e.g. `jj new <bookmark>@{alias}`.")
 
 
 def main() -> None:
@@ -316,6 +370,7 @@ def main() -> None:
     sub.add_parser("provision", help="re-run the provisioning script over SSH (reconverge a running VM)").set_defaults(func=cmd_provision)
     # Global view - doesn't resolve a project (works anywhere).
     sub.add_parser("list", help="list devbox-managed instances").set_defaults(func=cmd_list, needs_project=False)
+    sub.add_parser("sync", help="jj git fetch the instance's bookmarked work into the host repo").set_defaults(func=cmd_sync)
     sub.add_parser("host", help="refresh the SSH alias used for jj-sync, print the alias name").set_defaults(func=cmd_host)
 
     args = p.parse_args()

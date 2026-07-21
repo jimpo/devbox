@@ -229,6 +229,7 @@ SSH against an already-booted box (reconverge) without a destroy+create.
 | `devbox ssh [-- args...]` | `ssh` into the domain. |
 | `devbox status` | SSH in and show `cloud-init status --long` plus the tail of `~/provision.log`. |
 | `devbox provision` | Re-run the provisioning script (`provision-common.sh`) over SSH against a running domain — reconverge (add a package, bump jj, add a plugin) without destroy+create. Idempotent; tees to `~/provision.log`. |
+| `devbox sync` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or AWS), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "jj sync" below. |
 | `devbox host` | Refresh the SSH alias used for jj-sync (below); prints the alias name. |
 
 Every subcommand accepts `-C/--project-dir PATH` and `--name NAME` (both
@@ -264,41 +265,54 @@ otherwise the project's libvirt default (bare-named = the project). Daily use
 
 ## jj sync: exchanging commits with the sandbox
 
-The sandbox VM is a plain SSH-reachable git remote for the host, in both
+The sandbox is a plain SSH-reachable git remote for the host, in both
 directions: the host **fetches** the agent's work to view/test it, and, for
 projects with no git server yet (`[repo] mode = "push"`), the host **pushes**
-to seed the sandbox with an initial commit. `devbox host` sets up/refreshes,
-for either direction:
+to seed the sandbox with an initial commit. This is **identical whether the
+instance is libvirt or AWS** — the address is resolved through the provider
+(libvirt DHCP lease or EC2 public IP); everything above that is the same
+jj-remote model. `[repo]` is project-level, so any instance in the project
+(`--name` to pick one) syncs the same way.
+
+Both directions go through the `devbox-<name>` SSH alias, which `devbox sync`
+and `devbox host` set up/refresh:
 
 - A dedicated known-hosts file, `~/.config/devbox/ssh/known_hosts`,
-  **truncated on every `devbox create`** (a freshly created domain has a
+  **truncated on every `devbox create`** (a freshly created instance has a
   brand-new SSH host key, so stale entries can only cause false mismatches).
 - A `Host devbox-<name>` block in `~/.config/devbox/ssh/<name>.conf` with the
-  domain's current IP, resolved SSH user, and `StrictHostKeyChecking
-  accept-new` scoped to that dedicated known-hosts file — regenerated on
-  every `devbox host` call since the DHCP lease can change across
-  `stop`/`up` cycles.
+  instance's current IP (from the provider), SSH user, and
+  `StrictHostKeyChecking accept-new` scoped to that dedicated known-hosts file
+  — regenerated on every call since the address can change across `stop`/`up`
+  cycles (a libvirt DHCP lease, or a new EC2 public IP after stop/start).
 - A one-time, idempotent `Include ~/.config/devbox/ssh/*.conf` line in
   `~/.ssh/config`.
 
 ### Fetch: pulling sandbox commits to the host (`[repo] mode = "clone"`)
 
 The sandbox already cloned the project on first boot (via `[repo]`), so
-there's no manual clone step. The agent just needs to bookmark work it wants
-visible on the host — jj only exports *bookmarked* commits to git refs,
-which is what the host's fetch reads:
+there's no manual clone step. The agent just bookmarks work it wants visible
+on the host — jj only exports *bookmarked* commits to git refs, which is what
+the host's fetch reads:
 
 ```bash
 # Sandbox side (agent), per unit of work that should become visible to the host:
 jj bookmark create wip -r @
 
-# Host side, one-time:
-devbox host                                             # prints alias, e.g. devbox-my-project-dev
-jj git remote add sandbox ssh://devbox-my-project-dev/home/<user>/<dir>
-# Host side, ongoing:
-devbox host                                             # refresh alias (IP/host key may differ)
-jj git fetch --remote sandbox
-jj new wip@sandbox
+# Host side (from your local jj checkout): one command, any provider.
+devbox sync                          # refreshes the alias, wires the jj remote, fetches
+jj new wip@devbox-my-project         # check out the fetched bookmark
+```
+
+`devbox sync` refreshes the SSH alias (address via the provider), ensures a jj
+git remote named after the alias (`devbox-<name>`) points at the instance's
+colocated repo (`ssh://devbox-<name>/home/<user>/<dir>`), and runs `jj git
+fetch`. It's equivalent to the manual flow:
+
+```bash
+devbox host                                             # prints alias, e.g. devbox-my-project
+jj git remote add devbox-my-project ssh://devbox-my-project/home/<user>/<dir>
+jj git fetch --remote devbox-my-project
 ```
 
 ### Push: seeding a brand-new sandbox (`[repo] mode = "push"`)
