@@ -246,6 +246,12 @@ def common_template(tmp_path, monkeypatch):
         "  - [\"echo\", \"%DEVBOX_REPO_MODE%\", \"%DEVBOX_REPO_DIR%\", \"%DEVBOX_REPO_URL%\"]\n"
     )
     monkeypatch.setattr(devbox, "COMMON_CLOUD_CONFIG_PATH", path)
+    # The standalone provisioning script devbox injects into write_files; keep
+    # it tiny (the real one needs a booted VM) but token-bearing so we can check
+    # substitution and injection.
+    script = tmp_path / "provision-common.sh"
+    script.write_text("#!/usr/bin/env bash\necho hello %DEVBOX_USER% %DEVBOX_REPO_MODE%\n")
+    monkeypatch.setattr(devbox, "PROVISION_SCRIPT_PATH", script)
     return path
 
 
@@ -283,6 +289,23 @@ def test_render_cloud_config_substitutes_tokens(common_template, pubkey):
     assert "github-token: ghp_testtoken" in rendered
     import yaml
     assert yaml.safe_load(rendered)["runcmd"][0] == ["echo", "clone", "myrepo", "https://example.com/x"]
+
+
+def test_render_cloud_config_injects_provision_script(common_template, pubkey):
+    import yaml
+    rendered = devbox.render_cloud_config(_project(mode="clone", dir="r", url="https://x/y"), _global_config(pubkey))
+    parsed = yaml.safe_load(rendered)
+    entries = [w for w in parsed["write_files"] if w["path"] == devbox.CLOUD_INIT_PROVISION_PATH]
+    assert len(entries) == 1
+    assert entries[0]["content"] == "#!/usr/bin/env bash\necho hello alice clone\n"
+    # Injected after the template's own write_files, so /tmp/jj-identity stays first.
+    assert parsed["write_files"][0]["path"] == "/tmp/jj-identity"
+
+
+def test_render_provision_script_substitutes_tokens(common_template, pubkey):
+    script = devbox.render_provision_script(_project(mode="push", dir="r"), _global_config(pubkey))
+    assert script == "#!/usr/bin/env bash\necho hello alice push\n"
+    assert "%DEVBOX_" not in script
 
 
 def test_render_cloud_config_has_cloud_config_header(common_template, pubkey):

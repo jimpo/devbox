@@ -20,6 +20,7 @@ or invoke with sudo.
     devbox ip                  # print the VM's IPv4
     devbox ssh [args...]       # ssh into the VM
     devbox status              # cloud-init progress + tail provision.log
+    devbox provision           # re-run the provisioning script over SSH (reconverge)
     devbox host                # refresh the SSH alias used for jj-sync
     devbox destroy             # tear down, removing the overlay disk
 """
@@ -29,6 +30,7 @@ import argparse
 import dataclasses
 import hashlib
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -46,6 +48,18 @@ PROJECT_CONFIG_FILE = "config.toml"                # .devbox/config.toml
 PROJECT_CLOUD_CONFIG_FILE = "cloud-config.yaml"    # .devbox/cloud-config.yaml (optional)
 COMMON_CLOUD_CONFIG_PATH = Path(__file__).parent / "common-cloud-config.yaml"
 REPO_MODES = ("none", "clone", "push")
+
+# The standalone, re-runnable provisioning body (jj, dotfiles, Claude Code,
+# repo bootstrap). Rendered (token-substituted) and injected into the first-boot
+# cloud-config seed's write_files, and re-run over SSH by `devbox provision`.
+PROVISION_SCRIPT_PATH = Path(__file__).parent / "provision-common.sh"
+# Where cloud-init's first-boot copy of the script lands (root-owned, runnable
+# before the dev user's home exists); must match common-cloud-config.yaml's
+# runcmd. `devbox provision` instead drops it under the dev user's $HOME.
+CLOUD_INIT_PROVISION_PATH = "/usr/local/bin/provision-common.sh"
+# Provisioning output log, under the dev user's $HOME on the box - written by
+# both the first-boot runcmd and `devbox provision`, and tailed by `devbox status`.
+PROVISION_LOG = "provision.log"
 
 GLOBAL_CONFIG_PATH = Path.home() / ".config" / "devbox" / "config.toml"
 SSH_DIR = Path.home() / ".config" / "devbox" / "ssh"
@@ -348,7 +362,10 @@ def resolve_github_token(gc: GlobalConfig) -> Optional[str]:
     return gc.github_token
 
 
-def render_cloud_config(project: ProjectConfig, gc: GlobalConfig) -> str:
+def _provision_tokens(project: ProjectConfig, gc: GlobalConfig) -> dict:
+    """The %DEVBOX_*% tokens substituted into the provisioning script. A superset
+    (adding DEVBOX_SSH_PUBKEY) is used for the whole cloud-config. Shared by the
+    first-boot render and `devbox provision` so both fill the same values."""
     jj_name, jj_email = resolve_jj_identity(gc)
     github_token = resolve_github_token(gc)
     if github_token is None:
@@ -356,15 +373,8 @@ def render_cloud_config(project: ProjectConfig, gc: GlobalConfig) -> str:
               "the sandbox will have no GitHub HTTPS auth. Fine for cloning public "
               "repos; set one up if the project needs a private repo or gh/git "
               "pushes to GitHub.")
-    if not gc.ssh_pubkey_path.is_file():
-        die(f"SSH public key not found: {gc.ssh_pubkey_path}")
-    if not COMMON_CLOUD_CONFIG_PATH.is_file():
-        die(f"devbox internal error: common cloud-config template not found at "
-            f"{COMMON_CLOUD_CONFIG_PATH} (broken install?)")
-
-    tokens = {
+    return {
         "DEVBOX_USER": project.user,
-        "DEVBOX_SSH_PUBKEY": gc.ssh_pubkey_path.read_text().strip(),
         "DEVBOX_JJ_NAME": jj_name,
         "DEVBOX_JJ_EMAIL": jj_email,
         "DEVBOX_GITHUB_TOKEN": github_token or "",
@@ -373,8 +383,44 @@ def render_cloud_config(project: ProjectConfig, gc: GlobalConfig) -> str:
         "DEVBOX_REPO_URL": project.repo.url or "",
     }
 
+
+def render_provision_script(project: ProjectConfig, gc: GlobalConfig) -> str:
+    """The standalone provisioning script with its %DEVBOX_*% tokens filled in.
+    Injected into the first-boot cloud-config seed (render_cloud_config) and
+    re-run over SSH by `devbox provision` - one script, two delivery paths."""
+    if not PROVISION_SCRIPT_PATH.is_file():
+        die(f"devbox internal error: provisioning script not found at "
+            f"{PROVISION_SCRIPT_PATH} (broken install?)")
+    return substitute_tokens(PROVISION_SCRIPT_PATH.read_text(), _provision_tokens(project, gc))
+
+
+def render_cloud_config(project: ProjectConfig, gc: GlobalConfig) -> str:
+    if not gc.ssh_pubkey_path.is_file():
+        die(f"SSH public key not found: {gc.ssh_pubkey_path}")
+    if not COMMON_CLOUD_CONFIG_PATH.is_file():
+        die(f"devbox internal error: common cloud-config template not found at "
+            f"{COMMON_CLOUD_CONFIG_PATH} (broken install?)")
+    if not PROVISION_SCRIPT_PATH.is_file():
+        die(f"devbox internal error: provisioning script not found at "
+            f"{PROVISION_SCRIPT_PATH} (broken install?)")
+
+    tokens = _provision_tokens(project, gc)
+    tokens["DEVBOX_SSH_PUBKEY"] = gc.ssh_pubkey_path.read_text().strip()
+
     common_text = substitute_tokens(COMMON_CLOUD_CONFIG_PATH.read_text(), tokens)
     common = _load_cloud_config_yaml(common_text, COMMON_CLOUD_CONFIG_PATH)
+
+    # Single source of truth: inject the standalone provisioning script into the
+    # seed's write_files (the template's runcmd runs it on first boot; `devbox
+    # provision` re-runs the very same script over SSH). Appended after the
+    # template's own write_files so the /etc/environment entry stays first.
+    script_text = substitute_tokens(PROVISION_SCRIPT_PATH.read_text(), tokens)
+    common.setdefault("write_files", []).append({
+        "path": CLOUD_INIT_PROVISION_PATH,
+        "owner": "root:root",
+        "permissions": "0755",
+        "content": script_text,
+    })
 
     if project.cloud_config is not None:
         project_text = substitute_tokens(project.cloud_config.read_text(), tokens)
@@ -530,6 +576,36 @@ def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
     ], check=False)
 
 
+def cmd_provision(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    state = domain_state(gc.libvirt_uri, project.name)
+    if state is None:
+        die(f"domain '{project.name}' is not defined; run `devbox create` first")
+    if state != "running":
+        die(f"domain '{project.name}' is not running ({state}); run `devbox up` first")
+    ip = get_ip(gc.libvirt_uri, project.name)
+    if not ip:
+        die(f"no IPv4 lease for '{project.name}' yet (still booting?).")
+
+    script = render_provision_script(project, gc)
+    print(f"==> re-running provisioning on '{project.name}' ({ip}) ...")
+    # Pipe the rendered script over stdin, save it on the box, and run it,
+    # tee'ing to ~/provision.log (the same log `devbox status` tails). Run under
+    # `bash -c` with pipefail so a provisioning failure propagates through the
+    # tee rather than being masked by tee's own exit status.
+    remote = (
+        'cat > "$HOME/provision-common.sh" && '
+        'set -o pipefail && '
+        f'bash "$HOME/provision-common.sh" 2>&1 | tee "$HOME/{PROVISION_LOG}"'
+    )
+    result = subprocess.run(
+        ["ssh", f"{project.user}@{ip}", "bash", "-c", shlex.quote(remote)],
+        input=script, text=True,
+    )
+    if result.returncode != 0:
+        die(f"provisioning failed (exit {result.returncode}); see the output above "
+            f"or ~/{PROVISION_LOG} on the box")
+
+
 def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     ip = get_ip(gc.libvirt_uri, project.name)
     if not ip:
@@ -583,6 +659,7 @@ def main() -> None:
     s.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
     s.set_defaults(func=cmd_ssh)
     sub.add_parser("status", help="show cloud-init progress + provision log").set_defaults(func=cmd_status)
+    sub.add_parser("provision", help="re-run the provisioning script over SSH (reconverge a running VM)").set_defaults(func=cmd_provision)
     sub.add_parser("host", help="refresh the SSH alias used for jj-sync, print the alias name").set_defaults(func=cmd_host)
 
     args = p.parse_args()

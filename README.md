@@ -149,10 +149,15 @@ and with valid YAML flow-mapping syntax).
 
 ### How cloud-config merging works
 
-devbox ships its own `common-cloud-config.yaml` (packages, the dev user,
-jj install + identity, GitHub auth (`gh`) + Claude Code `github`/`linear`
+devbox ships its own `common-cloud-config.yaml` (packages, the dev user, the
+`BASH_ENV` wiring) plus a standalone, re-runnable `provision-common.sh` (jj
+install + identity, GitHub auth (`gh`) + Claude Code `github`/`linear`
 plugins, dotfiles, and the `[repo]`-driven clone/push bootstrap). `devbox
-create` merges it with the project's optional `.devbox/cloud-config.yaml`:
+create` substitutes the script's `%TOKEN%`s, injects it into the seed's
+`write_files`, and merges the template with the project's optional
+`.devbox/cloud-config.yaml`. Because the provisioning body is a standalone
+idempotent script, `devbox provision` can re-run the exact same script over
+SSH against an already-booted box (reconverge) without a destroy+create.
 
 - `%TOKEN%` substitution happens on each file's raw text independently,
   *before* either is parsed as YAML.
@@ -181,6 +186,7 @@ create` merges it with the project's optional `.devbox/cloud-config.yaml`:
 | `devbox ip` | Print the domain's IPv4. |
 | `devbox ssh [-- args...]` | `ssh` into the domain. |
 | `devbox status` | SSH in and show `cloud-init status --long` plus the tail of `~/provision.log`. |
+| `devbox provision` | Re-run the provisioning script (`provision-common.sh`) over SSH against a running domain — reconverge (add a package, bump jj, add a plugin) without destroy+create. Idempotent; tees to `~/provision.log`. |
 | `devbox host` | Refresh the SSH alias used for jj-sync (below); prints the alias name. |
 
 Every subcommand accepts `-C/--project-dir PATH` (before the subcommand) to
@@ -189,7 +195,12 @@ resolve a project other than the current directory.
 **Changing a project's cloud-config (common template or `.devbox/cloud-config.yaml`)
 only takes effect via `destroy` + `create`, never `up`** — cloud-init's
 NoCloud seed ISO is only attached on first boot, so an already-defined
-domain never re-reads it.
+domain never re-reads it. The exception is the provisioning body
+(`provision-common.sh`): `devbox provision` re-runs it over SSH on a live
+box, so edits to *that* script (and to the tokens it consumes — jj identity,
+GitHub token, `[repo]`) reconverge without a rebuild. Changes to the parts
+that live in `common-cloud-config.yaml` itself (packages, the user, YAML
+structure) still need `destroy` + `create`.
 
 ### Project resolution
 
