@@ -466,6 +466,57 @@ def test_format_age_buckets():
     assert devbox._format_age((now - timedelta(days=2)).isoformat()) == "2d"
 
 
+# ---- provider seam ----------------------------------------------------------
+def test_get_provider_libvirt():
+    gc = _global_config(devbox.Path("/nonexistent"))
+    assert isinstance(devbox.get_provider("libvirt", gc), devbox.LibvirtProvider)
+
+
+def test_get_provider_unknown_dies():
+    gc = _global_config(devbox.Path("/nonexistent"))
+    with pytest.raises(SystemExit):
+        devbox.get_provider("aws", gc)
+
+
+def test_libvirt_provider_list_returns_instances(monkeypatch):
+    stamp = devbox.build_metadata_xml("proj", "libvirt", "2026-07-21T10:00:00+00:00")
+    dumpxml = _domain_xml(metadata_inner=stamp, vcpu=6, memory_kib=12582912)
+
+    def fake_virsh(uri, *a, **k):
+        sub = a[0]
+        if sub == "list":
+            return subprocess.CompletedProcess(a, 0, "demo\n", "")
+        if sub == "dumpxml":
+            return subprocess.CompletedProcess(a, 0, dumpxml, "")
+        if sub == "domstate":
+            return subprocess.CompletedProcess(a, 0, "running\n", "")
+        return subprocess.CompletedProcess(a, 0, "", "")
+
+    monkeypatch.setattr(devbox, "virsh", fake_virsh)
+    provider = devbox.LibvirtProvider(_global_config(devbox.Path("/nonexistent")))
+    instances = provider.list()
+    assert len(instances) == 1
+    i = instances[0]
+    assert isinstance(i, devbox.Instance)
+    assert (i.name, i.provider, i.project, i.state) == ("demo", "libvirt", "proj", "running")
+    assert i.resources == "6 vCPU / 12 GiB"
+    assert i.created_at == "2026-07-21T10:00:00+00:00"
+
+
+def test_libvirt_provider_state_and_address_delegate(monkeypatch):
+    def fake_virsh(uri, *a, **k):
+        if a[0] == "domstate":
+            return subprocess.CompletedProcess(a, 0, "shut off\n", "")
+        if a[0] == "domifaddr":
+            return subprocess.CompletedProcess(a, 0, "vnet0 52:54:00:aa ipv4 192.168.1.5/24\n", "")
+        return subprocess.CompletedProcess(a, 0, "", "")
+
+    monkeypatch.setattr(devbox, "virsh", fake_virsh)
+    provider = devbox.LibvirtProvider(_global_config(devbox.Path("/nonexistent")))
+    assert provider.state("demo") == "shut off"
+    assert provider.address("demo") == "192.168.1.5"
+
+
 # ---- fetch_verified_checksum -----------------------------------------------
 def test_fetch_verified_checksum_missing_gpgv(monkeypatch):
     monkeypatch.setattr(devbox.shutil, "which", lambda name: None)

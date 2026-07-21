@@ -47,5 +47,13 @@ and injects into the seed at `create` (and re-runs over SSH at `provision`). `py
 to make `uv tool install --editable .` work (`project.scripts` entry
 point), declare `pytest` as a dev dependency, and declare the one real
 runtime dependency (`pyyaml`, for the cloud-config merge) — it is not a
-general packaging setup, and there is no reason to split `devbox.py` into a
-package unless it grows substantially.
+general packaging setup.
+
+Within `devbox.py`, a `Provider` ABC (`LibvirtProvider` is the sole impl)
+marks the backend seam: only `create`/`start`/`stop`/`destroy`/`state`/
+`address`/`list` are provider-specific; everything above it (config, cloud-
+config render, provisioning, ssh/exec, target resolution, list aggregation) is
+shared. Subcommands go through the seam — they don't call `virsh`/`get_ip`/
+`domain_state` directly. Splitting into a package was deliberately deferred:
+the flat file is still small, and the AWS provider (JIM-66) is the change that
+adds the bulk to justify the split — do it there.

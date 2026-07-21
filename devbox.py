@@ -30,6 +30,7 @@ and `--name` targets a specific instance (default: the project's libvirt one).
 """
 from __future__ import annotations
 
+import abc
 import argparse
 import dataclasses
 import hashlib
@@ -336,20 +337,6 @@ def read_domain_instance(uri: str, name: str) -> Optional[dict]:
     }
 
 
-def list_libvirt_instances(uri: str) -> list:
-    """Every devbox-managed libvirt domain on this host, with state attached."""
-    r = virsh(uri, "list", "--all", "--name", check=False, capture=True)
-    instances = []
-    for name in (r.stdout or "").split():
-        info = read_domain_instance(uri, name)
-        if info is None:
-            continue
-        info["state"] = domain_state(uri, name) or "unknown"
-        instances.append(info)
-    instances.sort(key=lambda i: i["name"])
-    return instances
-
-
 def _format_resources(vcpus: Optional[int], memory_kib: Optional[int]) -> str:
     if vcpus is None or memory_kib is None:
         return "?"
@@ -597,86 +584,223 @@ def truncate_known_hosts() -> None:
     KNOWN_HOSTS_PATH.chmod(0o600)
 
 
+# ---- provider seam -----------------------------------------------------------
+# Everything above this line is provider-agnostic (config, cloud-config render,
+# provisioning script). What a machine's *location* dictates - launch, lifecycle,
+# address discovery, enumeration - lives behind Provider. libvirt is the only
+# implementation today; the AWS provider (JIM-66) slots in as a second, and the
+# shared body above (ssh/exec, provisioning, jj sync, target/config resolution,
+# list aggregation) doesn't move.
+@dataclasses.dataclass
+class InstanceSpec:
+    """What `create` needs to launch one instance, provider-independent."""
+    name: str
+    project: str
+    provider: str
+    vcpus: int
+    memory_mib: int
+    disk_gb: int
+    user_data: str        # rendered cloud-config (first-boot provisioning)
+    created_at: str       # ISO-8601, stamped onto the instance
+
+
+@dataclasses.dataclass
+class Instance:
+    """One row of `devbox list`. `resources` is provider-formatted (libvirt:
+    vCPU/RAM; AWS will use the instance type)."""
+    name: str
+    provider: str
+    project: Optional[str]
+    state: str
+    resources: str
+    created_at: Optional[str]
+
+
+class Provider(abc.ABC):
+    """The backend-specific seam. Only create/lifecycle/address/enumeration are
+    per-backend; everything else is shared above it."""
+    name: str
+
+    @abc.abstractmethod
+    def create(self, spec: InstanceSpec) -> None: ...
+
+    @abc.abstractmethod
+    def start(self, name: str) -> None: ...
+
+    @abc.abstractmethod
+    def stop(self, name: str) -> None: ...
+
+    @abc.abstractmethod
+    def destroy(self, name: str) -> None: ...
+
+    @abc.abstractmethod
+    def state(self, name: str) -> Optional[str]:
+        """Backend state ('running', 'shut off', ...), or None if undefined."""
+
+    @abc.abstractmethod
+    def address(self, name: str) -> Optional[str]:
+        """SSH host/IP, or None if not available yet."""
+
+    @abc.abstractmethod
+    def list(self) -> list:
+        """Instances this provider manages, as Instance rows."""
+
+
+class LibvirtProvider(Provider):
+    name = "libvirt"
+
+    def __init__(self, gc: GlobalConfig):
+        self.gc = gc
+        self.uri = gc.libvirt_uri
+
+    def state(self, name: str) -> Optional[str]:
+        return domain_state(self.uri, name)
+
+    def address(self, name: str) -> Optional[str]:
+        return get_ip(self.uri, name)
+
+    def start(self, name: str) -> None:
+        virsh(self.uri, "start", name)
+
+    def stop(self, name: str) -> None:
+        virsh(self.uri, "shutdown", name)
+
+    def destroy(self, name: str) -> None:
+        virsh(self.uri, "destroy", name, check=False)
+        # --nvram is rejected by older libvirt without nvram; retry without it.
+        if virsh(self.uri, "undefine", name, "--remove-all-storage", "--nvram",
+                 check=False, capture=True).returncode != 0:
+            virsh(self.uri, "undefine", name, "--remove-all-storage", check=False)
+
+    def list(self) -> list:
+        r = virsh(self.uri, "list", "--all", "--name", check=False, capture=True)
+        out = []
+        for name in (r.stdout or "").split():
+            info = read_domain_instance(self.uri, name)
+            if info is None:
+                continue
+            out.append(Instance(
+                name=info["name"],
+                provider="libvirt",
+                project=info["project"],
+                state=domain_state(self.uri, name) or "unknown",
+                resources=_format_resources(info["vcpus"], info["memory_kib"]),
+                created_at=info["created_at"],
+            ))
+        out.sort(key=lambda i: i.name)
+        return out
+
+    def create(self, spec: InstanceSpec) -> None:
+        for binary in ("virt-install", "virsh"):
+            if not shutil.which(binary):
+                die(f"'{binary}' not found. Install: sudo apt install virtinst libvirt-daemon-system qemu-system-x86")
+
+        # Global-uniqueness of the instance name. The union of providers is just
+        # libvirt today, so an existing domain of this name (devbox-managed or
+        # not) is the whole check; the AWS provider will extend it.
+        if domain_state(self.uri, spec.name) is not None:
+            die(f"domain '{spec.name}' is already defined; run `devbox destroy` first")
+
+        net = virsh(self.uri, "net-info", self.gc.network, check=False, capture=True).stdout or ""
+        if "Active:" not in net or "yes" not in net.lower().split("active:")[-1].splitlines()[0]:
+            die(f"libvirt network '{self.gc.network}' is not active. Start it:\n"
+                f"  sudo virsh -c {self.uri} net-start {self.gc.network} "
+                f"&& sudo virsh -c {self.uri} net-autostart {self.gc.network}")
+
+        img = self._ensure_base_image()
+        fd, tmp_path = tempfile.mkstemp(prefix="devbox-cloud-init-", suffix=".yaml")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(spec.user_data)
+
+            # virt-install makes a qcow2 overlay (in the default pool, via
+            # libvirtd) backed by the cached image, builds the NoCloud seed,
+            # and boots it.
+            print(f"==> Creating domain '{spec.name}' ...")
+            subprocess.run([
+                "virt-install",
+                "--connect", self.uri,
+                "--name", spec.name,
+                "--memory", str(spec.memory_mib),
+                "--vcpus", str(spec.vcpus),
+                "--cpu", "host-passthrough",
+                "--os-variant", "detect=on,name=ubuntu24.04",
+                "--disk", f"size={spec.disk_gb},backing_store={img},format=qcow2",
+                "--cloud-init", f"user-data={tmp_path}",
+                "--network", f"network={self.gc.network}",
+                "--graphics", "none",
+                "--import",
+                "--noautoconsole",
+            ], check=True)
+        finally:
+            os.unlink(tmp_path)
+
+        # Stamp the domain so `devbox list` recognizes it (and, from day one,
+        # records provider + created-at for a future auto-stop reaper).
+        stamp_domain(self.uri, spec.name, spec.project, spec.provider, spec.created_at)
+
+    def _ensure_base_image(self) -> Path:
+        """The shared, cached, GPG-verified base cloud image (one per host,
+        reused across projects)."""
+        expected_sha256 = fetch_verified_checksum(self.gc.base_image_url)
+        self.gc.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.gc.cache_dir.chmod(0o755)
+        img = self.gc.cache_dir / Path(self.gc.base_image_url).name
+        if not img.is_file() or sha256_file(img) != expected_sha256:
+            print(f"==> Downloading base image ({self.gc.base_image_url}) ...")
+            tmp = img.with_name(img.name + ".tmp")
+            with urllib.request.urlopen(self.gc.base_image_url) as resp, tmp.open("wb") as out:
+                shutil.copyfileobj(resp, out, 1 << 20)
+            if sha256_file(tmp) != expected_sha256:
+                tmp.unlink()
+                die("downloaded image failed SHA256 verification")
+            tmp.replace(img)
+            # World-readable for qemu. Only meaningful right after download - on
+            # later runs libvirt's dynamic ownership has chown'd it to
+            # libvirt-qemu (and we'd no longer be allowed to chmod it), which is fine.
+            img.chmod(0o644)
+        return img
+
+
+PROVIDER_REGISTRY = {"libvirt": LibvirtProvider}
+
+
+def get_provider(name: str, gc: GlobalConfig) -> Provider:
+    """The Provider for a given name (a project's or the target instance's)."""
+    cls = PROVIDER_REGISTRY.get(name)
+    if cls is None:
+        die(f"provider '{name}' is not supported yet (AWS lands in JIM-66); "
+            f"choose one of {tuple(PROVIDER_REGISTRY)}")
+    return cls(gc)
+
+
+def all_providers(gc: GlobalConfig) -> list:
+    """Every configured provider, for the global `list` aggregation."""
+    return [cls(gc) for cls in PROVIDER_REGISTRY.values()]
+
+
 # ---- subcommands --------------------------------------------------------------
 def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    provider = args.provider or project.provider
-    if provider not in PROVIDERS:
-        die(f"provider '{provider}' is not supported yet (AWS lands in JIM-66); "
-            f"choose one of {PROVIDERS}")
+    provider_name = args.provider or project.provider
+    provider = get_provider(provider_name, gc)
     # libvirt's one instance per project is the bare-named default (= project);
     # arbitrary --name is reserved for cloud instances, which don't exist yet.
-    if args.name:
+    if provider_name == "libvirt" and args.name:
         die("libvirt instances are the project's bare default (name = the project); "
             "--name is reserved for cloud instances, not supported yet (JIM-66)")
     name = project.project
 
-    for binary in ("virt-install", "virsh"):
-        if not shutil.which(binary):
-            die(f"'{binary}' not found. Install: sudo apt install virtinst libvirt-daemon-system qemu-system-x86")
-
-    # Global-uniqueness of the instance name. The union of providers is just
-    # libvirt today, so an existing domain of this name (devbox-managed or not)
-    # is the whole check; the AWS provider will extend it.
-    if domain_state(gc.libvirt_uri, name) is not None:
-        die(f"domain '{name}' is already defined; run `devbox destroy` first")
-
-    net = virsh(gc.libvirt_uri, "net-info", gc.network, check=False, capture=True).stdout or ""
-    if "Active:" not in net or "yes" not in net.lower().split("active:")[-1].splitlines()[0]:
-        die(f"libvirt network '{gc.network}' is not active. Start it:\n"
-            f"  sudo virsh -c {gc.libvirt_uri} net-start {gc.network} "
-            f"&& sudo virsh -c {gc.libvirt_uri} net-autostart {gc.network}")
-
-    # base cloud image (cached, checksum-verified via GPG-signed SHA256SUMS,
-    # shared across all projects)
-    expected_sha256 = fetch_verified_checksum(gc.base_image_url)
-    gc.cache_dir.mkdir(parents=True, exist_ok=True)
-    gc.cache_dir.chmod(0o755)
-    img = gc.cache_dir / Path(gc.base_image_url).name
-    if not img.is_file() or sha256_file(img) != expected_sha256:
-        print(f"==> Downloading base image ({gc.base_image_url}) ...")
-        tmp = img.with_name(img.name + ".tmp")
-        with urllib.request.urlopen(gc.base_image_url) as resp, tmp.open("wb") as out:
-            shutil.copyfileobj(resp, out, 1 << 20)
-        if sha256_file(tmp) != expected_sha256:
-            tmp.unlink()
-            die("downloaded image failed SHA256 verification")
-        tmp.replace(img)
-        # World-readable for qemu. Only meaningful right after download - on
-        # later runs libvirt's dynamic ownership has chown'd it to
-        # libvirt-qemu (and we'd no longer be allowed to chmod it), which is fine.
-        img.chmod(0o644)
-
-    rendered = render_cloud_config(project, gc)
-    fd, tmp_path = tempfile.mkstemp(prefix="devbox-cloud-init-", suffix=".yaml")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(rendered)
-
-        # virt-install makes a qcow2 overlay (in the default pool, via libvirtd)
-        # backed by the cached image, builds the NoCloud seed, and boots it.
-        print(f"==> Creating domain '{name}' ...")
-        subprocess.run([
-            "virt-install",
-            "--connect", gc.libvirt_uri,
-            "--name", name,
-            "--memory", str(project.memory_mib),
-            "--vcpus", str(project.vcpus),
-            "--cpu", "host-passthrough",
-            "--os-variant", "detect=on,name=ubuntu24.04",
-            "--disk", f"size={project.disk_gb},backing_store={img},format=qcow2",
-            "--cloud-init", f"user-data={tmp_path}",
-            "--network", f"network={gc.network}",
-            "--graphics", "none",
-            "--import",
-            "--noautoconsole",
-        ], check=True)
-    finally:
-        os.unlink(tmp_path)
-
-    # Stamp the domain so `devbox list` recognizes it (and, from day one,
-    # records provider + created-at for a future auto-stop reaper).
-    stamp_domain(gc.libvirt_uri, name, project.project, provider,
-                 datetime.now(timezone.utc).isoformat())
+    spec = InstanceSpec(
+        name=name,
+        project=project.project,
+        provider=provider_name,
+        vcpus=project.vcpus,
+        memory_mib=project.memory_mib,
+        disk_gb=project.disk_gb,
+        user_data=render_cloud_config(project, gc),
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    provider.create(spec)
 
     truncate_known_hosts()
 
@@ -692,41 +816,40 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
 
 def cmd_up(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name = resolve_instance(args, project)
-    state = domain_state(gc.libvirt_uri, name)
+    provider = get_provider(project.provider, gc)
+    state = provider.state(name)
     if state is None:
         die(f"domain '{name}' is not defined; run `devbox create` first")
     if state == "running":
         print(f"domain '{name}' is already running.")
         return
     print(f"==> starting '{name}' ...")
-    virsh(gc.libvirt_uri, "start", name)
+    provider.start(name)
 
 
 def cmd_stop(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name = resolve_instance(args, project)
-    state = domain_state(gc.libvirt_uri, name)
+    provider = get_provider(project.provider, gc)
+    state = provider.state(name)
     if state is None:
         die(f"domain '{name}' is not defined; run `devbox create` first")
     if state != "running":
         print(f"domain '{name}' is already stopped ({state}).")
         return
     print(f"==> stopping '{name}' ...")
-    virsh(gc.libvirt_uri, "shutdown", name)
+    provider.stop(name)
 
 
 def cmd_destroy(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name = resolve_instance(args, project)
-    virsh(gc.libvirt_uri, "destroy", name, check=False)
-    # --nvram is rejected by older libvirt without nvram; retry without it.
-    if virsh(gc.libvirt_uri, "undefine", name, "--remove-all-storage", "--nvram",
-             check=False, capture=True).returncode != 0:
-        virsh(gc.libvirt_uri, "undefine", name, "--remove-all-storage", check=False)
+    provider = get_provider(project.provider, gc)
+    provider.destroy(name)
     print(f"Destroyed '{name}' (cached base image left in {gc.cache_dir}).")
 
 
 def cmd_ip(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name = resolve_instance(args, project)
-    ip = get_ip(gc.libvirt_uri, name)
+    ip = get_provider(project.provider, gc).address(name)
     if not ip:
         die(f"no IPv4 lease for '{name}' yet (still booting?). Try again shortly.")
     print(ip)
@@ -734,7 +857,7 @@ def cmd_ip(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -
 
 def cmd_ssh(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name = resolve_instance(args, project)
-    ip = get_ip(gc.libvirt_uri, name)
+    ip = get_provider(project.provider, gc).address(name)
     if not ip:
         die(f"no IPv4 lease for '{name}' yet (still booting?).")
     os.execvp("ssh", ["ssh", f"{project.user}@{ip}", *args.ssh_args])
@@ -742,7 +865,7 @@ def cmd_ssh(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) 
 
 def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name = resolve_instance(args, project)
-    ip = get_ip(gc.libvirt_uri, name)
+    ip = get_provider(project.provider, gc).address(name)
     if not ip:
         die(f"no IPv4 lease for '{name}' yet (still booting?).")
     subprocess.run([
@@ -753,12 +876,13 @@ def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
 
 def cmd_provision(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name = resolve_instance(args, project)
-    state = domain_state(gc.libvirt_uri, name)
+    provider = get_provider(project.provider, gc)
+    state = provider.state(name)
     if state is None:
         die(f"domain '{name}' is not defined; run `devbox create` first")
     if state != "running":
         die(f"domain '{name}' is not running ({state}); run `devbox up` first")
-    ip = get_ip(gc.libvirt_uri, name)
+    ip = provider.address(name)
     if not ip:
         die(f"no IPv4 lease for '{name}' yet (still booting?).")
 
@@ -783,28 +907,29 @@ def cmd_provision(args: argparse.Namespace, gc: GlobalConfig, project: ProjectCo
 
 
 def cmd_list(args: argparse.Namespace, gc: GlobalConfig, project: Optional[ProjectConfig]) -> None:
-    # Global view: every devbox-managed instance on this host, across projects.
-    # libvirt-only for now; the AWS half (account-wide) is unioned in at JIM-66.
-    instances = list_libvirt_instances(gc.libvirt_uri)
+    # Global view: every devbox-managed instance, unioned across providers.
+    # libvirt-only for now; the AWS half (account-wide) joins in at JIM-66.
+    instances = [inst for provider in all_providers(gc) for inst in provider.list()]
+    instances.sort(key=lambda i: i.name)
     if not instances:
         print("No devbox-managed instances.")
         return
     rows = [("NAME", "PROVIDER", "PROJECT", "STATE", "RESOURCES", "UP")]
     for i in instances:
         rows.append((
-            i["name"],
-            i["provider"],
-            i["project"] or "—",
-            i["state"],
-            _format_resources(i["vcpus"], i["memory_kib"]),
-            _format_age(i["created_at"]) if i["state"] == "running" else "—",
+            i.name,
+            i.provider,
+            i.project or "—",
+            i.state,
+            i.resources,
+            _format_age(i.created_at) if i.state == "running" else "—",
         ))
     _print_table(rows)
 
 
 def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name = resolve_instance(args, project)
-    ip = get_ip(gc.libvirt_uri, name)
+    ip = get_provider(project.provider, gc).address(name)
     if not ip:
         die(f"no IPv4 lease for '{name}' yet (still booting?).")
 
