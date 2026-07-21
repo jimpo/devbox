@@ -1,12 +1,20 @@
 # devbox
 
-A global, multi-project dev-sandbox VM manager (libvirt + cloud-init). All
-projects share one cached base VM image, one global config, and one common
-cloud-config template (dotfiles, jj, Claude Code, base packages) that devbox
-owns; each project supplies only what's different via an optional
-`.devbox/cloud-config.yaml`, merged on top. `devbox` finds "which VM belongs
-to the project in the current working directory" the way `git`/`direnv`/`mise`
-locate their own markers.
+A global, multi-project dev-sandbox manager for **libvirt** (local VMs) and
+**AWS** (EC2). One tool manages development machines regardless of where they
+run: once a box is up, `ssh`/`exec`/`list`/`provision`/`sync` are
+backend-independent; only `create`/`up`/`stop`/`destroy` and address discovery
+are provider-specific (a thin `Provider` seam). All projects share one cached
+base image (libvirt), one global config, and one common cloud-config +
+re-runnable provisioning script (dotfiles, jj, Claude Code, base packages) that
+devbox owns; each project supplies only what's different via an optional
+`.devbox/cloud-config.yaml`, merged on top. `devbox` finds "which instance
+belongs to the project in the current working directory" the way
+`git`/`direnv`/`mise` locate their own markers.
+
+> Coming from **cfleet**? It's been folded into devbox — see
+> [`docs/cfleet-migration.md`](docs/cfleet-migration.md) for the command and
+> config mapping.
 
 ## Requirements
 
