@@ -11,49 +11,50 @@ uv tool install --editable .     # point the live `devbox` command at this check
 
 ## Testing scope
 
-`tests/` only exercises pure logic: global/project config loading and
-merging (`GlobalConfig.load`, `resolve_project`, `resolve_instance`), marker
-walk-up resolution, cloud-config token substitution + YAML merging
-(`merge_cloud_config`, `render_cloud_config`), and the libvirt `<metadata>`
-stamp/parse + `list` formatting (`build_metadata_xml`, `read_domain_instance`
-with a monkeypatched `virsh`, `_format_resources`/`_format_age`). It does not
-and cannot exercise `create`/`up`/`stop`/`destroy`/`host`/`provision`/`list`
-end-to-end, or the actual content of the provisioning script
-`provision-common.sh` (jj install, dotfiles, Claude Code, repo bootstrap) —
-those need a real libvirt daemon and a booted VM, which isn't available in CI
-or a sandboxed agent environment. The tests do cover that `render_cloud_config`
-injects the (token-substituted) script into the seed's `write_files` and that
-`render_provision_script` substitutes its tokens, but not that the script's
-steps actually work on a box. Verify changes to those subcommands, to `common-cloud-config.yaml`, or
-to `provision-common.sh`, by reading the `virsh`/`virt-install` invocations
-and the rendered cloud-config carefully; if you have access to a real libvirt
-setup, exercise them by hand (`devbox create` + `devbox status` through to
-`cloud-init status --long` reporting `done`, then `devbox ssh` in and check
-the specific thing you changed; for provisioning edits, `devbox provision`
-and re-check) before calling a change done.
+`tests/` exercises pure logic and provider paths reachable without real infra:
+global/project config loading + merging (`GlobalConfig.load`, `resolve_project`,
+`resolve_instance`), marker walk-up, cloud-config token substitution + YAML
+merging, the libvirt `<metadata>` stamp/parse + `list` formatting (monkeypatched
+`virsh`), and the **AWS provider against a fake EC2 client** (`AwsProvider` with
+an injected `client=`: list/state/address, run-instances request shape, spot,
+AMI lookup, subnet capacity fallback, lifecycle). It does not and cannot
+exercise `create`/`up`/`stop`/`destroy`/`host`/`provision`/`list` end-to-end
+against real infra, the actual content of `provision-common.sh` (jj install,
+dotfiles, Claude Code, repo bootstrap), or a live EC2 launch — those need a real
+libvirt daemon + booted VM, or real AWS. Verify such changes by reading the
+`virsh`/`virt-install`/boto3 calls and the rendered cloud-config carefully; with
+a real libvirt setup, exercise by hand (`devbox create` + `devbox status`
+through to `cloud-init status --long` reporting `done`, then `devbox ssh`; for
+provisioning edits, `devbox provision` and re-check) before calling it done.
 
-`tests/conftest.py` loads `devbox.py` via `importlib` (it's a flat script,
-not a package) and registers it as `sys.modules["devbox"]` — test files
-just `import devbox` after that.
+`tests/conftest.py` just puts the repo root on `sys.path` so `import devbox`
+resolves the package (works with or without an editable install). Tests
+monkeypatch module-local names where they live (e.g.
+`devbox.providers.libvirt.virsh`, `devbox.cloudconfig.COMMON_CLOUD_CONFIG_PATH`),
+while shared stdlib patches go through the re-exported `devbox.shutil`/
+`devbox.subprocess`/`devbox.urllib` (same module singletons everywhere).
 
 ## Layout
 
-Almost everything lives in `devbox.py` (no submodules) plus
-`common-cloud-config.yaml`, the shared cloud-config template merged onto
-every project's optional `.devbox/cloud-config.yaml` at `create` time (see
-README's "How cloud-config merging works"), and `provision-common.sh`, the
-standalone re-runnable provisioning body that `devbox.py` token-substitutes
-and injects into the seed at `create` (and re-runs over SSH at `provision`). `pyproject.toml` exists
-to make `uv tool install --editable .` work (`project.scripts` entry
-point), declare `pytest` as a dev dependency, and declare the one real
-runtime dependency (`pyyaml`, for the cloud-config merge) — it is not a
-general packaging setup.
+`devbox/` is a package split by concern:
 
-Within `devbox.py`, a `Provider` ABC (`LibvirtProvider` is the sole impl)
-marks the backend seam: only `create`/`start`/`stop`/`destroy`/`state`/
-`address`/`list` are provider-specific; everything above it (config, cloud-
-config render, provisioning, ssh/exec, target resolution, list aggregation) is
-shared. Subcommands go through the seam — they don't call `virsh`/`get_ip`/
-`domain_state` directly. Splitting into a package was deliberately deferred:
-the flat file is still small, and the AWS provider (JIM-66) is the change that
-adds the bulk to justify the split — do it there.
+- `config.py` — global (`GlobalConfig`, incl. `[aws]`) + per-project
+  (`ProjectConfig`, incl. `[aws]`) config, marker resolution, `resolve_instance`.
+- `cloudconfig.py` — token substitution, common+project merge, and the render of
+  `common-cloud-config.yaml` + the standalone re-runnable `provision-common.sh`
+  (both ship inside the package). One cloud-config, two delivery paths (libvirt
+  NoCloud seed / EC2 user-data).
+- `providers/` — the backend seam. `base.py` (`Provider` ABC, `InstanceSpec`,
+  `Instance`); `libvirt.py`; `aws.py` (boto3, lazily imported + injectable client
+  for tests); `__init__.py` (`get_provider`, `all_providers` — AWS gated on
+  `[aws]` being configured). Only `create`/`start`/`stop`/`destroy`/`state`/
+  `address`/`list` are per-backend; everything above (config, render,
+  provisioning, ssh/exec, target resolution, list aggregation) is shared, and
+  subcommands go through the seam rather than calling `virsh`/boto3 directly.
+- `cli.py` — argparse + subcommand handlers + `main`; `__main__.py` for
+  `python -m devbox`.
+- `__init__.py` — re-exports a flat `devbox.X` API for convenience/tests.
+
+`pyproject.toml` (hatchling) declares the `devbox.cli:main` entry point,
+force-includes the two package data files into the wheel, and declares runtime
+deps `pyyaml` (cloud-config merge) + `boto3` (AWS provider).

@@ -5,18 +5,21 @@ build-backend = "hatchling.build"
 [project]
 name = "devbox"
 version = "0.1.0"
-description = "Global, multi-project dev-sandbox VM manager (libvirt + cloud-init)"
+description = "Global, multi-project dev-sandbox manager (libvirt + AWS)"
 requires-python = ">=3.11"
-dependencies = ["pyyaml>=6.0"]
+dependencies = ["pyyaml>=6.0", "boto3>=1.34"]
 
 [project.scripts]
-devbox = "devbox:main"
+devbox = "devbox.cli:main"
 
 [tool.hatch.build.targets.wheel]
-py-modules = ["devbox"]
+packages = ["devbox"]
 
+# Non-Python data files shipped inside the package (resolved at runtime via
+# Path(__file__).parent).
 [tool.hatch.build.targets.wheel.force-include]
-"common-cloud-config.yaml" = "common-cloud-config.yaml"
+"devbox/common-cloud-config.yaml" = "devbox/common-cloud-config.yaml"
+"devbox/provision-common.sh" = "devbox/provision-common.sh"
 
 [dependency-groups]
 dev = [

@@ -1,0 +1,331 @@
+"""Command-line entry point and subcommand handlers. Everything here is
+provider-agnostic: commands resolve config + target, then act through the
+Provider seam.
+
+    devbox create              # download image, define + first-boot the VM
+    devbox up / stop           # start / gracefully shut down a defined VM
+    devbox ip                  # print the VM's IPv4
+    devbox ssh [args...]       # ssh into the VM
+    devbox status              # cloud-init progress + tail provision.log
+    devbox provision           # re-run the provisioning script over SSH (reconverge)
+    devbox list                # list devbox-managed instances on this host
+    devbox host                # refresh the SSH alias used for jj-sync
+    devbox destroy             # tear down, removing the overlay disk
+
+An instance is no longer the same thing as a project: a project is a label,
+and `--name` targets a specific instance (default: the project's libvirt one).
+"""
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import os
+import shlex
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from .cloudconfig import PROVISION_LOG, render_cloud_config, render_provision_script
+from .config import (DEFAULT_PROVIDER, GlobalConfig, KNOWN_HOSTS_PATH, PROVIDERS,
+                     ProjectConfig, SSH_DIR, SSH_USER_CONFIG, resolve_instance,
+                     resolve_project)
+from .providers import InstanceSpec, all_providers, get_provider
+from .util import die
+
+
+def _format_age(created_at: Optional[str]) -> str:
+    """Coarse age since create (m/h/d). Note: this is time-since-`devbox create`,
+    a stand-in for uptime - close for the common create-once-keep-running box,
+    but it doesn't reset across stop/start (precise guest uptime needs the guest
+    agent, out of scope). Shown only for running instances."""
+    if not created_at:
+        return "?"
+    try:
+        created = datetime.fromisoformat(created_at)
+    except ValueError:
+        return "?"
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    secs = max(0, int((datetime.now(timezone.utc) - created).total_seconds()))
+    if secs < 3600:
+        return f"{secs // 60}m"
+    if secs < 86400:
+        return f"{secs // 3600}h"
+    return f"{secs // 86400}d"
+
+
+def _print_table(rows: list) -> None:
+    widths = [max(len(str(row[i])) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        print("  ".join(str(cell).ljust(widths[i]) for i, cell in enumerate(row)).rstrip())
+
+
+def truncate_known_hosts() -> None:
+    """A freshly created instance has a brand-new SSH host key; stale entries
+    from a previous instance of the same name can only cause false mismatches."""
+    SSH_DIR.mkdir(parents=True, exist_ok=True)
+    KNOWN_HOSTS_PATH.write_text("")
+    KNOWN_HOSTS_PATH.chmod(0o600)
+
+
+def _check_name_unique(gc: GlobalConfig, name: str) -> None:
+    """Instance names are globally unique across providers - enforced at create
+    by checking the union `list`. A provider that can't be listed (e.g. AWS creds
+    missing) is warned about, not fatal, so a local create isn't blocked by it."""
+    for provider in all_providers(gc):
+        try:
+            existing = provider.list()
+        except Exception as e:  # noqa: BLE001
+            print(f"warning: could not check {provider.name} for name collisions: {e}")
+            continue
+        if any(i.name == name for i in existing):
+            die(f"an instance named '{name}' already exists ({provider.name}); "
+                f"pick another name or destroy it first")
+
+
+# ---- subcommands --------------------------------------------------------------
+def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    provider_name = args.provider or project.provider
+    provider = get_provider(provider_name, gc)
+
+    if provider_name == "libvirt":
+        # libvirt's one instance per project is the bare-named default (= project);
+        # arbitrary --name is reserved for cloud instances.
+        if args.name:
+            die("libvirt instances are the project's bare default (name = the project); "
+                "--name is only for cloud instances")
+        name = project.project
+    else:
+        # Cloud instances always require an explicit --name.
+        if not args.name:
+            die(f"cloud instances always require --name "
+                f"(e.g. `devbox create --provider {provider_name} --name foo-gpu`)")
+        name = args.name
+
+    _check_name_unique(gc, name)
+
+    aws_cfg = project.aws
+    if aws_cfg is not None and (args.spot or args.on_demand):
+        aws_cfg = dataclasses.replace(aws_cfg, spot=bool(args.spot))
+
+    spec = InstanceSpec(
+        name=name,
+        project=project.project,
+        provider=provider_name,
+        disk_gb=project.disk_gb,
+        user_data=render_cloud_config(project, gc, instance_name=name),
+        created_at=datetime.now(timezone.utc).isoformat(),
+        vcpus=project.vcpus,
+        memory_mib=project.memory_mib,
+        aws=aws_cfg,
+    )
+    provider.create(spec)
+
+    truncate_known_hosts()
+
+    d = args.project_dir or "."
+    target = f"devbox -C {d}" + (f" --name {name}" if provider_name != "libvirt" else "")
+    console = (f"\n  Console:   virsh -c {gc.libvirt_uri} console {name}   # ctrl-] to exit"
+               if provider_name == "libvirt" else "")
+    print(f"""
+==> '{name}' is booting. cloud-init provisioning runs on first boot (several minutes).
+
+  IP:        {target} ip
+  SSH:       {target} ssh
+  Progress:  {target} status{console}
+""")
+
+
+def cmd_up(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    name = resolve_instance(args, project)
+    provider = get_provider(project.provider, gc)
+    state = provider.state(name)
+    if state is None:
+        die(f"instance '{name}' is not defined; run `devbox create` first")
+    if state == "running":
+        print(f"instance '{name}' is already running.")
+        return
+    print(f"==> starting '{name}' ...")
+    provider.start(name)
+
+
+def cmd_stop(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    name = resolve_instance(args, project)
+    provider = get_provider(project.provider, gc)
+    state = provider.state(name)
+    if state is None:
+        die(f"instance '{name}' is not defined; run `devbox create` first")
+    if state not in ("running",):
+        print(f"instance '{name}' is already stopped ({state}).")
+        return
+    print(f"==> stopping '{name}' ...")
+    provider.stop(name)
+
+
+def cmd_destroy(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    name = resolve_instance(args, project)
+    provider = get_provider(project.provider, gc)
+    provider.destroy(name)
+    tail = (f" (cached base image left in {gc.cache_dir})"
+            if project.provider == "libvirt" else "")
+    print(f"Destroyed '{name}'{tail}.")
+
+
+def cmd_ip(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    name = resolve_instance(args, project)
+    ip = get_provider(project.provider, gc).address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?). Try again shortly.")
+    print(ip)
+
+
+def cmd_ssh(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    name = resolve_instance(args, project)
+    ip = get_provider(project.provider, gc).address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+    os.execvp("ssh", ["ssh", f"{project.user}@{ip}", *args.ssh_args])
+
+
+def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    name = resolve_instance(args, project)
+    ip = get_provider(project.provider, gc).address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+    subprocess.run([
+        "ssh", f"{project.user}@{ip}",
+        "cloud-init status --long; echo ---; tail -n 80 ~/provision.log 2>/dev/null",
+    ], check=False)
+
+
+def cmd_provision(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    name = resolve_instance(args, project)
+    provider = get_provider(project.provider, gc)
+    state = provider.state(name)
+    if state is None:
+        die(f"instance '{name}' is not defined; run `devbox create` first")
+    if state != "running":
+        die(f"instance '{name}' is not running ({state}); run `devbox up` first")
+    ip = provider.address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+
+    script = render_provision_script(project, gc)
+    print(f"==> re-running provisioning on '{name}' ({ip}) ...")
+    # Pipe the rendered script over stdin, save it on the box, and run it,
+    # tee'ing to ~/provision.log (the same log `devbox status` tails). Run under
+    # `bash -c` with pipefail so a provisioning failure propagates through the
+    # tee rather than being masked by tee's own exit status.
+    remote = (
+        'cat > "$HOME/provision-common.sh" && '
+        'set -o pipefail && '
+        f'bash "$HOME/provision-common.sh" 2>&1 | tee "$HOME/{PROVISION_LOG}"'
+    )
+    result = subprocess.run(
+        ["ssh", f"{project.user}@{ip}", "bash", "-c", shlex.quote(remote)],
+        input=script, text=True,
+    )
+    if result.returncode != 0:
+        die(f"provisioning failed (exit {result.returncode}); see the output above "
+            f"or ~/{PROVISION_LOG} on the box")
+
+
+def cmd_list(args: argparse.Namespace, gc: GlobalConfig, project: Optional[ProjectConfig]) -> None:
+    # Global view: every devbox-managed instance, unioned across providers.
+    # AWS is account-wide; libvirt is this-host-only.
+    instances = [inst for provider in all_providers(gc) for inst in provider.list()]
+    instances.sort(key=lambda i: i.name)
+    if not instances:
+        print("No devbox-managed instances.")
+        return
+    rows = [("NAME", "PROVIDER", "PROJECT", "STATE", "RESOURCES", "UP")]
+    for i in instances:
+        up = "—"
+        if i.state == "running":
+            up = _format_age(i.created_at)
+            if i.cost_hint:
+                up += " ($)"  # this instance is costing money while running
+        rows.append((i.name, i.provider, i.project or "—", i.state, i.resources, up))
+    _print_table(rows)
+
+
+def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    name = resolve_instance(args, project)
+    ip = get_provider(project.provider, gc).address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+
+    alias = f"devbox-{name}"
+    SSH_DIR.mkdir(parents=True, exist_ok=True)
+    if not KNOWN_HOSTS_PATH.is_file():
+        KNOWN_HOSTS_PATH.write_text("")
+        KNOWN_HOSTS_PATH.chmod(0o600)
+
+    host_conf = SSH_DIR / f"{name}.conf"
+    host_conf.write_text(
+        f"Host {alias}\n"
+        f"    HostName {ip}\n"
+        f"    User {project.user}\n"
+        f"    UserKnownHostsFile {KNOWN_HOSTS_PATH}\n"
+        f"    StrictHostKeyChecking accept-new\n"
+    )
+
+    include_line = f"Include {SSH_DIR}/*.conf"
+    if SSH_USER_CONFIG.is_file():
+        existing = SSH_USER_CONFIG.read_text()
+        if include_line not in existing:
+            with SSH_USER_CONFIG.open("a") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(f"{include_line}\n")
+    else:
+        SSH_USER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        SSH_USER_CONFIG.write_text(f"{include_line}\n")
+        SSH_USER_CONFIG.chmod(0o600)
+
+    print(alias)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description="Manage per-project dev-sandbox VMs (libvirt or AWS).")
+    # Defined before add_subparsers so they can't be swallowed by ssh's
+    # argparse.REMAINDER: `devbox --name foo ssh -- -v`.
+    p.add_argument("-C", "--project-dir", type=Path, default=None,
+                    help="project directory to resolve the devbox marker from (default: cwd)")
+    p.add_argument("--name", default=None,
+                    help="target a specific instance by name (default: the project's libvirt instance)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    c = sub.add_parser("create", help="download image, define + first-boot the VM")
+    c.add_argument("--provider", choices=PROVIDERS, default=None,
+                    help=f"provider to launch on (default: the project's, else {DEFAULT_PROVIDER})")
+    market = c.add_mutually_exclusive_group()
+    market.add_argument("--spot", action="store_true", help="AWS: force a spot instance")
+    market.add_argument("--on-demand", action="store_true", help="AWS: force an on-demand instance")
+    c.set_defaults(func=cmd_create)
+    sub.add_parser("up", help="start an already-defined, shut-off VM").set_defaults(func=cmd_up)
+    sub.add_parser("stop", help="gracefully shut down a running VM").set_defaults(func=cmd_stop)
+    sub.add_parser("destroy", help="tear down the VM and its overlay disk").set_defaults(func=cmd_destroy)
+    sub.add_parser("ip", help="print the VM's IPv4").set_defaults(func=cmd_ip)
+    s = sub.add_parser("ssh", help="ssh into the VM")
+    s.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
+    s.set_defaults(func=cmd_ssh)
+    sub.add_parser("status", help="show cloud-init progress + provision log").set_defaults(func=cmd_status)
+    sub.add_parser("provision", help="re-run the provisioning script over SSH (reconverge a running VM)").set_defaults(func=cmd_provision)
+    # Global view - doesn't resolve a project (works anywhere).
+    sub.add_parser("list", help="list devbox-managed instances").set_defaults(func=cmd_list, needs_project=False)
+    sub.add_parser("host", help="refresh the SSH alias used for jj-sync, print the alias name").set_defaults(func=cmd_host)
+
+    args = p.parse_args()
+    global_config = GlobalConfig.load()
+    # Most commands operate within a project; `list` is global and skips it.
+    project = None
+    if getattr(args, "needs_project", True):
+        project = resolve_project(args.project_dir or Path.cwd(), global_config)
+    args.func(args, global_config, project)
+
+
+if __name__ == "__main__":
+    main()

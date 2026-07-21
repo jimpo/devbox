@@ -10,7 +10,7 @@ locate their own markers.
 
 ## Requirements
 
-- Debian/Ubuntu/Pop!_OS with libvirt + qemu:
+- For the **libvirt** provider: Debian/Ubuntu/Pop!_OS with libvirt + qemu:
   ```
   sudo apt install virtinst libvirt-daemon-system qemu-system-x86 ubuntu-cloudimage-keyring
   ```
@@ -18,9 +18,12 @@ locate their own markers.
   sudo), or invoke `devbox` with sudo. `ubuntu-cloudimage-keyring` provides
   Canonical's signing key at `/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg`,
   used by `devbox create` to verify the base image's checksum (see below).
+- For the **AWS** provider (optional): configured AWS credentials (e.g. a named
+  profile) with EC2 permissions. `boto3` ships as a devbox dependency; the
+  `[aws]` global-config section enables it.
 - [`uv`](https://docs.astral.sh/uv/) — manages devbox's install and runtime
-  environment (including its one dependency, `pyyaml`, used to merge the
-  common cloud-config template with each project's fragment).
+  environment (its dependencies: `pyyaml` for the cloud-config merge, `boto3`
+  for the AWS provider).
 
 ## Install
 
@@ -30,8 +33,8 @@ uv tool install --editable .
 
 This installs a `devbox` command into `~/.local/bin` (must be on `$PATH`),
 backed by a `uv`-managed virtual environment under
-`~/.local/share/uv/tools/devbox`. `--editable` means edits to `devbox.py`
-take effect immediately, without reinstalling. To update after pulling new
+`~/.local/share/uv/tools/devbox`. `--editable` means edits to the `devbox`
+package take effect immediately, without reinstalling. To update after pulling new
 commits, nothing further is needed (editable install); to upgrade the
 pinned version metadata or dependencies, rerun `uv tool install --editable .
 --reinstall`. Uninstall with `uv tool uninstall devbox`.
@@ -64,7 +67,20 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
 
    [github]
    token = "ghp_..."
+
+   [aws]                                # optional — only needed for --provider aws
+   region = "us-east-1"                 # required if [aws] is present
+   profile = "dev"                      # optional AWS named profile
+   default_security_groups = ["sg-..."] # optional
+   default_subnets = ["subnet-a", "subnet-b"]  # optional; tried in order (capacity fallback)
+   spot = true                          # optional default market (projects can override)
    ```
+
+   `[aws]` is optional and enables the AWS/EC2 provider. Omit it entirely on a
+   libvirt-only host — `devbox list` then never reaches for AWS credentials.
+   Single region/profile only for now (multi-region/profile deferred). `boto3`
+   is a declared dependency, so it's always installed, but only touched when you
+   actually use AWS.
 
    `[jj]` is optional — if unset, `devbox create` falls back to the host's
    own `jj config get user.name`/`user.email` (which you almost certainly
@@ -121,16 +137,30 @@ purely this machine's VM config):
 mode = "clone"               # "clone" | "push"
 dir = "my-project"           # created at ~/<dir> in the sandbox
 url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
+
+[aws]                       # optional; EC2 launch defaults for --provider aws
+instance_type = "g5.xlarge"  # required if [aws] is present
+architecture = "x86_64"      # "x86_64" | "arm64" (drives the AMI lookup)
+# ami = "ami-0123..."        # optional: pin an explicit AMI (skips the lookup)
+# ami_name_filter = "..."    # optional: override the Ubuntu AMI name glob
+# spot = true                # optional: override the global [aws].spot default
+# interruption_behavior = "stop"   # spot only: stop | terminate | hibernate
+# disk_gb (above) doubles as the EBS root volume size on AWS
 ```
 
 A **project** is a label, not a machine: it can have several instances. The
 default one is a libvirt domain **bare-named = the project**, which `devbox
-create` (no args) makes. `--name` targets a specific instance for any command;
-without it, commands act on the project's libvirt default. (Named/cloud
-instances arrive with the AWS provider — for now libvirt is the only provider
-and each project has just its one bare default.) Every config key is optional;
-an empty `config.toml` is a valid marker. `name` is no longer a field — devbox
-errors if it's present, to flag the migration.
+create` (no args) makes. Cloud instances always carry an explicit name:
+`devbox create --provider aws --name foo-gpu`. `--name` targets a specific
+instance for any command; without it, commands act on the project's libvirt
+default. Instance names are globally unique across providers. Every config key
+is optional; an empty `config.toml` is a valid marker. `name` is no longer a
+field — devbox errors if it's present, to flag the migration.
+
+cfleet's "instance templates" (`instance_type`/`architecture`/AMI/`spot`) fold
+into this `[aws]` section; the same re-runnable provisioning (jj, dotfiles,
+Claude Code, `[repo]` bootstrap) runs on EC2 via cloud-init user-data, so a
+sandbox is identical whether it's a local libvirt VM or an EC2 instance.
 
 `[repo]` drives how the sandbox gets your code, via devbox's common
 cloud-config template (see below) — no project needs to author this by hand:
@@ -190,8 +220,8 @@ SSH against an already-booted box (reconverge) without a destroy+create.
 
 | Command | Behavior |
 |---|---|
-| `devbox create` | Download/verify the shared base image if needed (cached globally), render + merge the cloud-config (common template + project fragment), define + first-boot the domain (bare-named = the project), and stamp it with devbox `<metadata>`. Errors if a domain with this name is already defined (global-uniqueness) — run `destroy` first. |
-| `devbox list` | List devbox-managed instances on this host — name, provider, project, state, resources, uptime. Global (doesn't need to be run inside a project); filters libvirt domains by the devbox `<metadata>` stamp. |
+| `devbox create` | Launch the project's default libvirt VM (bare-named = the project), or a named cloud instance with `--provider aws --name <n>`. Renders + merges the cloud-config, first-boots via cloud-init (libvirt NoCloud seed / EC2 user-data), and stamps the instance (libvirt `<metadata>` / EC2 tags). Errors if the name already exists anywhere (global-uniqueness). |
+| `devbox list` | List devbox-managed instances — name, provider, project, state, resources, uptime (AWS rows show the instance type and a `($)` cost flag while running). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + AWS (account-wide, by `devbox:managed` tag). |
 | `devbox up` | Start an already-defined, shut-off domain. Errors if undefined — run `create` first. |
 | `devbox stop` | Gracefully shut down (ACPI) a running domain. |
 | `devbox destroy` | Tear down the domain and its overlay disk (the cached base image is left alone). |
@@ -304,3 +334,9 @@ for pulling the agent's subsequent work back out.
 uv sync              # create .venv with dev dependencies (pytest)
 uv run pytest        # run the test suite
 ```
+
+The code is a `devbox/` package: `config` (global/project config), `cloudconfig`
+(cloud-config render + provisioning script), `cli` (subcommands + argparse), and
+a `providers/` package — a `Provider` seam (`providers/base.py`) with `libvirt`
+and `aws` implementations. Data files (`common-cloud-config.yaml`,
+`provision-common.sh`) live inside the package.
