@@ -55,8 +55,8 @@ DEFAULT_SSH_PUBKEY_PATH = "~/.ssh/id_ed25519.pub"
 # can override the name glob / owner, or pin an explicit `ami`.
 DEFAULT_AMI_OWNER = "099720109477"  # Canonical
 DEFAULT_AMI_NAME_FILTER = {
-    "x86_64": "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*",
-    "arm64": "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*",
+    "x86_64": "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-*",
+    "arm64": "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-arm64-server-*",
 }
 
 
