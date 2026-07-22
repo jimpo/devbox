@@ -103,11 +103,12 @@ def resolve_jj_identity(gc: GlobalConfig) -> tuple:
     return name, email
 
 
-def resolve_github_token(gc: GlobalConfig) -> Optional[str]:
-    """[github] token from global config. Best-effort, not required: cloning
-    a public repo or [repo] mode "push"/"none" never need GitHub HTTPS auth
-    in the sandbox at all."""
-    return gc.github_token
+def resolve_github_token(project: ProjectConfig, gc: GlobalConfig) -> Optional[str]:
+    """[github] token, project overriding global: project's .devbox/config.toml
+    -> global config -> none. Best-effort, not required: cloning a public repo
+    or [repo] mode "push"/"none" never need GitHub HTTPS auth in the sandbox at
+    all."""
+    return project.github_token or gc.github_token
 
 
 def _provision_tokens(project: ProjectConfig, gc: GlobalConfig) -> dict:
@@ -115,12 +116,12 @@ def _provision_tokens(project: ProjectConfig, gc: GlobalConfig) -> dict:
     (adding DEVBOX_SSH_PUBKEY) is used for the whole cloud-config. Shared by the
     first-boot render and `devbox provision` so both fill the same values."""
     jj_name, jj_email = resolve_jj_identity(gc)
-    github_token = resolve_github_token(gc)
+    github_token = resolve_github_token(project, gc)
     if github_token is None:
-        print("note: no GitHub token found ([github].token in global config) - "
-              "the sandbox will have no GitHub HTTPS auth. Fine for cloning public "
-              "repos; set one up if the project needs a private repo or gh/git "
-              "pushes to GitHub.")
+        print("note: no GitHub token found ([github].token in the project's "
+              ".devbox/config.toml or the global config) - the sandbox will have "
+              "no GitHub HTTPS auth. Fine for cloning public repos; set one up if "
+              "the project needs a private repo or gh/git pushes to GitHub.")
     return {
         "DEVBOX_USER": project.user,
         "DEVBOX_JJ_NAME": jj_name,

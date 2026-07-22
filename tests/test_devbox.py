@@ -145,6 +145,18 @@ def test_resolve_project_overrides_defaults(tmp_path, global_config):
     assert project.user == "alice"
 
 
+def test_resolve_project_github_token(tmp_path, global_config):
+    _write_marker(tmp_path, '[github]\ntoken = "ghp_projecttoken"\n')
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.github_token == "ghp_projecttoken"
+
+
+def test_resolve_project_github_token_defaults_none(tmp_path, global_config):
+    _write_marker(tmp_path, 'project = "myproj"\n')
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.github_token is None
+
+
 def test_resolve_project_legacy_name_field_dies(tmp_path, global_config):
     # `name` used to be the VM; it's now a migration error, not silently ignored.
     _write_marker(tmp_path, 'name = "myproj"\n')
@@ -277,11 +289,12 @@ def pubkey(tmp_path):
     return path
 
 
-def _project(cloud_config=None, mode="none", dir="", url=None):
+def _project(cloud_config=None, mode="none", dir="", url=None, github_token=None):
     return devbox.ProjectConfig(
         project="test-project", provider="libvirt", cloud_config=cloud_config, user="alice",
         vcpus=6, memory_mib=1024, disk_gb=10,
         repo=devbox.RepoConfig(mode=mode, dir=dir, url=url),
+        github_token=github_token,
     )
 
 
@@ -304,6 +317,12 @@ def test_render_cloud_config_substitutes_tokens(common_template, pubkey):
     assert "github-token: ghp_testtoken" in rendered
     import yaml
     assert yaml.safe_load(rendered)["runcmd"][0] == ["echo", "clone", "myrepo", "https://example.com/x"]
+
+
+def test_render_cloud_config_project_token_overrides_global(common_template, pubkey):
+    gc = _global_config(pubkey, github_token="ghp_global")
+    rendered = devbox.render_cloud_config(_project(github_token="ghp_project"), gc)
+    assert "github-token: ghp_project" in rendered
 
 
 def test_render_cloud_config_injects_provision_script(common_template, pubkey):
@@ -373,16 +392,26 @@ def test_render_cloud_config_missing_pubkey_dies(common_template, tmp_path):
 
 
 # ---- resolve_github_token ---------------------------------------------------
-def test_resolve_github_token_from_config():
+def test_resolve_github_token_from_global_config():
     gc = _global_config(devbox.Path("/nonexistent"), github_token="ghp_fromconfig")
-    assert devbox.resolve_github_token(gc) == "ghp_fromconfig"
+    assert devbox.resolve_github_token(_project(), gc) == "ghp_fromconfig"
+
+
+def test_resolve_github_token_project_overrides_global():
+    gc = _global_config(devbox.Path("/nonexistent"), github_token="ghp_global")
+    assert devbox.resolve_github_token(_project(github_token="ghp_project"), gc) == "ghp_project"
+
+
+def test_resolve_github_token_falls_back_to_global_when_project_unset():
+    gc = _global_config(devbox.Path("/nonexistent"), github_token="ghp_global")
+    assert devbox.resolve_github_token(_project(github_token=None), gc) == "ghp_global"
 
 
 def test_resolve_github_token_none_when_unset_is_not_fatal():
     # An unresolved GitHub token must NOT raise - it's best-effort (public
     # repos / non-"clone" [repo] modes never need it).
     gc = _global_config(devbox.Path("/nonexistent"), github_token=None)
-    assert devbox.resolve_github_token(gc) is None
+    assert devbox.resolve_github_token(_project(github_token=None), gc) is None
 
 
 def test_render_cloud_config_empty_token_when_unset(common_template, pubkey, capsys):

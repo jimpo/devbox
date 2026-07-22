@@ -159,6 +159,10 @@ class ProjectConfig:
     memory_mib: int
     disk_gb: int
     repo: RepoConfig
+    # Project-level [github].token, overriding the global one when set. Lives in
+    # git-excluded .devbox/config.toml, so a per-project fine-grained PAT belongs
+    # here. Unset falls back to the global token (see resolve_github_token).
+    github_token: Optional[str] = None
     aws: Optional[AwsProjectConfig] = None
 
 
@@ -237,6 +241,7 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         die(f"{config_path}: provider must be one of {PROVIDERS} (got {provider!r})")
 
     cloud_config_path = devbox_dir / PROJECT_CLOUD_CONFIG_FILE
+    github = data.get("github", {})
     return ProjectConfig(
         project=data.get("project", marker_dir.name),
         provider=provider,
@@ -246,6 +251,7 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         memory_mib=data.get("memory_mib", global_config.memory_mib),
         disk_gb=data.get("disk_gb", global_config.disk_gb),
         repo=_resolve_repo_config(data, config_path),
+        github_token=github.get("token"),
         aws=_resolve_aws_project_config(data, config_path),
     )
 

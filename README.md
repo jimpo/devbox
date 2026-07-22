@@ -103,8 +103,11 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    `[jj]`) — deliberately: use a
    [fine-grained personal access token](https://github.com/settings/personal-access-tokens)
    scoped to just the repos the sandbox needs, not whatever broad-scoped
-   session `gh auth login` happens to have cached on the host. An unresolved
-   GitHub token is never fatal: it's only used to wire up `gh auth login` +
+   session `gh auth login` happens to have cached on the host. A project's
+   `.devbox/config.toml` can set its own `[github].token`, which **overrides**
+   this global one (project → global → none) — the natural home for a PAT
+   scoped to a single repo, since `.devbox/` is git-excluded/local-only. An
+   unresolved GitHub token is never fatal: it's only used to wire up `gh auth login` +
    `gh auth setup-git` in the sandbox (so `git`/`jj git`/`gh` against
    `github.com` authenticate transparently), which is only needed for
    private repos or pushing back to GitHub from inside the sandbox. Cloning
@@ -145,6 +148,10 @@ purely this machine's VM config):
 mode = "clone"               # "clone" | "push"
 dir = "my-project"           # created at ~/<dir> in the sandbox
 url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
+
+# [github]                  # optional; overrides the global [github].token
+# token = "ghp_..."         #   for this project — set a PAT scoped to just
+#                           #   this repo. Unset here falls back to global.
 
 [aws]                       # optional; EC2 launch defaults for --provider aws
 instance_type = "g5.xlarge"  # required if [aws] is present
