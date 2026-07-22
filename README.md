@@ -1,20 +1,116 @@
 # devbox
 
-A global, multi-project dev-sandbox manager for **libvirt** (local VMs) and
-**AWS** (EC2). One tool manages development machines regardless of where they
-run: once a box is up, `ssh`/`exec`/`list`/`provision`/`sync` are
-backend-independent; only `create`/`up`/`stop`/`destroy` and address discovery
-are provider-specific (a thin `Provider` seam). All projects share one cached
-base image (libvirt), one global config, and one common cloud-config +
-re-runnable provisioning script (dotfiles, jj, Claude Code, base packages) that
-devbox owns; each project supplies only what's different via an optional
-`.devbox/cloud-config.yaml`, merged on top. `devbox` finds "which instance
-belongs to the project in the current working directory" the way
-`git`/`direnv`/`mise` locate their own markers.
+A tool for launching project-scoped development virtual machines. Its primary
+use cases are sandboxed agentic development, and cross-platform development and
+benchmarking on cloud VMs.
 
-> Coming from **cfleet**? It's been folded into devbox — see
-> [`docs/cfleet-migration.md`](docs/cfleet-migration.md) for the command and
-> config mapping.
+devbox gives you an easy-to-use CLI for creating, managing, and interacting with
+those machines, and ships with an agent skill.
+
+It currently supports two VM providers: **libvirt** (local VMs) and **AWS**
+(EC2).
+
+## Basics & Architecture
+
+Every devbox starts from the latest Ubuntu LTS as its base image — currently
+Ubuntu 26.04 "Resolute Raccoon" — customized on first boot with
+[cloud-init](https://cloud-init.io/). Provisioning beyond first boot is a
+standalone, re-runnable shell script, so a box can be reconverged in place
+(`devbox provision`) instead of rebuilt.
+
+Once a box is up, the way you work with it —
+`ssh`/`exec`/`list`/`provision`/`sync` — is backend-independent; only
+`create`/`up`/`stop`/`destroy` and address discovery are provider-specific (a
+thin `Provider` seam). All projects share one cached base image (libvirt), one
+global config, and one common cloud-config + provisioning script (dotfiles, jj,
+Claude Code, base packages) that devbox owns; each project supplies only what's
+different via an optional `.devbox/cloud-config.yaml`, merged on top. `devbox`
+finds "which instance belongs to the project in the current working directory"
+the way `git`/`direnv`/`mise` locate their own markers.
+
+## Example Workflow
+
+Mark a directory as a devbox project by dropping a `.devbox/config.toml` at its
+root. A minimal local (libvirt) project just needs to say how to get the code:
+
+```toml
+# .devbox/config.toml
+[repo]
+mode = "clone"
+dir = "my-project"
+url = "https://github.com/<org>/my-project"
+```
+
+Then, from anywhere inside the project:
+
+```bash
+devbox create      # download the base image (cached), boot the VM, provision it
+devbox status      # watch cloud-init progress until it reports "done"
+devbox ssh         # log into the sandbox once it's ready
+```
+
+Work in the sandbox (e.g. let an agent make changes), bookmark what should be
+visible to the host, and pull it back:
+
+```bash
+# in the sandbox:
+jj bookmark create wip -r @
+# on the host:
+devbox sync                    # fetch the sandbox's bookmarked work
+jj new wip@devbox-my-project   # check it out locally
+```
+
+`devbox stop` shuts the box down (keeping its disk); `devbox destroy` tears it
+down entirely. Launching a cloud box instead is the same flow with `devbox
+create --provider aws --name my-project-arm` — see [Per-project
+setup](#per-project-setup) for the `[aws]` config.
+
+## Usage
+
+| Command | Behavior |
+|---|---|
+| `devbox create` | Launch the project's default libvirt VM (bare-named = the project), or a named cloud instance with `--provider aws --name <n>`. Renders + merges the cloud-config, first-boots via cloud-init (libvirt NoCloud seed / EC2 user-data), and stamps the instance (libvirt `<metadata>` / EC2 tags). Errors if the name already exists anywhere (global-uniqueness). |
+| `devbox list` | List devbox-managed instances — name, provider, project, state, resources, uptime (AWS rows show the instance type and a `($)` cost flag while running). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + AWS (account-wide, by `devbox:managed` tag). |
+| `devbox up` | Start an already-defined, shut-off domain. Errors if undefined — run `create` first. |
+| `devbox stop` | Gracefully shut down (ACPI) a running domain. |
+| `devbox destroy` | Tear down the domain and its overlay disk (the cached base image is left alone). |
+| `devbox ip` | Print the domain's IPv4. |
+| `devbox ssh [-- args...]` | `ssh` into the domain. |
+| `devbox status` | SSH in and show `cloud-init status --long` plus the tail of `~/provision.log`. |
+| `devbox provision` | Re-run the provisioning script (`provision-common.sh`) over SSH against a running domain — reconverge (add a package, bump jj, add a plugin) without destroy+create. Idempotent; tees to `~/provision.log`. |
+| `devbox sync` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or AWS), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "jj sync" below. |
+| `devbox host` | Refresh the SSH alias used for jj-sync (below); prints the alias name. |
+
+Every subcommand accepts `-C/--project-dir PATH` and `--name NAME` (both
+before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
+resolves a project other than the current directory; `--name` targets a
+specific instance instead of the project's libvirt default.
+
+**Changing a project's cloud-config (common template or `.devbox/cloud-config.yaml`)
+only takes effect via `destroy` + `create`, never `up`** — cloud-init's
+NoCloud seed ISO is only attached on first boot, so an already-defined
+domain never re-reads it. The exception is the provisioning body
+(`provision-common.sh`): `devbox provision` re-runs it over SSH on a live
+box, so edits to *that* script (and to the tokens it consumes — jj identity,
+GitHub token, `[repo]`) reconverge without a rebuild. Changes to the parts
+that live in `common-cloud-config.yaml` itself (packages, the user, YAML
+structure) still need `destroy` + `create`.
+
+### Project & instance resolution
+
+Instance-operating subcommands first find the **project** (except `list`,
+which is global and skips this):
+
+1. Start at `-C PATH` if given, else the current directory.
+2. Walk upward (like `git` searching for `.git`) looking for
+   `.devbox/config.toml` at each directory level.
+3. The first directory that has it wins.
+4. No marker found up to `/` → error telling you to pass `-C` or add a
+   `.devbox/config.toml` to the project.
+
+Then they resolve **which instance** within it: an explicit `--name` wins;
+otherwise the project's libvirt default (bare-named = the project). Daily use
+(one local VM per project) never needs `--name`.
 
 ## Requirements
 
@@ -254,53 +350,6 @@ SSH against an already-booted box (reconverge) without a destroy+create.
 - The merged result gets a fresh `#cloud-config` header prepended (YAML
   parsing drops comments, so the original magic first line doesn't survive
   a parse→merge→dump round trip on its own).
-
-## Usage
-
-| Command | Behavior |
-|---|---|
-| `devbox create` | Launch the project's default libvirt VM (bare-named = the project), or a named cloud instance with `--provider aws --name <n>`. Renders + merges the cloud-config, first-boots via cloud-init (libvirt NoCloud seed / EC2 user-data), and stamps the instance (libvirt `<metadata>` / EC2 tags). Errors if the name already exists anywhere (global-uniqueness). |
-| `devbox list` | List devbox-managed instances — name, provider, project, state, resources, uptime (AWS rows show the instance type and a `($)` cost flag while running). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + AWS (account-wide, by `devbox:managed` tag). |
-| `devbox up` | Start an already-defined, shut-off domain. Errors if undefined — run `create` first. |
-| `devbox stop` | Gracefully shut down (ACPI) a running domain. |
-| `devbox destroy` | Tear down the domain and its overlay disk (the cached base image is left alone). |
-| `devbox ip` | Print the domain's IPv4. |
-| `devbox ssh [-- args...]` | `ssh` into the domain. |
-| `devbox status` | SSH in and show `cloud-init status --long` plus the tail of `~/provision.log`. |
-| `devbox provision` | Re-run the provisioning script (`provision-common.sh`) over SSH against a running domain — reconverge (add a package, bump jj, add a plugin) without destroy+create. Idempotent; tees to `~/provision.log`. |
-| `devbox sync` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or AWS), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "jj sync" below. |
-| `devbox host` | Refresh the SSH alias used for jj-sync (below); prints the alias name. |
-
-Every subcommand accepts `-C/--project-dir PATH` and `--name NAME` (both
-before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
-resolves a project other than the current directory; `--name` targets a
-specific instance instead of the project's libvirt default.
-
-**Changing a project's cloud-config (common template or `.devbox/cloud-config.yaml`)
-only takes effect via `destroy` + `create`, never `up`** — cloud-init's
-NoCloud seed ISO is only attached on first boot, so an already-defined
-domain never re-reads it. The exception is the provisioning body
-(`provision-common.sh`): `devbox provision` re-runs it over SSH on a live
-box, so edits to *that* script (and to the tokens it consumes — jj identity,
-GitHub token, `[repo]`) reconverge without a rebuild. Changes to the parts
-that live in `common-cloud-config.yaml` itself (packages, the user, YAML
-structure) still need `destroy` + `create`.
-
-### Project & instance resolution
-
-Instance-operating subcommands first find the **project** (except `list`,
-which is global and skips this):
-
-1. Start at `-C PATH` if given, else the current directory.
-2. Walk upward (like `git` searching for `.git`) looking for
-   `.devbox/config.toml` at each directory level.
-3. The first directory that has it wins.
-4. No marker found up to `/` → error telling you to pass `-C` or add a
-   `.devbox/config.toml` to the project.
-
-Then they resolve **which instance** within it: an explicit `--name` wins;
-otherwise the project's libvirt default (bare-named = the project). Daily use
-(one local VM per project) never needs `--name`.
 
 ## jj sync: exchanging commits with the sandbox
 
