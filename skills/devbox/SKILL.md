@@ -1,187 +1,129 @@
 ---
 name: devbox
-description: Explains devbox, a personal libvirt dev-sandbox VM manager, and walks through initializing a new project to use it — writing .devbox/config.toml and an optional .devbox/cloud-config.yaml, choosing a repo bootstrap mode (clone an existing remote vs. push-seed a brand-new project with no remote yet), and wiring up jj-sync. Use when the user asks to "set up devbox for this project", "create a devbox", "add a dev sandbox VM", or references devbox subcommands (devbox create/up/ssh/host/etc.) for a project that doesn't have one configured yet.
+description: devbox is a multi-project dev-sandbox VM manager for local libvirt VMs and AWS EC2 instances, provisioned by composable idempotent "mods". Covers what it is, its command set, and how to configure a project (`.devbox/config.toml`: repo bootstrap, mods, AWS) plus the global `~/.config/devbox/config.toml`. Use when asked to set up devbox for a project, create/manage a dev sandbox VM, or when devbox subcommands (create/up/ssh/provision/sync/…) come up.
 allowed-tools: Bash(devbox *), Bash(jj *), Bash(git *), Bash(gh *), Read, Write, Edit, AskUserQuestion
 ---
 
-## 1. What devbox is
+# devbox
 
-`devbox` is a global, multi-project dev-sandbox VM manager (libvirt +
-cloud-init). One shared base VM image and a base playbook of idempotent
-provisioning "mods" (dotfiles, jj install + identity, Claude Code +
-`github`/`linear` plugins, GitHub auth, repo bootstrap) are owned by devbox
-itself; each project appends only what's *different* — a language toolchain,
-project tooling — as its own mods via a `mods = [...]` list in
-`.devbox/config.toml`. Full reference: `devbox`'s own `README.md` (same repo
-as this skill).
+A multi-project dev-sandbox VM manager for two providers — **libvirt** (local
+VMs) and **AWS** (EC2). All projects share one cached base image and a base
+playbook of idempotent provisioning **mods** (jj, dotfiles, Claude Code, GitHub
+auth, repo bootstrap) that devbox owns; each project adds only what's different
+via `.devbox/config.toml`. Full reference: `README.md` in this repo.
 
-## 2. Check one-time host setup
+## Commands
 
-`devbox create` needs a jj identity for the sandbox. It resolves this from
-`~/.config/devbox/config.toml`'s `[jj]` table if set:
+`-C PATH` (project dir) and `--name NAME` (target a specific instance) go
+*before* the subcommand.
 
-```toml
-[jj]
-name = "..."
-email = "..."
-```
+| Command | Behavior |
+|---|---|
+| `devbox create` | Boot + provision the project's default libvirt VM, or a named cloud instance with `--provider aws --name <n>`. |
+| `devbox list` | All devbox-managed instances (libvirt on this host + AWS account-wide): name, provider, state, resources. |
+| `devbox up` / `stop` / `destroy` | Start / graceful-shutdown / tear down (destroy also deletes the disk). |
+| `devbox ip` / `ssh [-- args]` / `status` | Print IP / SSH in / show cloud-init progress + `~/provision.log`. |
+| `devbox provision [mods…]` | Re-run provisioning mods over SSH on a live box (reconverge, no rebuild). No args = whole playbook; names = just those. |
+| `devbox sync` | jj-fetch the instance's bookmarked work into your local repo (refreshes the SSH alias + `devbox-<name>` jj remote, runs `jj git fetch`). |
+| `devbox host` | Refresh/print the `devbox-<name>` SSH alias used for jj-sync. |
 
-...falling back to the host's own `jj config get user.name`/`user.email` if
-`[jj]` isn't set (which is almost always already configured if the user
-uses jj) — so this usually needs no action. It's only a real problem if
-`devbox create` actually dies over it (no `[jj]` set *and* no `jj` identity
-on the host either); in that case ask the user for their name/email rather
-than guessing. Everything else in the global config (base image,
-vcpus/memory/disk defaults, ssh pubkey path) has a sensible built-in
-default and usually needs no setup either.
+Instances: the libvirt default is **bare-named = the project**; cloud instances
+take an explicit `--name` and get a canonical `<provider>-<name>` (e.g.
+`aws-foo`) — use that in later commands. `--provider` is create-only (the
+provider is derived from the name).
 
-GitHub auth is separate and never required: `[github] token`, no host
-fallback — deliberately a fine-grained PAT the user scopes themselves in
-devbox's config, not whatever `gh auth login` session happens to exist on
-the host. It only matters for private repos or pushing back to GitHub from
-inside the sandbox — `devbox create` just prints a note and continues if
-it's unset, which is fine for public repos. If the project needs one and
-`[github].token` isn't set, ask the user to add it rather than pulling a
-token from anywhere else.
+## Configuration
 
-## 3. Decide the repo bootstrap mode
+### Global — `~/.config/devbox/config.toml` (optional; everything has a default)
 
-Ask: does the project already have a git remote (something to `jj git
-clone`)?
+- `[jj] name`/`email` — sandbox identity. Falls back to the host's own `jj
+  config get user.name`/`user.email`, so usually no setup. If `devbox create`
+  dies for lack of it, ask the user rather than guessing.
+- `[github] token` — a fine-grained PAT, only for private repos or pushing to
+  GitHub. A project's `[github].token` overrides it. Unset is fine for public
+  repos (devbox just prints a note).
+- `[aws] region` (+ optional `profile`, `default_security_groups`,
+  `default_subnets`, `spot`) — enables the AWS provider. Omit for a
+  libvirt-only host.
+- `[defaults]` (vcpus/memory_mib/disk_gb), `[ssh] pubkey_path`, `[base_image]
+  url` — all defaulted.
 
-- **Yes** → `mode = "clone"`. Needs `dir` (directory name created at
-  `~/<dir>` in the sandbox) and `url`.
-- **No** — brand-new project, nothing pushed anywhere yet → `mode = "push"`.
-  Needs `dir` only (`url` is not allowed in this mode — devbox will die if
-  both are set). The sandbox creates an *empty* colocated jj+git repo ready
-  to receive a push; after `devbox create`, seed it from the host:
-  ```bash
-  devbox host                                     # prints alias, e.g. devbox-<name>
-  jj git remote add sandbox ssh://<alias>/home/<user>/<dir>
-  jj bookmark set main -r @ --allow-backwards     # bookmark name MUST be "main"
-  jj git push --remote sandbox -b main
-  ```
-  The bookmark name **must** be exactly `main` — the sandbox repo is
-  initialized with `git init --initial-branch=main`, and
-  `receive.denyCurrentBranch=updateInstead` (which is what makes the push
-  actually populate the sandbox's working tree, not just update a ref) only
-  fires when the pushed branch matches the one currently checked out. This
-  also refuses the push outright if the sandbox-side working tree is dirty
-  — a safety property, not a bug; if a push is rejected, check what's
-  uncommitted in the sandbox rather than forcing it.
-- **Neither** (no repo needed — a scratch/experiment VM) → omit `[repo]`
-  entirely, or `mode = "none"`.
-
-## 4. Write `.devbox/config.toml`
-
-At the project's root, **not committed to git**:
+### Per-project — `.devbox/config.toml` (at the project root, **not committed**)
 
 ```toml
-# project = "<name>"        # label on this project's instances
-#                           # (default: the marker directory's basename)
-# user, vcpus, memory_mib, disk_gb optionally override the global [defaults]
+# project = "<name>"    # instance label; default = the marker dir's basename
+# provider = "libvirt"  # default provider for a bare `create`
+# user, vcpus, memory_mib, disk_gb  # override the global [defaults]
+mods = ["rust"]          # project mods, appended after the base playbook
 
-[repo]                       # omit entirely for mode = "none"
-mode = "clone"                # "clone" | "push"
-dir = "<project>"             # created at ~/<dir> in the sandbox
+[repo]                   # how the sandbox gets code; omit entirely for none
+mode = "clone"            # clone | push | none
+dir = "<project>"         # created at ~/<dir> in the sandbox
 url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
+
+[aws]                    # only for --provider aws
+instance_type = "m9g.xlarge"
+architecture = "arm64"    # x86_64 | arm64
 ```
 
-`name` is **not** a field (it errors) — an instance is no longer a project.
-The libvirt default instance is bare-named = the project. Cloud instances take
-an explicit `--name` at create, and devbox stores a canonical
-`<provider>-<name>` (e.g. `aws-binius-arm`); reference that canonical name in
-later commands (`devbox --name aws-binius-arm ssh`). The provider is derived
-from the name, so `--provider` is create-only.
+- `name` is **not** a field (it errors — an instance is no longer a project).
+- Exclude the dir locally (never `.gitignore`):
+  `echo '.devbox/' >> .git/info/exclude`.
+- **Repo modes:** `clone` (existing remote; needs `dir` + `url`), `push`
+  (brand-new project, no remote yet; `dir` only — seed it after create, below),
+  `none` (scratch VM; omit `[repo]`).
 
-## 5. Decide whether the project needs a provisioning mod
+### Mods (provisioning)
 
-Provisioning is a list of idempotent bash **mods**. The built-in base playbook
-(`jj → github-auth → dotfiles → vim → claude-code → repo-bootstrap`) already
-covers dotfiles, jj, Claude Code + `github`/`linear` plugins, GitHub auth, and
-the `[repo]` bootstrap. Add a project mod only for what's beyond that — look at
-the project's tooling manifest: `Cargo.toml` → a rust mod; `package.json` → a
-bun/node mod. If nothing extra is needed, skip this step.
+The base playbook (`jj → github-auth → dotfiles → vim → claude-code →
+repo-bootstrap`) is built in. Add a project mod only for extra tooling
+(`Cargo.toml` → a rust mod, `package.json` → a node mod):
 
-To add one:
-
-1. List it in `.devbox/config.toml` (appended after the base playbook):
-   ```toml
-   mods = ["rust"]
-   ```
-2. Write `.devbox/mods/rust.sh` — a self-contained, idempotent script that
-   `sudo apt-get install -y`s its own deps (the dev user has NOPASSWD sudo) and
-   receives context via **environment variables** (`DEVBOX_USER`,
-   `DEVBOX_JJ_NAME`, `DEVBOX_REPO_DIR`, …), NOT `%TOKEN%` substitution:
+1. List it: `mods = ["rust"]` in `.devbox/config.toml`.
+2. Write `.devbox/mods/rust.sh` — self-contained and idempotent, taking context
+   from the **environment** (`DEVBOX_USER`, `DEVBOX_JJ_NAME`, `DEVBOX_REPO_DIR`,
+   …), not `%TOKEN%`s:
 
    ```bash
    #!/usr/bin/env bash
-   # mod: rust — toolchain + cargo tooling. Idempotent (rustup/cargo re-runs are safe).
    set -euo pipefail
-   sudo apt-get install -y build-essential clang pkg-config libssl-dev
+   sudo apt-get install -y build-essential clang pkg-config libssl-dev  # dev user has NOPASSWD sudo
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
    . "$HOME/.cargo/env"
-   # ... cargo tools, claude plugin install rust-analyzer-lsp, etc.
+   # ... cargo tools, `claude plugin install rust-analyzer-lsp`, etc.
    ```
 
-Resolution is **project > global > built-in** by name, so `.devbox/mods/<name>.sh`
-shadows a built-in of the same name. `devbox provision rust` re-applies just
-that mod on a live box (fast iteration); bare `devbox provision` runs the whole
-playbook.
+Resolution is **project > global (`~/.config/devbox/mods`) > built-in** by name.
+Every mod must be idempotent (it runs on first boot *and* every `devbox
+provision`): overwrite unconditionally or guard on "already done". A `.devbox/
+cloud-config.yaml` is now rarely needed (only genuine cloud-init concerns);
+prefer a mod, since a cloud-config `runcmd` is first-boot-only.
 
-**Idempotency is required**: every mod runs on first boot AND on every
-`devbox provision`, so each step must either overwrite unconditionally or guard
-on "already done".
+**What takes effect how:** a mod change (or the `mods` list) reconverges live via
+`devbox provision`. A cloud-config-layer change (`packages`/`users`/the common
+template) needs `devbox destroy` + `create` — the cloud-init seed is read only on
+first boot.
 
-A `.devbox/cloud-config.yaml` is now rarely needed — only for genuine
-cloud-init concerns (extra `packages`, a `write_files` entry). It still supports
-`%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%`. List keys (`packages`, `write_files`,
-`runcmd`, …) concatenate onto the common template's; don't redeclare `users:`.
-Prefer a mod over a cloud-config `runcmd` — the runcmd is first-boot-only and
-never reconverges.
-
-## 6. Exclude `.devbox/` locally
-
-Nothing under `.devbox/` should be committed — it's this machine's personal
-VM config, not something to share with collaborators. If the project is a
-git repo, append `.devbox/` to `.git/info/exclude` (**not** the tracked
-`.gitignore`):
+## Setting up & syncing
 
 ```bash
-mkdir -p .git/info
-grep -qxF '.devbox/' .git/info/exclude 2>/dev/null || echo '.devbox/' >> .git/info/exclude
+devbox create && devbox status   # boot + provision; wait for "status: done"
+devbox ssh
 ```
 
-If the project root isn't itself a git repo (e.g. a plain directory with a
-git clone nested inside it), there's no exclude file needed at all — nothing
-here is tracked either way.
+**Fetch the agent's work** (any provider): in the sandbox `jj bookmark create
+wip -r @`; on the host `devbox sync` then `jj new wip@devbox-<name>`.
 
-## 7. Run it
+**Seed a `mode = "push"` project** (once, after create):
 
 ```bash
-devbox create   # download base image (cached), render + merge cloud-config, define + first-boot
-devbox status   # watch cloud-init progress; wait for "status: done"
-devbox ssh      # once provisioning finishes
+devbox host                                        # prints the alias, devbox-<name>
+jj git remote add devbox-<name> ssh://devbox-<name>/home/<user>/<dir>
+jj bookmark set main -r @ --allow-backwards        # bookmark MUST be "main"
+jj git push --remote devbox-<name> -b main
 ```
 
-Remember: changing a **mod** (or the `mods` list) reconverges on a live box
-with `devbox provision` — no rebuild. But changing the **cloud-config layer**
-(`.devbox/cloud-config.yaml` or devbox's common template — `packages`/`users`/
-`BASH_ENV`) only takes effect via `devbox destroy` + `devbox create`, since the
-cloud-init seed is read only on first boot.
-
-## 8. jj-sync (both directions)
-
-Once the VM is up, the sandbox is a plain SSH-reachable jj/git remote for
-the host:
-
-- **Fetch** (agent's work → host, always available): inside the sandbox,
-  `jj bookmark create wip -r @` on anything that should become visible; on
-  the host, `devbox host` then `jj git remote add sandbox
-  ssh://<alias>/home/<user>/<dir>` (one-time), then `devbox host` + `jj git
-  fetch --remote sandbox` + `jj new wip@sandbox` (ongoing — rerun `devbox
-  host` each time since the sandbox's IP/host key can change across
-  `stop`/`up` cycles).
-- **Push** (host → sandbox, only relevant for `mode = "push"` projects): see
-  step 3 above — same `sandbox` remote, bookmark name `main` instead of
-  `wip`.
+The bookmark must be `main` (matches the sandbox's `initial-branch`;
+`receive.denyCurrentBranch=updateInstead` only updates the working tree for the
+checked-out branch, and refuses a dirty tree — don't force it). See README's "jj
+sync" for the full model.
