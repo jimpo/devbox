@@ -166,11 +166,35 @@ architecture = "x86_64"      # "x86_64" | "arm64" (drives the AMI lookup)
 A **project** is a label, not a machine: it can have several instances. The
 default one is a libvirt domain **bare-named = the project**, which `devbox
 create` (no args) makes. Cloud instances always carry an explicit name:
-`devbox create --provider aws --name foo-gpu`. `--name` targets a specific
-instance for any command; without it, commands act on the project's libvirt
-default. Instance names are globally unique across providers. Every config key
-is optional; an empty `config.toml` is a valid marker. `name` is no longer a
-field — devbox errors if it's present, to flag the migration.
+`devbox create --provider aws --name binius-arm`.
+
+Instance names encode the provider so every command can route to the right
+backend from the name alone — no API call or credential load just to find an
+instance's owner. The scheme:
+
+- **Canonical name** = `<provider>-<name>` for cloud providers, **bare** for
+  libvirt (local is the common case, and "bare = the project's libvirt
+  default" is worth keeping). So `create --provider aws --name binius-arm`
+  composes **`aws-binius-arm`** — that's the identity `devbox list` shows and
+  that every later command references: `devbox --name aws-binius-arm ssh`
+  queries AWS even from a libvirt-default project.
+- `--provider` is **create-only**; `project.provider` is purely the
+  bare-`create` default. Per-instance commands (`ip`/`ssh`/`status`/`stop`/
+  `up`/`destroy`/`provision`/`host`/`sync`) derive the provider by parsing the
+  name: the first `-`-delimited segment routes to that provider if it's a known
+  keyword (`aws`, …), else libvirt.
+- The `<provider>-` prefix is **added automatically** — pass the bare name to
+  `--name` (`binius-arm`, not `aws-binius-arm`). devbox rejects a `--name` (or
+  a project name, for the bare libvirt case) that already starts with a known
+  provider prefix, so a name can't misparse.
+- Provider-side, the prefix is redundant, so the **AWS console `Name` tag drops
+  it**: `aws-binius-arm` shows as `devbox-binius-arm` in EC2. devbox's own
+  addressing tag keeps the canonical `aws-binius-arm`.
+
+Instance names are globally unique across providers (the prefix makes that fall
+out for free). Every config key is optional; an empty `config.toml` is a valid
+marker. `name` is no longer a field — devbox errors if it's present, to flag
+the migration.
 
 cfleet's "instance templates" (`instance_type`/`architecture`/AMI/`spot`) fold
 into this `[aws]` section; the same re-runnable provisioning (jj, dotfiles,

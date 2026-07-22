@@ -29,8 +29,9 @@ from typing import Optional
 
 from .cloudconfig import PROVISION_LOG, render_cloud_config, render_provision_script
 from .config import (DEFAULT_PROVIDER, GlobalConfig, KNOWN_HOSTS_PATH, PROVIDERS,
-                     ProjectConfig, SSH_DIR, SSH_USER_CONFIG, find_project_dir,
-                     resolve_instance, resolve_project)
+                     ProjectConfig, SSH_DIR, SSH_USER_CONFIG, compose_instance_name,
+                     find_project_dir, parse_instance_name, resolve_instance,
+                     resolve_project)
 from .providers import InstanceSpec, all_providers, get_provider
 from .util import die
 
@@ -70,6 +71,16 @@ def truncate_known_hosts() -> None:
     KNOWN_HOSTS_PATH.chmod(0o600)
 
 
+def _resolve_target(args: argparse.Namespace, project: ProjectConfig, gc: GlobalConfig):
+    """The (canonical name, provider) a per-instance command acts on. The
+    provider is derived from the name (parse_instance_name), not project.provider
+    (the bare-create default) - so `devbox ip --name aws-binius-arm` queries AWS
+    even from a libvirt-default project, routed offline from the name alone."""
+    name = resolve_instance(args, project)
+    provider_name, _ = parse_instance_name(name)
+    return name, provider_name, get_provider(provider_name, gc)
+
+
 def _check_name_unique(gc: GlobalConfig, name: str) -> None:
     """Instance names are globally unique across providers - enforced at create
     by checking the union `list`. A provider that can't be listed (e.g. AWS creds
@@ -96,14 +107,30 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
         if args.name:
             die("libvirt instances are the project's bare default (name = the project); "
                 "--name is only for cloud instances")
-        name = project.project
+        bare = project.project
+        # A project literally named e.g. 'aws-foo' would make the bare libvirt
+        # name misparse as another provider. Reject it so the name stays routable.
+        misparsed = parse_instance_name(bare)[0]
+        if misparsed != "libvirt":
+            die(f"project name '{bare}' collides with the '<provider>-' instance "
+                f"naming scheme (it parses as provider '{misparsed}'); rename the "
+                f"project via 'project = ...' in .devbox/config.toml")
     else:
         # Cloud instances always require an explicit --name.
         if not args.name:
             die(f"cloud instances always require --name "
                 f"(e.g. `devbox create --provider {provider_name} --name foo-gpu`)")
-        name = args.name
+        bare = args.name
+        # The provider prefix is composed in automatically; a --name that already
+        # carries one would double it (e.g. aws-aws-foo).
+        if parse_instance_name(bare)[0] != "libvirt":
+            die(f"--name '{bare}' must not start with a provider prefix "
+                f"('{provider_name}-' is added automatically); "
+                f"pass --name {parse_instance_name(bare)[1]}")
 
+    # The canonical name (provider-prefixed for cloud, bare for libvirt) is the
+    # instance's identity: stored on the instance and used by every later command.
+    name = compose_instance_name(provider_name, bare)
     _check_name_unique(gc, name)
 
     aws_cfg = project.aws
@@ -139,8 +166,7 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
 
 
 def cmd_up(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name = resolve_instance(args, project)
-    provider = get_provider(project.provider, gc)
+    name, _, provider = _resolve_target(args, project, gc)
     state = provider.state(name)
     if state is None:
         die(f"instance '{name}' is not defined; run `devbox create` first")
@@ -152,8 +178,7 @@ def cmd_up(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -
 
 
 def cmd_stop(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name = resolve_instance(args, project)
-    provider = get_provider(project.provider, gc)
+    name, _, provider = _resolve_target(args, project, gc)
     state = provider.state(name)
     if state is None:
         die(f"instance '{name}' is not defined; run `devbox create` first")
@@ -165,33 +190,32 @@ def cmd_stop(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
 
 
 def cmd_destroy(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name = resolve_instance(args, project)
-    provider = get_provider(project.provider, gc)
+    name, provider_name, provider = _resolve_target(args, project, gc)
     provider.destroy(name)
     tail = (f" (cached base image left in {gc.cache_dir})"
-            if project.provider == "libvirt" else "")
+            if provider_name == "libvirt" else "")
     print(f"Destroyed '{name}'{tail}.")
 
 
 def cmd_ip(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name = resolve_instance(args, project)
-    ip = get_provider(project.provider, gc).address(name)
+    name, _, provider = _resolve_target(args, project, gc)
+    ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?). Try again shortly.")
     print(ip)
 
 
 def cmd_ssh(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name = resolve_instance(args, project)
-    ip = get_provider(project.provider, gc).address(name)
+    name, _, provider = _resolve_target(args, project, gc)
+    ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
     os.execvp("ssh", ["ssh", f"{project.user}@{ip}", *args.ssh_args])
 
 
 def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name = resolve_instance(args, project)
-    ip = get_provider(project.provider, gc).address(name)
+    name, _, provider = _resolve_target(args, project, gc)
+    ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
     subprocess.run([
@@ -201,8 +225,7 @@ def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
 
 
 def cmd_provision(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name = resolve_instance(args, project)
-    provider = get_provider(project.provider, gc)
+    name, _, provider = _resolve_target(args, project, gc)
     state = provider.state(name)
     if state is None:
         die(f"instance '{name}' is not defined; run `devbox create` first")
@@ -288,8 +311,8 @@ def _refresh_ssh_alias(name: str, ip: str, user: str) -> str:
 
 
 def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name = resolve_instance(args, project)
-    ip = get_provider(project.provider, gc).address(name)
+    name, _, provider = _resolve_target(args, project, gc)
+    ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
     print(_refresh_ssh_alias(name, ip, project.user))
@@ -324,8 +347,8 @@ def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
     # any instance in the project is synced the same way.
     if project.repo.mode == "none" or not project.repo.dir:
         die("this project has no [repo] configured (set [repo] mode/dir); nothing to sync")
-    name = resolve_instance(args, project)
-    ip = get_provider(project.provider, gc).address(name)
+    name, _, provider = _resolve_target(args, project, gc)
+    ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
 

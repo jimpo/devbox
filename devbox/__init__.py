@@ -28,9 +28,11 @@ from .cloudconfig import (CLOUD_INIT_PROVISION_PATH, COMMON_CLOUD_CONFIG_PATH,  
 from .config import (AwsConfig, AwsProjectConfig, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
                      DEFAULT_CACHE_DIR, DEFAULT_DISK_GB, DEFAULT_LIBVIRT_URI,
                      DEFAULT_MEMORY_MIB, DEFAULT_NETWORK, DEFAULT_PROVIDER,
-                     DEFAULT_VCPUS, GlobalConfig, PROJECT_CLOUD_CONFIG_FILE,
-                     PROJECT_CONFIG_FILE, PROJECT_MARKER_DIR, PROVIDERS, ProjectConfig,
-                     RepoConfig, find_project_dir, resolve_instance, resolve_project)
+                     DEFAULT_VCPUS, GlobalConfig, PREFIXED_PROVIDERS,
+                     PROJECT_CLOUD_CONFIG_FILE, PROJECT_CONFIG_FILE, PROJECT_MARKER_DIR,
+                     PROVIDERS, ProjectConfig, RepoConfig, compose_instance_name,
+                     find_project_dir, parse_instance_name, resolve_instance,
+                     resolve_project)
 from .providers import (AwsProvider, Instance, InstanceSpec, LibvirtProvider,  # noqa: F401
                         Provider, all_providers, get_provider)
 from .providers.libvirt import (CLOUDIMAGE_KEYRING_PATH, _format_resources,  # noqa: F401

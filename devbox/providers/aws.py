@@ -6,17 +6,20 @@ tests inject a fake client.
 
 Tags stamped on every instance:
   devbox:managed = "true"       (the filter for "mine")
-  devbox:name    = <name>       (addressing an instance by name)
+  devbox:name    = <name>       (devbox's canonical name, e.g. aws-binius-arm;
+                                 how commands address the instance)
   devbox:project = <project>
   devbox:created-at = <ISO-8601>
-  Name           = devbox-<name> (console display)
+  Name           = devbox-<bare> (console display; the provider prefix is
+                                  redundant AWS-side, so aws-binius-arm shows
+                                  as devbox-binius-arm)
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from ..config import (AwsConfig, AwsProjectConfig, DEFAULT_AMI_NAME_FILTER,
-                      GlobalConfig)
+                      GlobalConfig, parse_instance_name)
 from ..util import die
 from .base import Instance, InstanceSpec, Provider
 
@@ -175,6 +178,10 @@ class AwsProvider(Provider):
         ami = self._resolve_ami(aws)
         use_spot = aws.spot if aws.spot is not None else self.aws.spot
 
+        # The console-display Name drops the redundant provider prefix (the
+        # instance is already known to be on AWS): aws-binius-arm -> devbox-binius-arm.
+        _, bare = parse_instance_name(spec.name)
+
         params = {
             "ImageId": ami,
             "InstanceType": aws.instance_type,
@@ -193,7 +200,7 @@ class AwsProvider(Provider):
                     {"Key": NAME_TAG, "Value": spec.name},
                     {"Key": PROJECT_TAG, "Value": spec.project},
                     {"Key": CREATED_AT_TAG, "Value": spec.created_at},
-                    {"Key": "Name", "Value": f"devbox-{spec.name}"},
+                    {"Key": "Name", "Value": f"devbox-{bare}"},
                 ],
             }],
         }

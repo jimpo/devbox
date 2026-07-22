@@ -77,7 +77,8 @@ clone`)?
 At the project's root, **not committed to git**:
 
 ```toml
-name = "<project>-dev"      # libvirt domain name
+# project = "<name>"        # label on this project's instances
+#                           # (default: the marker directory's basename)
 # user, vcpus, memory_mib, disk_gb optionally override the global [defaults]
 
 [repo]                       # omit entirely for mode = "none"
@@ -85,6 +86,13 @@ mode = "clone"                # "clone" | "push"
 dir = "<project>"             # created at ~/<dir> in the sandbox
 url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
 ```
+
+`name` is **not** a field (it errors) — an instance is no longer a project.
+The libvirt default instance is bare-named = the project. Cloud instances take
+an explicit `--name` at create, and devbox stores a canonical
+`<provider>-<name>` (e.g. `aws-binius-arm`); reference that canonical name in
+later commands (`devbox --name aws-binius-arm ssh`). The provider is derived
+from the name, so `--provider` is create-only.
 
 ## 5. Decide whether `.devbox/cloud-config.yaml` is needed
 
@@ -128,7 +136,7 @@ onto the common template's list, common-first — don't redeclare `users:` or
 a repo-clone step yourself, those are owned centrally by the common
 template and driven by `[repo]` above. Every other top-level key (e.g.
 `hostname`) is a whole-value override if you set it; if you don't, devbox
-defaults `hostname` to the project's `name`.
+defaults `hostname` to the instance's name.
 
 `%DEVBOX_USER%`, `%DEVBOX_SSH_PUBKEY%`, `%DEVBOX_JJ_NAME%`,
 `%DEVBOX_JJ_EMAIL%`, `%DEVBOX_GITHUB_TOKEN%`, `%DEVBOX_REPO_MODE%`,

@@ -432,8 +432,81 @@ def test_resolve_instance_defaults_to_project():
 
 def test_resolve_instance_name_overrides():
     import argparse
-    args = argparse.Namespace(name="foo-gpu")
-    assert devbox.resolve_instance(args, _project()) == "foo-gpu"
+    args = argparse.Namespace(name="aws-foo-gpu")
+    assert devbox.resolve_instance(args, _project()) == "aws-foo-gpu"
+
+
+def test_parse_instance_name_bare_is_libvirt():
+    # No known-provider prefix -> libvirt (the project's default), name unchanged.
+    assert devbox.parse_instance_name("binius-dev") == ("libvirt", "binius-dev")
+
+
+def test_parse_instance_name_provider_prefixed():
+    assert devbox.parse_instance_name("aws-binius-arm") == ("aws", "binius-arm")
+
+
+def test_parse_instance_name_unknown_prefix_is_libvirt():
+    # A hyphen whose left segment isn't a known prefixed provider is just part of
+    # a bare libvirt name (e.g. 'gcp-x' before gcp is a real provider).
+    assert devbox.parse_instance_name("gcp-x") == ("libvirt", "gcp-x")
+
+
+def test_parse_instance_name_no_hyphen():
+    assert devbox.parse_instance_name("scratch") == ("libvirt", "scratch")
+
+
+def test_compose_instance_name_libvirt_is_bare():
+    assert devbox.compose_instance_name("libvirt", "binius-dev") == "binius-dev"
+
+
+def test_compose_instance_name_cloud_is_prefixed():
+    assert devbox.compose_instance_name("aws", "binius-arm") == "aws-binius-arm"
+
+
+def test_compose_parse_round_trip():
+    for provider in devbox.PROVIDERS:
+        canonical = devbox.compose_instance_name(provider, "my-inst")
+        assert devbox.parse_instance_name(canonical) == (provider, "my-inst")
+
+
+def test_resolve_target_routes_by_instance_name(monkeypatch):
+    # The heart of JIM-71: a canonical aws-* name routes to the AWS provider even
+    # when the project's default provider is libvirt, from the name alone.
+    import argparse
+    monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: f"prov:{name}")
+    gc = _global_config(devbox.Path("/nonexistent"))
+    args = argparse.Namespace(name="aws-binius-arm")
+    assert devbox.cli._resolve_target(args, _project(), gc) == (
+        "aws-binius-arm", "aws", "prov:aws")
+    args = argparse.Namespace(name=None)  # bare default -> libvirt
+    assert devbox.cli._resolve_target(args, _project(), gc) == (
+        "test-project", "libvirt", "prov:libvirt")
+
+
+def _create_args(provider=None, name=None):
+    import argparse
+    return argparse.Namespace(provider=provider, name=name, spot=False,
+                              on_demand=False, project_dir=None)
+
+
+def test_cmd_create_rejects_provider_prefixed_project_name():
+    # A project literally named 'aws-foo' would make its bare libvirt name
+    # misparse as the aws provider -> rejected at create.
+    import dataclasses
+    gc = _global_config(devbox.Path("/nonexistent"))
+    project = dataclasses.replace(_project(), project="aws-foo")
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_create(_create_args(), gc, project)
+
+
+def test_cmd_create_rejects_name_with_provider_prefix():
+    # --name for a cloud create is the bare segment; the prefix is composed in.
+    # Passing an already-prefixed name would double it -> rejected.
+    import dataclasses
+    gc = dataclasses.replace(_global_config(devbox.Path("/nonexistent")),
+                             aws=devbox.AwsConfig(region="us-east-1"))
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_create(_create_args(provider="aws", name="aws-foo"), gc, _project())
 
 
 # ---- libvirt <metadata> stamp -----------------------------------------------
@@ -870,6 +943,18 @@ def test_aws_create_on_demand_request_shape():
     assert tags["devbox:project"] == "proj"
     assert tags["devbox:created-at"] == "2026-07-21T12:00:00+00:00"
     assert tags["Name"] == "devbox-foo-gpu"
+
+
+def test_aws_create_name_tag_strips_provider_prefix():
+    # The canonical devbox name is 'aws-binius-arm' (how commands address it),
+    # but the AWS-side console Name drops the redundant provider prefix.
+    client = _FakeEC2()
+    provider = devbox.AwsProvider(_aws_gc(), client=client)
+    provider.create(_aws_spec(name="aws-binius-arm"))
+    params = [kw for (op, kw) in client.calls if op == "run_instances"][0]
+    tags = {t["Key"]: t["Value"] for t in params["TagSpecifications"][0]["Tags"]}
+    assert tags["devbox:name"] == "aws-binius-arm"  # addressing tag: canonical
+    assert tags["Name"] == "devbox-binius-arm"       # console display: bare
 
 
 def test_aws_create_spot_adds_market_options():

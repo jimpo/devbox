@@ -25,6 +25,13 @@ REPO_MODES = ("none", "clone", "push")
 DEFAULT_PROVIDER = "libvirt"
 PROVIDERS = ("libvirt", "aws")
 
+# Providers whose instances carry a "<provider>-" prefix in their canonical
+# name. libvirt (the default) stays bare - local is the common case, and
+# "bare = the project's libvirt default" is worth keeping. The prefix lets every
+# per-instance command derive the provider from the name alone (offline string
+# routing), instead of an API call per `ssh`/`ip`/... to find the owner.
+PREFIXED_PROVIDERS = tuple(p for p in PROVIDERS if p != DEFAULT_PROVIDER)
+
 GLOBAL_CONFIG_PATH = Path.home() / ".config" / "devbox" / "config.toml"
 SSH_DIR = Path.home() / ".config" / "devbox" / "ssh"
 KNOWN_HOSTS_PATH = SSH_DIR / "known_hosts"
@@ -256,8 +263,29 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
     )
 
 
+def parse_instance_name(name: str) -> tuple:
+    """Derive (provider, rest) from a canonical instance name. Non-libvirt
+    instances are named "<provider>-<rest>"; a bare name is a libvirt instance
+    (the project's default). Split on the first "-", treating the left segment as
+    the provider only when it's a known prefixed-provider keyword. This is pure
+    string routing - no API call or credential load - so per-instance commands
+    (ssh/ip/status/...) pick the right backend offline. Inverse of
+    compose_instance_name."""
+    head, sep, rest = name.partition("-")
+    if sep and head in PREFIXED_PROVIDERS:
+        return head, rest
+    return DEFAULT_PROVIDER, name
+
+
+def compose_instance_name(provider: str, name: str) -> str:
+    """The canonical instance name to store at create: bare for libvirt, else
+    "<provider>-<name>". Inverse of parse_instance_name."""
+    return name if provider == DEFAULT_PROVIDER else f"{provider}-{name}"
+
+
 def resolve_instance(args, project: ProjectConfig) -> str:
-    """Which instance a command targets. Explicit --name wins; otherwise the
+    """Which instance a command targets, as its canonical name. Explicit --name
+    wins (the full canonical name, e.g. `aws-binius-arm`); otherwise the
     project's bare-named libvirt default (= the project name). Cloud instances
     are always named, so they only ever match via --name."""
     return args.name or project.project
