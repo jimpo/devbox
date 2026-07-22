@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from ..cloudconfig import CLOUD_INIT_PROVISION_PATH
 from ..config import GlobalConfig
 from ..util import die
 from .base import Instance, InstanceSpec, Provider

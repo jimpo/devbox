@@ -166,6 +166,10 @@ class ProjectConfig:
     memory_mib: int
     disk_gb: int
     repo: RepoConfig
+    marker_dir: Path              # the project's marker directory (holds .devbox/)
+    # Ordered provisioning mods appended after the built-in base playbook (see
+    # provision.py). Resolved by name project > global > built-in.
+    mods: list = dataclasses.field(default_factory=list)
     # Project-level [github].token, overriding the global one when set. Lives in
     # git-excluded .devbox/config.toml, so a per-project fine-grained PAT belongs
     # here. Unset falls back to the global token (see resolve_github_token).
@@ -258,9 +262,22 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         memory_mib=data.get("memory_mib", global_config.memory_mib),
         disk_gb=data.get("disk_gb", global_config.disk_gb),
         repo=_resolve_repo_config(data, config_path),
+        marker_dir=marker_dir,
+        mods=_resolve_mods(data, config_path),
         github_token=github.get("token"),
         aws=_resolve_aws_project_config(data, config_path),
     )
+
+
+def _resolve_mods(data: dict, config_path: Path) -> list:
+    """Parse `mods` - an ordered list of mod names appended to the built-in base
+    playbook. (The escape hatch for dropping/reordering the base - a
+    `mods = { base = false, steps = [...] }` table - is a later addition.)"""
+    mods = data.get("mods", [])
+    if not isinstance(mods, list) or not all(isinstance(m, str) for m in mods):
+        die(f"{config_path}: `mods` must be a list of mod names (strings), "
+            f"e.g. mods = [\"rust\", \"wasm-tools\"]")
+    return mods
 
 
 def parse_instance_name(name: str) -> tuple:

@@ -19,7 +19,7 @@ packages = ["devbox"]
 # Path(__file__).parent).
 [tool.hatch.build.targets.wheel.force-include]
 "devbox/common-cloud-config.yaml" = "devbox/common-cloud-config.yaml"
-"devbox/provision-common.sh" = "devbox/provision-common.sh"
+"devbox/provision-driver.sh" = "devbox/provision-driver.sh"
 
 [dependency-groups]
 dev = [

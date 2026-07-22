@@ -1,30 +1,32 @@
 #cloud-config
 #
-# Shared base provisioning for every devbox-managed project VM. Ships with
-# devbox itself (devbox.py resolves this file via Path(__file__).parent, so
-# it works out of the box under `uv tool install --editable .`) and is
-# merged with the project's own optional .devbox/cloud-config.yaml before
-# being handed to virt-install. See devbox's README for the merge algorithm.
+# Shared base cloud-config for every devbox-managed project VM. Ships with devbox
+# itself (provision.py/cloudconfig.py resolve devbox's files via
+# Path(__file__).parent, so it works out of the box under
+# `uv tool install --editable .`) and is merged with the project's own optional
+# .devbox/cloud-config.yaml before being handed to the provider. See devbox's
+# README for the merge algorithm.
 #
-# This template only covers what MUST happen on first boot via cloud-init
-# modules (packages, the login user, BASH_ENV). The actual provisioning body
-# (jj, dotfiles, Claude Code, repo bootstrap) lives in the standalone,
-# re-runnable provision-common.sh; devbox.py substitutes its tokens and
-# injects it into write_files below at render time, and runcmd runs it. The
-# same script is re-run over SSH by `devbox provision`.
+# This template covers only genuine first-boot cloud-init concerns: the login
+# user, a baseline of packages the base mods lean on, and the BASH_ENV wiring.
+# The actual provisioning is modular "mods" (jj, dotfiles, Claude Code, repo
+# bootstrap, and a project's own): devbox injects the driver + resolved mods +
+# env into write_files, and a runcmd invokes the driver - both appended at
+# render time by cloudconfig.render_cloud_config (single source of truth with
+# `devbox provision`, which runs the identical set over SSH).
 #
 # %DEVBOX_USER%, %DEVBOX_SSH_PUBKEY% (the only tokens left in this file) are
-# substituted by literal %TOKEN% replacement (not {{...}}, which collides
-# with cloud-init's own jinja syntax and with valid YAML flow-mapping syntax)
-# BEFORE this file is parsed as YAML - this comment itself is stripped during
-# that parse, and devbox prepends a fresh #cloud-config header to the merged
-# result.
+# substituted by literal %TOKEN% replacement (not {{...}}, which collides with
+# cloud-init's own jinja syntax and with valid YAML flow-mapping syntax) BEFORE
+# this file is parsed as YAML - this comment itself is stripped during that
+# parse, and devbox prepends a fresh #cloud-config header to the merged result.
+# The mods receive their context via the environment, NOT %TOKEN%s.
 
 package_update: true
 package_upgrade: false
 
 packages:
-  - zsh
+  - zsh              # %DEVBOX_USER%'s login shell (must exist by first login)
   - vim
   - python3          # used by the `jimpo` oh-my-zsh theme's prompt_pwd
   - curl
@@ -50,20 +52,15 @@ write_files:
   # Make provisioned tools (jj / claude / a project's own rustup, etc.)
   # available to NON-interactive bash (e.g. Claude Code's Bash tool). PAM
   # exports BASH_ENV from /etc/environment into the user's shells. The
-  # referenced file is written by provision-common.sh, which runs after
-  # %DEVBOX_USER%'s home directory exists (the write_files module runs
-  # before the users module, so we can't write directly into $HOME here).
+  # referenced file is written by the provisioning driver, which runs after
+  # %DEVBOX_USER%'s home directory exists (the write_files module runs before
+  # the users module, so we can't write directly into $HOME here).
   - path: /etc/environment
     append: true
     content: |
       BASH_ENV=/home/%DEVBOX_USER%/.bash_env
 
-  # devbox.py appends a second write_files entry here at render time:
-  # /usr/local/bin/provision-common.sh, the token-substituted contents of
-  # the standalone provision-common.sh. It's a neutral, root-owned location
-  # (the dev user's home doesn't exist yet at write_files time); runcmd below
-  # runs it as %DEVBOX_USER% once that home exists.
-
-runcmd:
-  - [ runuser, -l, "%DEVBOX_USER%", -c,
-      "bash /usr/local/bin/provision-common.sh 2>&1 | tee /home/%DEVBOX_USER%/provision.log" ]
+  # devbox appends the provisioning payload here at render time: the driver, the
+  # resolved mod scripts (mods/<name>.sh), context.env, an optional 0600
+  # secret.env, and the manifest - all under /usr/local/lib/devbox-provision.
+  # A runcmd (also injected at render time) then runs the driver as %DEVBOX_USER%.

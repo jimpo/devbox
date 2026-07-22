@@ -22,11 +22,11 @@ Once a box is up, the way you work with it —
 `ssh`/`exec`/`list`/`provision`/`sync` — is backend-independent; only
 `create`/`up`/`stop`/`destroy` and address discovery are provider-specific (a
 thin `Provider` seam). All projects share one cached base image (libvirt), one
-global config, and one common cloud-config + provisioning script (dotfiles, jj,
-Claude Code, base packages) that devbox owns; each project supplies only what's
-different via an optional `.devbox/cloud-config.yaml`, merged on top. `devbox`
-finds "which instance belongs to the project in the current working directory"
-the way `git`/`direnv`/`mise` locate their own markers.
+global config, and one base provisioning playbook of idempotent "mods" (jj,
+dotfiles, Claude Code, GitHub auth, repo bootstrap) that devbox owns; each
+project appends only what's different via a `mods = [...]` list. `devbox` finds
+"which instance belongs to the project in the current working directory" the way
+`git`/`direnv`/`mise` locate their own markers.
 
 ## Example Workflow
 
@@ -77,7 +77,7 @@ setup](#per-project-setup) for the `[aws]` config.
 | `devbox ip` | Print the domain's IPv4. |
 | `devbox ssh [-- args...]` | `ssh` into the domain. |
 | `devbox status` | SSH in and show `cloud-init status --long` plus the tail of `~/provision.log`. |
-| `devbox provision` | Re-run the provisioning script (`provision-common.sh`) over SSH against a running domain — reconverge (add a package, bump jj, add a plugin) without destroy+create. Idempotent; tees to `~/provision.log`. |
+| `devbox provision [mods...]` | Re-run the provisioning **mods** over SSH against a running domain — reconverge (bump jj, add a plugin, re-apply a project's rust mod) without destroy+create. Covers base **and** project mods. Idempotent; tees to `~/provision.log` (per-mod logs in `~/provision/`). Positional mod names run just those (fast iteration); no args runs the whole playbook. |
 | `devbox sync` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or AWS), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "jj sync" below. |
 | `devbox host` | Refresh the SSH alias used for jj-sync (below); prints the alias name. |
 
@@ -86,15 +86,14 @@ before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
 resolves a project other than the current directory; `--name` targets a
 specific instance instead of the project's libvirt default.
 
-**Changing a project's cloud-config (common template or `.devbox/cloud-config.yaml`)
-only takes effect via `destroy` + `create`, never `up`** — cloud-init's
-NoCloud seed ISO is only attached on first boot, so an already-defined
-domain never re-reads it. The exception is the provisioning body
-(`provision-common.sh`): `devbox provision` re-runs it over SSH on a live
-box, so edits to *that* script (and to the tokens it consumes — jj identity,
-GitHub token, `[repo]`) reconverge without a rebuild. Changes to the parts
-that live in `common-cloud-config.yaml` itself (packages, the user, YAML
-structure) still need `destroy` + `create`.
+**Changing the cloud-config layer (the `packages`/`users`/`BASH_ENV` in the
+common template or a project's `.devbox/cloud-config.yaml`) only takes effect
+via `destroy` + `create`, never `up`** — cloud-init's NoCloud seed ISO is only
+attached on first boot, so an already-defined domain never re-reads it. The
+provisioning **mods**, by contrast, reconverge in place: `devbox provision`
+re-delivers the driver + mods + env over SSH and re-runs them on a live box, so
+edits to a mod (or to the context it consumes — jj identity, GitHub token,
+`[repo]`, a project's `mods` list) apply without a rebuild.
 
 ### Project & instance resolution
 
@@ -239,6 +238,8 @@ purely this machine's VM config):
 #                           # (default: the directory's basename)
 # provider = "libvirt"      # default provider for a bare `devbox create`
 # user, vcpus, memory_mib, disk_gb optionally override the global [defaults]
+# mods = ["rust"]           # provisioning mods appended after the base playbook
+#                           # (see "Provisioning: mods" below)
 
 [repo]                      # optional; omit entirely for no repo bootstrap
 mode = "clone"               # "clone" | "push"
@@ -309,47 +310,108 @@ cloud-config template (see below) — no project needs to author this by hand:
 - **Omit `[repo]` entirely** (or `mode = "none"`) — no repo bootstrap at all,
   e.g. a scratch/experiment VM.
 
-An optional `.devbox/cloud-config.yaml` alongside it adds project-specific
-packages/scripts on top of the common template — see "How cloud-config
-merging works" below. Most projects need this for language-toolchain setup
-(Rust via rustup, etc.) that isn't common to every devbox project. It's
-entirely optional: if a project needs nothing beyond dotfiles/jj/Claude
-Code/base packages, skip this file.
+Most projects add what they need as a **mod** (see below), not a
+`.devbox/cloud-config.yaml`. The optional cloud-config fragment is now for
+genuine cloud-init concerns only (extra `packages`, `write_files`, ...) and
+supports the `%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%` placeholders, filled in by
+literal text substitution before parsing (not `{{...}}`, which collides with
+cloud-init's own jinja syntax and with valid YAML flow-mapping syntax).
+Provisioning context (jj identity, `[repo]`, the GitHub token) no longer flows
+through `%TOKEN%`s — mods receive it via the environment.
 
-Both files support the same `%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%` (plus
-`%DEVBOX_JJ_NAME%`/`%DEVBOX_JJ_EMAIL%`/`%DEVBOX_GITHUB_TOKEN%`/
-`%DEVBOX_REPO_MODE%`/`%DEVBOX_REPO_DIR%`/`%DEVBOX_REPO_URL%`) placeholders
-as the common template, filled in by literal text substitution before
-parsing (not `{{...}}`, which collides with cloud-init's own jinja syntax
-and with valid YAML flow-mapping syntax).
+## Provisioning: mods
 
-### How cloud-config merging works
+Provisioning is a list of small, idempotent, composable bash scripts — **mods**
+(inspired by Ansible roles, without Ansible). A mod installs/configures one
+thing (jj, dotfiles, Claude Code, a project's rust toolchain, …). A project's
+effective **playbook** is the built-in base plus the project's own `mods`,
+appended:
 
-devbox ships its own `common-cloud-config.yaml` (packages, the dev user, the
-`BASH_ENV` wiring) plus a standalone, re-runnable `provision-common.sh` (jj
-install + identity, GitHub auth (`gh`) + Claude Code `github`/`linear`
-plugins, dotfiles, and the `[repo]`-driven clone/push bootstrap). `devbox
-create` substitutes the script's `%TOKEN%`s, injects it into the seed's
-`write_files`, and merges the template with the project's optional
-`.devbox/cloud-config.yaml`. Because the provisioning body is a standalone
-idempotent script, `devbox provision` can re-run the exact same script over
-SSH against an already-booted box (reconverge) without a destroy+create.
+```
+base (built-in, fixed order):  jj → github-auth → dotfiles → vim → claude-code → repo-bootstrap
+project mods (config.toml):    + rust + wasm-tools + …
+```
 
-- `%TOKEN%` substitution happens on each file's raw text independently,
-  *before* either is parsed as YAML.
+Base ordering encodes the constraints (jj + github-auth before repo-bootstrap
+so a private `jj git clone` can authenticate). The 95% case is "just add rust":
+`mods = ["rust"]`.
+
+**Resolution** — each mod name resolves to a `<name>.sh` script by precedence
+**project > global > built-in**, so a project can shadow a built-in by name:
+
+```
+devbox/mods/*.sh              # built-in, shipped in the package
+~/.config/devbox/mods/*.sh    # global user (shared across projects)
+.devbox/mods/*.sh             # project-local
+```
+
+**Static files, env for context.** Mods are static (lintable, shellcheck-able,
+diffable) and receive context via the **environment** (`DEVBOX_USER`,
+`DEVBOX_JJ_NAME`, `DEVBOX_REPO_URL`, …), not `%TOKEN%` substitution. The GitHub
+PAT goes in a mode-0600 `secret.env` the driver sources without tracing, so it
+never lands in a script on disk or a log.
+
+**Self-contained.** A mod `sudo apt-get install -y`s what it needs (the dev user
+has NOPASSWD sudo; apt-install is idempotent) rather than relying on
+cloud-config's `packages:` — which is why most projects no longer need a
+`.devbox/cloud-config.yaml` at all.
+
+**One driver, two delivery paths** (single source of truth):
+
+- **First boot** — devbox writes the resolved driver + mods + env + manifest
+  into the cloud-init seed's `write_files` and a `runcmd` invokes the driver.
+- **`devbox provision`** — devbox tars the same payload, pipes it over SSH, and
+  runs the driver — covering base **and** project mods.
+
+The driver runs each mod in playbook order, stops at the first failure (naming
+which mod), and tees each mod's output to `~/provision/<name>.log` plus the
+combined `~/provision.log` that `devbox status` tails. `devbox provision <name>…`
+runs just a subset for fast iteration while writing a mod.
+
+**Idempotency contract:** every mod either overwrites unconditionally or guards
+on "already done", so both first-boot and reconverge are safe. Each built-in
+mod's header documents which pattern it uses.
+
+### Example: a rust project
+
+`.devbox/config.toml` gains one line, and the rust setup is a project-local mod
+— no `.devbox/cloud-config.yaml` needed:
+
+```toml
+# .devbox/config.toml
+mods = ["rust"]
+```
+
+```bash
+# .devbox/mods/rust.sh
+#!/usr/bin/env bash
+set -euo pipefail
+sudo apt-get install -y build-essential clang pkg-config libssl-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+. "$HOME/.cargo/env"
+# ... cargo tools, claude plugin install rust-analyzer-lsp, etc.
+```
+
+`devbox provision rust` re-applies just that mod on reconverge (which the old
+first-boot-only `runcmd` never did).
+
+### How the cloud-config layer merges
+
+devbox ships `common-cloud-config.yaml` (baseline `packages`, the dev user, the
+`BASH_ENV` wiring). `devbox create` substitutes its `%DEVBOX_USER%`/
+`%DEVBOX_SSH_PUBKEY%` tokens, injects the provisioning payload + driver `runcmd`,
+and merges the template with the project's optional `.devbox/cloud-config.yaml`:
+
 - Cloud-config keys that are lists — `packages`, `write_files`, `runcmd`,
   `bootcmd`, `users`, `groups` — are **concatenated common-then-project**.
-  Order matters: common's `runcmd` installs jj/dotfiles/`~/.local/bin`
-  before any project-specific step that might assume they already exist.
-  Don't redeclare `users:` or the repo bootstrap in a project fragment —
-  those are owned by the common template.
-- Every other top-level key is a **whole-value override** — if the project
-  fragment sets it, it replaces the common template's value entirely (no
-  recursive dict merging).
-- `hostname` defaults to the project's `name` unless either file sets it.
-- The merged result gets a fresh `#cloud-config` header prepended (YAML
-  parsing drops comments, so the original magic first line doesn't survive
-  a parse→merge→dump round trip on its own).
+  Don't redeclare `users:` in a project fragment — that's owned by the common
+  template.
+- Every other top-level key is a **whole-value override** — a project fragment's
+  value replaces the common one entirely (no recursive dict merging).
+- `hostname` defaults to the instance name unless a fragment sets it.
+- The merged result gets a fresh `#cloud-config` header prepended (YAML parsing
+  drops comments, so the original magic first line doesn't survive a
+  parse→merge→dump round trip on its own).
 
 ## jj sync: exchanging commits with the sandbox
 
@@ -437,8 +499,9 @@ uv sync              # create .venv with dev dependencies (pytest)
 uv run pytest        # run the test suite
 ```
 
-The code is a `devbox/` package: `config` (global/project config), `cloudconfig`
-(cloud-config render + provisioning script), `cli` (subcommands + argparse), and
-a `providers/` package — a `Provider` seam (`providers/base.py`) with `libvirt`
+The code is a `devbox/` package: `config` (global/project config), `provision`
+(modular mods — resolution, env context, payload/driver assembly), `cloudconfig`
+(cloud-config render + payload injection), `cli` (subcommands + argparse), and a
+`providers/` package — a `Provider` seam (`providers/base.py`) with `libvirt`
 and `aws` implementations. Data files (`common-cloud-config.yaml`,
-`provision-common.sh`) live inside the package.
+`provision-driver.sh`, and the built-in `mods/*.sh`) live inside the package.

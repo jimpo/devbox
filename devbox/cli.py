@@ -7,7 +7,7 @@ Provider seam.
     devbox ip                  # print the VM's IPv4
     devbox ssh [args...]       # ssh into the VM
     devbox status              # cloud-init progress + tail provision.log
-    devbox provision           # re-run the provisioning script over SSH (reconverge)
+    devbox provision [mods...] # re-run provisioning mods over SSH (reconverge)
     devbox list                # list devbox-managed instances on this host
     devbox sync                # jj git fetch the instance's work into the host repo
     devbox host                # refresh the SSH alias used for jj-sync
@@ -27,11 +27,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .cloudconfig import PROVISION_LOG, render_cloud_config, render_provision_script
+from .cloudconfig import render_cloud_config
 from .config import (DEFAULT_PROVIDER, GlobalConfig, KNOWN_HOSTS_PATH, PROVIDERS,
                      ProjectConfig, SSH_DIR, SSH_USER_CONFIG, compose_instance_name,
                      find_project_dir, parse_instance_name, resolve_instance,
                      resolve_project)
+from .provision import PROVISION_LOG, build_payload, build_tarball
 from .providers import InstanceSpec, all_providers, get_provider
 from .util import die
 
@@ -235,20 +236,22 @@ def cmd_provision(args: argparse.Namespace, gc: GlobalConfig, project: ProjectCo
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
 
-    script = render_provision_script(project, gc)
-    print(f"==> re-running provisioning on '{name}' ({ip}) ...")
-    # Pipe the rendered script over stdin, save it on the box, and run it,
-    # tee'ing to ~/provision.log (the same log `devbox status` tails). Run under
-    # `bash -c` with pipefail so a provisioning failure propagates through the
-    # tee rather than being masked by tee's own exit status.
+    tarball = build_tarball(build_payload(project, gc))
+    scope = f" (mods: {', '.join(args.mods)})" if args.mods else ""
+    print(f"==> re-running provisioning on '{name}' ({ip}){scope} ...")
+    # Pipe the payload tarball over stdin into a per-run temp dir (extracted as
+    # the SSH user, so the 0600 secret.env is user-owned - no chown needed), then
+    # run the driver, tee'ing to ~/provision.log (the log `devbox status` tails).
+    # Positional mod names select a subset; none => the whole playbook.
+    selected = " ".join(shlex.quote(m) for m in args.mods)
     remote = (
-        'cat > "$HOME/provision-common.sh" && '
-        'set -o pipefail && '
-        f'bash "$HOME/provision-common.sh" 2>&1 | tee "$HOME/{PROVISION_LOG}"'
+        'set -e; d="$(mktemp -d)"; tar -xzf - -C "$d"; '
+        f'bash "$d/provision-driver.sh" {selected} 2>&1 | tee "$HOME/{PROVISION_LOG}"; '
+        'rc=${PIPESTATUS[0]}; rm -rf "$d"; exit "$rc"'
     )
     result = subprocess.run(
         ["ssh", f"{project.user}@{ip}", "bash", "-c", shlex.quote(remote)],
-        input=script, text=True,
+        input=tarball,
     )
     if result.returncode != 0:
         die(f"provisioning failed (exit {result.returncode}); see the output above "
@@ -390,7 +393,9 @@ def main() -> None:
     s.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
     s.set_defaults(func=cmd_ssh)
     sub.add_parser("status", help="show cloud-init progress + provision log").set_defaults(func=cmd_status)
-    sub.add_parser("provision", help="re-run the provisioning script over SSH (reconverge a running VM)").set_defaults(func=cmd_provision)
+    pr = sub.add_parser("provision", help="re-run provisioning mods over SSH (reconverge a running VM)")
+    pr.add_argument("mods", nargs="*", help="run only these mods (default: the whole playbook)")
+    pr.set_defaults(func=cmd_provision)
     # Global view - doesn't resolve a project (works anywhere).
     sub.add_parser("list", help="list devbox-managed instances").set_defaults(func=cmd_list, needs_project=False)
     sub.add_parser("sync", help="jj git fetch the instance's bookmarked work into the host repo").set_defaults(func=cmd_sync)

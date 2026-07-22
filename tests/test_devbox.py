@@ -260,26 +260,41 @@ def test_merge_cloud_config_type_mismatch_dies():
 # ---- render_cloud_config ----------------------------------------------------
 @pytest.fixture
 def common_template(tmp_path, monkeypatch):
+    # Minimal common template: only %DEVBOX_USER%/%DEVBOX_SSH_PUBKEY% tokens
+    # remain in the YAML; provisioning context now reaches mods via env files.
     path = tmp_path / "common-cloud-config.yaml"
     path.write_text(
         "packages:\n  - zsh\n"
         "users:\n  - name: \"%DEVBOX_USER%\"\n    ssh_authorized_keys:\n      - \"%DEVBOX_SSH_PUBKEY%\"\n"
         "write_files:\n"
-        "  - path: /tmp/jj-identity\n"
+        "  - path: /etc/environment\n"
+        "    append: true\n"
         "    content: |\n"
-        "      %DEVBOX_JJ_NAME% <%DEVBOX_JJ_EMAIL%>\n"
-        "      github-token: %DEVBOX_GITHUB_TOKEN%\n"
-        "runcmd:\n"
-        "  - [\"echo\", \"%DEVBOX_REPO_MODE%\", \"%DEVBOX_REPO_DIR%\", \"%DEVBOX_REPO_URL%\"]\n"
+        "      BASH_ENV=/home/%DEVBOX_USER%/.bash_env\n"
     )
     monkeypatch.setattr(devbox.cloudconfig, "COMMON_CLOUD_CONFIG_PATH", path)
-    # The standalone provisioning script devbox injects into write_files; keep
-    # it tiny (the real one needs a booted VM) but token-bearing so we can check
-    # substitution and injection.
-    script = tmp_path / "provision-common.sh"
-    script.write_text("#!/usr/bin/env bash\necho hello %DEVBOX_USER% %DEVBOX_REPO_MODE%\n")
-    monkeypatch.setattr(devbox.cloudconfig, "PROVISION_SCRIPT_PATH", script)
+    # Tiny driver + one tiny script per base mod so build_payload resolves
+    # without the real (VM-only) scripts. Point global mods at an empty dir so a
+    # developer's own ~/.config/devbox/mods can't leak into the test.
+    driver = tmp_path / "provision-driver.sh"
+    driver.write_text("#!/usr/bin/env bash\necho driver\n")
+    monkeypatch.setattr(devbox.provision, "DRIVER_PATH", driver)
+    builtin = tmp_path / "builtin-mods"
+    builtin.mkdir()
+    for name in devbox.DEFAULT_BASE_MODS:
+        (builtin / f"{name}.sh").write_text(f"#!/usr/bin/env bash\necho mod {name}\n")
+    monkeypatch.setattr(devbox.provision, "BUILTIN_MODS_DIR", builtin)
+    monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR", tmp_path / "no-global-mods")
     return path
+
+
+def _write_files(rendered):
+    import yaml
+    return {w["path"]: w for w in yaml.safe_load(rendered)["write_files"]}
+
+
+def _payload(rendered, relpath):
+    return _write_files(rendered)[f"{devbox.REMOTE_PROVISION_ROOT}/{relpath}"]
 
 
 @pytest.fixture
@@ -289,11 +304,14 @@ def pubkey(tmp_path):
     return path
 
 
-def _project(cloud_config=None, mode="none", dir="", url=None, github_token=None):
+def _project(cloud_config=None, mode="none", dir="", url=None, github_token=None,
+             marker_dir=None, mods=None):
     return devbox.ProjectConfig(
         project="test-project", provider="libvirt", cloud_config=cloud_config, user="alice",
         vcpus=6, memory_mib=1024, disk_gb=10,
         repo=devbox.RepoConfig(mode=mode, dir=dir, url=url),
+        marker_dir=marker_dir or devbox.Path("/proj"),
+        mods=mods if mods is not None else [],
         github_token=github_token,
     )
 
@@ -307,39 +325,78 @@ def _global_config(pubkey_path, jj_name="Alice Example", jj_email="alice@example
     )
 
 
-def test_render_cloud_config_substitutes_tokens(common_template, pubkey):
+def test_render_cloud_config_substitutes_user_and_pubkey(common_template, pubkey):
     gc = _global_config(pubkey)
     rendered = devbox.render_cloud_config(_project(mode="clone", dir="myrepo", url="https://example.com/x"), gc)
-    assert "%DEVBOX_" not in rendered
+    assert "%DEVBOX_" not in rendered  # only USER/SSH_PUBKEY tokens, both filled
     assert "name: alice" in rendered
     assert "ssh-ed25519 AAAAtest user@host" in rendered
-    assert "Alice Example <alice@example.com>" in rendered
-    assert "github-token: ghp_testtoken" in rendered
+    assert "BASH_ENV=/home/alice/.bash_env" in rendered
+
+
+def test_render_cloud_config_context_reaches_mods_via_env(common_template, pubkey):
+    # Mods get their context from context.env (env vars), not %TOKEN%s. Values
+    # are shell-quoted, so a name with a space survives intact.
+    rendered = devbox.render_cloud_config(
+        _project(mode="clone", dir="myrepo", url="https://example.com/x"), _global_config(pubkey))
+    ctx = _payload(rendered, "context.env")["content"]
+    assert "export DEVBOX_USER=alice" in ctx
+    assert "export DEVBOX_JJ_NAME='Alice Example'" in ctx
+    assert "export DEVBOX_REPO_MODE=clone" in ctx
+    assert "export DEVBOX_REPO_URL=https://example.com/x" in ctx
+    # The GitHub PAT is NOT in the traced context file.
+    assert "DEVBOX_GITHUB_TOKEN" not in ctx
+
+
+def test_render_cloud_config_injects_provision_payload(common_template, pubkey):
     import yaml
-    assert yaml.safe_load(rendered)["runcmd"][0] == ["echo", "clone", "myrepo", "https://example.com/x"]
+    rendered = devbox.render_cloud_config(_project(mode="clone", dir="r", url="https://x/y"), _global_config(pubkey))
+    parsed = yaml.safe_load(rendered)
+    root = devbox.REMOTE_PROVISION_ROOT
+    wf = {w["path"]: w for w in parsed["write_files"]}
+    # driver + manifest + every base mod, all under the staging root.
+    assert wf[f"{root}/provision-driver.sh"]["content"] == "#!/usr/bin/env bash\necho driver\n"
+    assert wf[f"{root}/manifest"]["content"] == "".join(f"{m}\n" for m in devbox.DEFAULT_BASE_MODS)
+    for name in devbox.DEFAULT_BASE_MODS:
+        assert wf[f"{root}/mods/{name}.sh"]["content"] == f"#!/usr/bin/env bash\necho mod {name}\n"
+    # Injected after the template's own write_files, so /etc/environment stays first.
+    assert parsed["write_files"][0]["path"] == "/etc/environment"
+    # A runcmd runs the driver as the dev user on first boot.
+    rc = parsed["runcmd"][-1]
+    assert rc[:2] == ["bash", "-c"]
+    assert "provision-driver.sh" in rc[2] and "runuser -l alice" in rc[2]
+
+
+def test_render_cloud_config_secret_env_is_0600_and_holds_token(common_template, pubkey):
+    rendered = devbox.render_cloud_config(_project(), _global_config(pubkey))
+    secret = _payload(rendered, "secret.env")
+    assert secret["permissions"] == "0600"
+    assert "export DEVBOX_GITHUB_TOKEN=ghp_testtoken" in secret["content"]
 
 
 def test_render_cloud_config_project_token_overrides_global(common_template, pubkey):
     gc = _global_config(pubkey, github_token="ghp_global")
     rendered = devbox.render_cloud_config(_project(github_token="ghp_project"), gc)
-    assert "github-token: ghp_project" in rendered
+    assert "ghp_project" in _payload(rendered, "secret.env")["content"]
 
 
-def test_render_cloud_config_injects_provision_script(common_template, pubkey):
-    import yaml
-    rendered = devbox.render_cloud_config(_project(mode="clone", dir="r", url="https://x/y"), _global_config(pubkey))
-    parsed = yaml.safe_load(rendered)
-    entries = [w for w in parsed["write_files"] if w["path"] == devbox.CLOUD_INIT_PROVISION_PATH]
-    assert len(entries) == 1
-    assert entries[0]["content"] == "#!/usr/bin/env bash\necho hello alice clone\n"
-    # Injected after the template's own write_files, so /tmp/jj-identity stays first.
-    assert parsed["write_files"][0]["path"] == "/tmp/jj-identity"
+def test_render_cloud_config_no_secret_file_when_token_unset(common_template, pubkey, capsys):
+    gc = _global_config(pubkey, github_token=None)
+    rendered = devbox.render_cloud_config(_project(github_token=None), gc)
+    assert f"{devbox.REMOTE_PROVISION_ROOT}/secret.env" not in _write_files(rendered)
+    assert "no GitHub token found" in capsys.readouterr().out
 
 
-def test_render_provision_script_substitutes_tokens(common_template, pubkey):
-    script = devbox.render_provision_script(_project(mode="push", dir="r"), _global_config(pubkey))
-    assert script == "#!/usr/bin/env bash\necho hello alice push\n"
-    assert "%DEVBOX_" not in script
+def test_render_cloud_config_appends_project_mods(common_template, pubkey, tmp_path):
+    # A project's `mods` append after the base; a project-local mods/ dir
+    # resolves them (and can shadow a built-in by name).
+    marker = tmp_path / "proj"
+    (marker / ".devbox" / "mods").mkdir(parents=True)
+    (marker / ".devbox" / "mods" / "rust.sh").write_text("#!/usr/bin/env bash\necho rust\n")
+    rendered = devbox.render_cloud_config(_project(marker_dir=marker, mods=["rust"]), _global_config(pubkey))
+    assert _payload(rendered, "manifest")["content"] == \
+        "".join(f"{m}\n" for m in [*devbox.DEFAULT_BASE_MODS, "rust"])
+    assert _payload(rendered, "mods/rust.sh")["content"] == "#!/usr/bin/env bash\necho rust\n"
 
 
 def test_render_cloud_config_has_cloud_config_header(common_template, pubkey):
@@ -382,7 +439,9 @@ def test_render_cloud_config_falls_back_to_host_jj_config(common_template, pubke
     )
     gc = _global_config(pubkey, jj_name=None, jj_email=None)
     rendered = devbox.render_cloud_config(_project(), gc)
-    assert "Host Jj Name <host@example.com>" in rendered
+    ctx = _payload(rendered, "context.env")["content"]
+    assert "export DEVBOX_JJ_NAME='Host Jj Name'" in ctx
+    assert "export DEVBOX_JJ_EMAIL=host@example.com" in ctx
 
 
 def test_render_cloud_config_missing_pubkey_dies(common_template, tmp_path):
@@ -414,13 +473,85 @@ def test_resolve_github_token_none_when_unset_is_not_fatal():
     assert devbox.resolve_github_token(_project(github_token=None), gc) is None
 
 
-def test_render_cloud_config_empty_token_when_unset(common_template, pubkey, capsys):
-    gc = _global_config(pubkey, github_token=None)
-    rendered = devbox.render_cloud_config(_project(), gc)
-    import yaml
-    content = yaml.safe_load(rendered)["write_files"][0]["content"]
-    assert content.splitlines()[1] == "github-token: "
-    assert "no GitHub token found" in capsys.readouterr().out
+# ---- provisioning: mods, env, payload ---------------------------------------
+def test_effective_mods_appends_project_after_base():
+    assert devbox.effective_mods(_project(mods=["rust", "wasm"])) == \
+        [*devbox.DEFAULT_BASE_MODS, "rust", "wasm"]
+
+
+def test_effective_mods_base_only_when_no_project_mods():
+    assert devbox.effective_mods(_project()) == list(devbox.DEFAULT_BASE_MODS)
+
+
+def test_resolve_mod_precedence_project_over_global_over_builtin(tmp_path):
+    marker = tmp_path / "proj"
+    proj = marker / ".devbox" / "mods"
+    glob = tmp_path / "global"
+    built = tmp_path / "builtin"
+    for d in (proj, glob, built):
+        d.mkdir(parents=True)
+    # `dotfiles` in all three -> project wins; `shared` in global+builtin ->
+    # global wins; `basic` only built-in -> built-in.
+    (proj / "dotfiles.sh").write_text("proj")
+    (glob / "dotfiles.sh").write_text("glob")
+    (built / "dotfiles.sh").write_text("built")
+    (glob / "shared.sh").write_text("glob")
+    (built / "shared.sh").write_text("built")
+    (built / "basic.sh").write_text("built")
+
+    assert devbox.resolve_mod("dotfiles", marker, glob, built).read_text() == "proj"
+    assert devbox.resolve_mod("shared", marker, glob, built).read_text() == "glob"
+    assert devbox.resolve_mod("basic", marker, glob, built).read_text() == "built"
+
+
+def test_resolve_mod_missing_dies(tmp_path):
+    with pytest.raises(SystemExit):
+        devbox.resolve_mod("nope", tmp_path / "proj", tmp_path / "g", tmp_path / "b")
+
+
+def test_render_env_file_shell_quotes_values():
+    out = devbox.render_env_file({"A": "plain", "B": "has space", "C": "a'b"})
+    assert out == "export A=plain\nexport B='has space'\nexport C='a'\"'\"'b'\n"
+
+
+def test_resolve_project_parses_mods(tmp_path, global_config):
+    _write_marker(tmp_path, 'mods = ["rust", "wasm-tools"]\n')
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.mods == ["rust", "wasm-tools"]
+    assert project.marker_dir == tmp_path.resolve()
+
+
+def test_resolve_project_mods_defaults_empty(tmp_path, global_config):
+    _write_marker(tmp_path, 'project = "p"\n')
+    assert devbox.resolve_project(tmp_path, global_config).mods == []
+
+
+def test_resolve_project_mods_must_be_string_list(tmp_path, global_config):
+    _write_marker(tmp_path, 'mods = [1, 2]\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_build_tarball_roundtrips_payload():
+    import io
+    import tarfile
+    payload = [
+        devbox.PayloadFile("provision-driver.sh", "#!/bin/sh\n", 0o755),
+        devbox.PayloadFile("secret.env", "export DEVBOX_GITHUB_TOKEN=t\n", 0o600, secret=True),
+        devbox.PayloadFile("mods/jj.sh", "echo jj\n", 0o755),
+    ]
+    tar_bytes = devbox.build_tarball(payload)
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+        members = {m.name: m for m in tar.getmembers()}
+        assert set(members) == {"provision-driver.sh", "secret.env", "mods/jj.sh"}
+        assert members["secret.env"].mode == 0o600
+        assert members["provision-driver.sh"].mode == 0o755
+        assert tar.extractfile("mods/jj.sh").read() == b"echo jj\n"
+
+
+def test_build_tarball_is_deterministic():
+    payload = [devbox.PayloadFile("manifest", "jj\n", 0o644)]
+    assert devbox.build_tarball(payload) == devbox.build_tarball(payload)
 
 
 # ---- instance identity / resolution ----------------------------------------

@@ -7,12 +7,12 @@ allowed-tools: Bash(devbox *), Bash(jj *), Bash(git *), Bash(gh *), Read, Write,
 ## 1. What devbox is
 
 `devbox` is a global, multi-project dev-sandbox VM manager (libvirt +
-cloud-init). One shared base VM image and one common cloud-config template
-(dotfiles, jj install + identity, Claude Code + `github`/`linear` plugins,
-base packages) are owned by devbox itself; each project supplies only what's
-*different* — extra packages, a language toolchain, project-specific
-scripts — via an optional `.devbox/cloud-config.yaml`, merged on top at
-`devbox create` time. Full reference: `devbox`'s own `README.md` (same repo
+cloud-init). One shared base VM image and a base playbook of idempotent
+provisioning "mods" (dotfiles, jj install + identity, Claude Code +
+`github`/`linear` plugins, GitHub auth, repo bootstrap) are owned by devbox
+itself; each project appends only what's *different* — a language toolchain,
+project tooling — as its own mods via a `mods = [...]` list in
+`.devbox/config.toml`. Full reference: `devbox`'s own `README.md` (same repo
 as this skill).
 
 ## 2. Check one-time host setup
@@ -94,54 +94,51 @@ an explicit `--name` at create, and devbox stores a canonical
 later commands (`devbox --name aws-binius-arm ssh`). The provider is derived
 from the name, so `--provider` is create-only.
 
-## 5. Decide whether `.devbox/cloud-config.yaml` is needed
+## 5. Decide whether the project needs a provisioning mod
 
-Only if the project needs something beyond what the common template already
-provides (dotfiles, jj, Claude Code + `github`/`linear` plugins, base
-packages: zsh/vim/python3/curl/git/git-lfs/ca-certificates). Look at the
-project's own tooling manifest to decide what to add — e.g. `Cargo.toml` →
-a rustup-based toolchain install step; `package.json` → a bun/node install
-step. If the project needs nothing extra, skip this file entirely (the
-common template alone is a complete, valid cloud-config).
+Provisioning is a list of idempotent bash **mods**. The built-in base playbook
+(`jj → github-auth → dotfiles → vim → claude-code → repo-bootstrap`) already
+covers dotfiles, jj, Claude Code + `github`/`linear` plugins, GitHub auth, and
+the `[repo]` bootstrap. Add a project mod only for what's beyond that — look at
+the project's tooling manifest: `Cargo.toml` → a rust mod; `package.json` → a
+bun/node mod. If nothing extra is needed, skip this step.
 
-Worked example (`binius-zk/dev-sandbox`'s `.devbox/cloud-config.yaml`,
-which adds a Rust toolchain + cargo tools on top of the common template):
+To add one:
 
-```yaml
-packages:
-  - build-essential
-  - clang
-  - pkg-config
-  - libssl-dev
+1. List it in `.devbox/config.toml` (appended after the base playbook):
+   ```toml
+   mods = ["rust"]
+   ```
+2. Write `.devbox/mods/rust.sh` — a self-contained, idempotent script that
+   `sudo apt-get install -y`s its own deps (the dev user has NOPASSWD sudo) and
+   receives context via **environment variables** (`DEVBOX_USER`,
+   `DEVBOX_JJ_NAME`, `DEVBOX_REPO_DIR`, …), NOT `%TOKEN%` substitution:
 
-write_files:
-  - path: /usr/local/bin/provision-project.sh
-    owner: root:root
-    permissions: '0755'
-    content: |
-      #!/usr/bin/env bash
-      set -euxo pipefail
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-      . "$HOME/.cargo/env"
-      # ... project-specific toolchain setup ...
+   ```bash
+   #!/usr/bin/env bash
+   # mod: rust — toolchain + cargo tooling. Idempotent (rustup/cargo re-runs are safe).
+   set -euo pipefail
+   sudo apt-get install -y build-essential clang pkg-config libssl-dev
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+   . "$HOME/.cargo/env"
+   # ... cargo tools, claude plugin install rust-analyzer-lsp, etc.
+   ```
 
-runcmd:
-  - [ runuser, -l, "%DEVBOX_USER%", -c,
-      "bash /usr/local/bin/provision-project.sh 2>&1 | tee /home/%DEVBOX_USER%/provision-project.log" ]
-```
+Resolution is **project > global > built-in** by name, so `.devbox/mods/<name>.sh`
+shadows a built-in of the same name. `devbox provision rust` re-applies just
+that mod on a live box (fast iteration); bare `devbox provision` runs the whole
+playbook.
 
-Merge rule to keep in mind while writing this file: `packages`,
-`write_files`, `runcmd` (and `bootcmd`/`users`/`groups`) **concatenate**
-onto the common template's list, common-first — don't redeclare `users:` or
-a repo-clone step yourself, those are owned centrally by the common
-template and driven by `[repo]` above. Every other top-level key (e.g.
-`hostname`) is a whole-value override if you set it; if you don't, devbox
-defaults `hostname` to the instance's name.
+**Idempotency is required**: every mod runs on first boot AND on every
+`devbox provision`, so each step must either overwrite unconditionally or guard
+on "already done".
 
-`%DEVBOX_USER%`, `%DEVBOX_SSH_PUBKEY%`, `%DEVBOX_JJ_NAME%`,
-`%DEVBOX_JJ_EMAIL%`, `%DEVBOX_GITHUB_TOKEN%`, `%DEVBOX_REPO_MODE%`,
-`%DEVBOX_REPO_DIR%`, `%DEVBOX_REPO_URL%` are available as literal `%TOKEN%`
-substitutions in this file, same as the common template.
+A `.devbox/cloud-config.yaml` is now rarely needed — only for genuine
+cloud-init concerns (extra `packages`, a `write_files` entry). It still supports
+`%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%`. List keys (`packages`, `write_files`,
+`runcmd`, …) concatenate onto the common template's; don't redeclare `users:`.
+Prefer a mod over a cloud-config `runcmd` — the runcmd is first-boot-only and
+never reconverges.
 
 ## 6. Exclude `.devbox/` locally
 
@@ -167,9 +164,11 @@ devbox status   # watch cloud-init progress; wait for "status: done"
 devbox ssh      # once provisioning finishes
 ```
 
-Remember: changing `.devbox/cloud-config.yaml` (or devbox's own common
-template) only takes effect via `devbox destroy` + `devbox create`, never
-`devbox up` — the cloud-init seed is only read on first boot.
+Remember: changing a **mod** (or the `mods` list) reconverges on a live box
+with `devbox provision` — no rebuild. But changing the **cloud-config layer**
+(`.devbox/cloud-config.yaml` or devbox's common template — `packages`/`users`/
+`BASH_ENV`) only takes effect via `devbox destroy` + `devbox create`, since the
+cloud-init seed is read only on first boot.
 
 ## 8. jj-sync (both directions)
 

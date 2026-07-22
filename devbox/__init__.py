@@ -17,14 +17,17 @@ from pathlib import Path  # noqa: F401
 # Submodules, imported so `devbox.config`, `devbox.cloudconfig`,
 # `devbox.providers.libvirt`, ... are reachable as attributes (some tests
 # monkeypatch module-local names there).
-from . import cli, cloudconfig, config, util  # noqa: F401
+from . import cli, cloudconfig, config, provision, util  # noqa: F401
 from .providers import aws, base, libvirt  # noqa: F401
 
 from .cli import main  # noqa: F401
-from .cloudconfig import (CLOUD_INIT_PROVISION_PATH, COMMON_CLOUD_CONFIG_PATH,  # noqa: F401
-                          PROVISION_LOG, PROVISION_SCRIPT_PATH, merge_cloud_config,
-                          render_cloud_config, render_provision_script,
-                          resolve_github_token, resolve_jj_identity, substitute_tokens)
+from .cloudconfig import (COMMON_CLOUD_CONFIG_PATH, merge_cloud_config,  # noqa: F401
+                          render_cloud_config, substitute_tokens)
+from .provision import (BUILTIN_MODS_DIR, DEFAULT_BASE_MODS, DRIVER_PATH,  # noqa: F401
+                        GLOBAL_MODS_DIR, PROVISION_LOG, PayloadFile,
+                        REMOTE_PROVISION_ROOT, build_payload, build_tarball,
+                        effective_mods, render_env_file, resolve_github_token,
+                        resolve_jj_identity, resolve_mod)
 from .config import (AwsConfig, AwsProjectConfig, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
                      DEFAULT_CACHE_DIR, DEFAULT_DISK_GB, DEFAULT_LIBVIRT_URI,
                      DEFAULT_MEMORY_MIB, DEFAULT_NETWORK, DEFAULT_PROVIDER,
