@@ -15,7 +15,9 @@ uv tool install --editable .     # point the live `devbox` command at this check
 global/project config loading + merging (`GlobalConfig.load`, `resolve_project`,
 `resolve_instance`, `parse_instance_name`), marker walk-up, cloud-config token
 substitution + YAML merging, the modular-provisioning logic (mod resolution
-precedence, env-file quoting, payload/tarball assembly), the libvirt
+precedence, env-file quoting, payload/tarball assembly), the host→box sync
+planning (per-side `$HOME` expansion, repo-relative anchoring, `include`
+mirror-unit expansion, rsync argv), the libvirt
 `<metadata>` stamp/parse + `list` formatting (monkeypatched `virsh`), and the
 **AWS provider against a fake EC2 client** (`AwsProvider` with an injected
 `client=`: list/state/address, run-instances request shape, spot, AMI lookup,
@@ -46,8 +48,11 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 `devbox/` is a package split by concern:
 
 - `config.py` — global (`GlobalConfig`, incl. `[aws]`) + per-project
-  (`ProjectConfig`, incl. `[aws]`, `mods`, `marker_dir`) config, marker
+  (`ProjectConfig`, incl. `[aws]`, `mods`, `sync`, `marker_dir`) config, marker
   resolution, `resolve_instance`/`parse_instance_name`.
+- `sync.py` — host→box file sync (`[[sync]]`/`[[repo.sync]]`): resolve entries
+  to per-mirror-unit rsync jobs, run rsync over the `devbox-<name>` alias. Used
+  by `devbox sync` and auto-run at the end of `create`.
 - `provision.py` — modular provisioning: mod resolution (project > global >
   built-in), the base playbook, env context (jj/GitHub resolution), and payload
   assembly (driver + resolved `mods/*.sh` + `context.env`/`secret.env` +

@@ -25,6 +25,7 @@ via `.devbox/config.toml`. Full reference: `README.md` in this repo.
 | `devbox ip` / `ssh [-- args]` / `status` | Print IP / SSH in / show cloud-init progress + `~/provision.log`. |
 | `devbox provision [mods…]` | Re-run provisioning mods over SSH on a live box (reconverge, no rebuild). No args = whole playbook; names = just those. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo (refreshes the SSH alias + `devbox-<name>` jj remote, runs `jj git fetch`). |
+| `devbox sync` | Push host-local non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync (agent skills, git-excluded files). Auto-run at the end of `create`. |
 | `devbox host` | Refresh/print the `devbox-<name>` SSH alias used for `jj fetch`. |
 
 Instances: the libvirt default is **bare-named = the project**; cloud instances
@@ -61,6 +62,13 @@ mode = "clone"            # clone | push | none
 dir = "<project>"         # created at ~/<dir> in the sandbox
 url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
 
+# Host->box file sync (rsync; agent skills, git-excluded files). See "File sync".
+[[sync]]                 # $HOME/~/absolute-anchored, resolved per side
+src = "$HOME/.claude/skills"
+include = ["jujutsu"]     # only these children of src (each mirrored)
+[[repo.sync]]            # repo-relative: host = marker dir, guest = ~/<repo.dir>
+src = ".claude/skills"
+
 [aws]                    # only for --provider aws
 instance_type = "m9g.xlarge"
 architecture = "arm64"    # x86_64 | arm64
@@ -72,6 +80,13 @@ architecture = "arm64"    # x86_64 | arm64
 - **Repo modes:** `clone` (existing remote; needs `dir` + `url`), `push`
   (brand-new project, no remote yet; `dir` only — seed it after create, below),
   `none` (scratch VM; omit `[repo]`).
+- **File sync:** `devbox sync` rsyncs host-local, non-VCS files onto the box
+  (auto-run at the end of `create`). Use it for host-only files a mod can't
+  reach (a mod runs box-side); skills in the repo arrive via `[repo]`, and
+  GitHub-published skills belong in a mod. `dst` defaults to `src`; `$HOME`/`~`
+  resolve per side; `include` narrows to named children (each its own
+  `--delete` mirror unit, so it won't clobber box-installed skills outside the
+  list). Host wins — box-side edits to a synced path are overwritten next sync.
 
 ### Mods (provisioning)
 

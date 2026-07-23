@@ -10,6 +10,7 @@ Provider seam.
     devbox provision [mods...] # re-run provisioning mods over SSH (reconverge)
     devbox list                # list devbox-managed instances on this host
     devbox jj fetch            # jj git fetch the instance's work into the host repo
+    devbox sync                # rsync host-local files ([[sync]]) onto the box
     devbox host                # refresh the SSH alias used for jj fetch
     devbox destroy             # tear down, removing the overlay disk
 
@@ -23,6 +24,7 @@ import dataclasses
 import os
 import shlex
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -33,6 +35,7 @@ from .config import (DEFAULT_PROVIDER, GlobalConfig, KNOWN_HOSTS_PATH, PROVIDERS
                      find_project_dir, parse_instance_name, resolve_instance,
                      resolve_project)
 from .provision import PROVISION_LOG, build_payload, build_tarball
+from .sync import run_sync
 from .providers import InstanceSpec, all_providers, get_provider
 from .util import die
 
@@ -155,6 +158,17 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
 
     d = args.project_dir or "."
     target = f"devbox -C {d}" + (f" --name {name}" if provider_name != "libvirt" else "")
+
+    # With [[sync]] entries, wait for the box to finish provisioning (the sync
+    # dsts, e.g. ~/<repo>/.claude/skills, need the repo clone in place) and then
+    # push host-local files. Without any, create stays fire-and-forget.
+    if project.sync:
+        alias = _wait_until_provisioned(provider, name, project.user, gc)
+        print("==> syncing host-local files onto the box ...")
+        run_sync(project, alias)
+        print(f"\n==> '{name}' is ready and synced.\n\n  SSH:  {target} ssh\n")
+        return
+
     console = (f"\n  Console:   virsh -c {gc.libvirt_uri} console {name}   # ctrl-] to exit"
                if provider_name == "libvirt" else "")
     print(f"""
@@ -164,6 +178,50 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
   SSH:       {target} ssh
   Progress:  {target} status{console}
 """)
+
+
+def _poll(fn, timeout: int, interval: int = 5):
+    """Poll `fn` until it returns a truthy value or `timeout` seconds elapse;
+    returns the value (or None on timeout)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = fn()
+        if value:
+            return value
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(interval)
+
+
+def _ssh_ok(alias: str) -> bool:
+    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", alias, "true"],
+                       capture_output=True)
+    return r.returncode == 0
+
+
+def _wait_until_provisioned(provider, name: str, user: str, gc: GlobalConfig) -> str:
+    """Block until a freshly-created box is reachable and cloud-init has finished
+    provisioning, then return its refreshed `devbox-<name>` SSH alias. Used by
+    `create` before an auto-sync (the sync dsts depend on provisioning). Times
+    out with a clear message pointing at `devbox status`."""
+    print("==> waiting for the instance to get an address ...")
+    ip = _poll(lambda: provider.address(name), timeout=300)
+    if not ip:
+        die(f"timed out waiting for '{name}' to get an address; check `devbox status`")
+    alias = _refresh_ssh_alias(name, ip, user)
+
+    print("==> waiting for SSH ...")
+    if not _poll(lambda: _ssh_ok(alias), timeout=300):
+        die(f"timed out waiting for SSH to '{name}'; check `devbox status`")
+
+    print("==> waiting for cloud-init provisioning to finish (several minutes) ...")
+    # `cloud-init status --wait` blocks until done: exit 0 = done, 2 = done with
+    # recoverable warnings (degraded); anything else is a real failure.
+    r = subprocess.run(["ssh", alias, "cloud-init status --wait"])
+    if r.returncode not in (0, 2):
+        die(f"cloud-init provisioning did not finish cleanly on '{name}' "
+            f"(exit {r.returncode}); check `devbox status`")
+    return alias
 
 
 def cmd_up(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
@@ -367,6 +425,21 @@ def cmd_jj_fetch(args: argparse.Namespace, gc: GlobalConfig, project: ProjectCon
     print(f"fetched. Check out an agent bookmark with e.g. `jj new <bookmark>@{alias}`.")
 
 
+def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    # Host->box file push (non-VCS files, e.g. host-local agent skills). rsync
+    # over the provider-resolved SSH alias; re-runnable and incremental. Auto-run
+    # as the last step of `devbox create` too (see cmd_create).
+    if not project.sync:
+        die("this project has no [[sync]]/[[repo.sync]] entries; nothing to sync")
+    name, _, provider = _resolve_target(args, project, gc)
+    ip = provider.address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+    alias = _refresh_ssh_alias(name, ip, project.user)
+    run_sync(project, alias)
+    print("sync complete.")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Manage per-project dev-sandbox VMs (libvirt or AWS).")
@@ -403,6 +476,7 @@ def main() -> None:
     jj = sub.add_parser("jj", help="jj operations against the instance")
     jj_sub = jj.add_subparsers(dest="jj_cmd", required=True)
     jj_sub.add_parser("fetch", help="jj git fetch the instance's bookmarked work into the host repo").set_defaults(func=cmd_jj_fetch)
+    sub.add_parser("sync", help="push host-local files ([[sync]]/[[repo.sync]]) to the box via rsync").set_defaults(func=cmd_sync)
     sub.add_parser("host", help="refresh the SSH alias used for jj-fetch, print the alias name").set_defaults(func=cmd_host)
 
     args = p.parse_args()

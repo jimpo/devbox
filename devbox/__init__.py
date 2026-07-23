@@ -17,7 +17,7 @@ from pathlib import Path  # noqa: F401
 # Submodules, imported so `devbox.config`, `devbox.cloudconfig`,
 # `devbox.providers.libvirt`, ... are reachable as attributes (some tests
 # monkeypatch module-local names there).
-from . import cli, cloudconfig, config, provision, util  # noqa: F401
+from . import cli, cloudconfig, config, provision, sync, util  # noqa: F401
 from .providers import aws, base, libvirt  # noqa: F401
 
 from .cli import main  # noqa: F401
@@ -33,9 +33,10 @@ from .config import (AwsConfig, AwsProjectConfig, DEFAULT_BASE_IMAGE_URL,  # noq
                      DEFAULT_MEMORY_MIB, DEFAULT_NETWORK, DEFAULT_PROVIDER,
                      DEFAULT_VCPUS, GlobalConfig, PREFIXED_PROVIDERS,
                      PROJECT_CLOUD_CONFIG_FILE, PROJECT_CONFIG_FILE, PROJECT_MARKER_DIR,
-                     PROVIDERS, ProjectConfig, RepoConfig, compose_instance_name,
+                     PROVIDERS, ProjectConfig, RepoConfig, SyncEntry, compose_instance_name,
                      find_project_dir, parse_instance_name, resolve_instance,
                      resolve_project)
+from .sync import RsyncJob, plan_sync, run_sync  # noqa: F401
 from .providers import (AwsProvider, Instance, InstanceSpec, LibvirtProvider,  # noqa: F401
                         Provider, all_providers, get_provider)
 from .providers.libvirt import (CLOUDIMAGE_KEYRING_PATH, _format_resources,  # noqa: F401

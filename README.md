@@ -19,7 +19,7 @@ standalone, re-runnable shell script, so a box can be reconverged in place
 (`devbox provision`) instead of rebuilt.
 
 Once a box is up, the way you work with it —
-`ssh`/`exec`/`list`/`provision`/`jj fetch` — is backend-independent; only
+`ssh`/`exec`/`list`/`provision`/`jj fetch`/`sync` — is backend-independent; only
 `create`/`up`/`stop`/`destroy` and address discovery are provider-specific (a
 thin `Provider` seam). All projects share one cached base image (libvirt), one
 global config, and one base provisioning playbook of idempotent "mods" (jj,
@@ -79,6 +79,7 @@ setup](#per-project-setup) for the `[aws]` config.
 | `devbox status` | SSH in and show `cloud-init status --long` plus the tail of `~/provision.log`. |
 | `devbox provision [mods...]` | Re-run the provisioning **mods** over SSH against a running domain — reconverge (bump jj, add a plugin, re-apply a project's rust mod) without destroy+create. Covers base **and** project mods. Idempotent; tees to `~/provision.log` (per-mod logs in `~/provision/`). Positional mod names run just those (fast iteration); no args runs the whole playbook. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or AWS), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
+| `devbox sync` | Push host-local, non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync — agent skills, git-excluded project files. Re-runnable + incremental; auto-run at the end of `create`. See "Host→box file sync" below. |
 | `devbox host` | Refresh the SSH alias used for `jj fetch` (below); prints the alias name. |
 
 Every subcommand accepts `-C/--project-dir PATH` and `--name NAME` (both
@@ -127,6 +128,9 @@ otherwise the project's libvirt default (bare-named = the project). Daily use
 - [`uv`](https://docs.astral.sh/uv/) — manages devbox's install and runtime
   environment (its dependencies: `pyyaml` for the cloud-config merge, `boto3`
   for the AWS provider).
+- `jj` (jujutsu) and `rsync` on the host — for `devbox jj fetch` and `devbox
+  sync` respectively (both also shipped in the box's base packages). Skip if you
+  use neither.
 
 ## Install
 
@@ -249,6 +253,15 @@ url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
 # [github]                  # optional; overrides the global [github].token
 # token = "ghp_..."         #   for this project — set a PAT scoped to just
 #                           #   this repo. Unset here falls back to global.
+
+# Host->box file sync (rsync). [[sync]] = $HOME/~/absolute-anchored (resolved
+# per side); [[repo.sync]] = repo-relative (host: marker dir; guest: ~/<repo.dir>).
+# See "Host->box file sync" below.
+# [[sync]]
+# src = "$HOME/.claude/skills"   # dst defaults to src (resolved per side)
+# include = ["jujutsu"]          # only these children of src (each mirrored)
+# [[repo.sync]]
+# src = ".claude/skills"         # -> ~/<repo.dir>/.claude/skills on the box
 
 [aws]                       # optional; EC2 launch defaults for --provider aws
 instance_type = "g5.xlarge"  # required if [aws] is present
@@ -413,6 +426,56 @@ and merges the template with the project's optional `.devbox/cloud-config.yaml`:
   drops comments, so the original magic first line doesn't survive a
   parse→merge→dump round trip on its own).
 
+## Host→box file sync
+
+`devbox sync` pushes **host-local, non-VCS-tracked files** onto the box —
+primarily agent **skills** (which change often) from wherever they live on the
+host (`~/.claude/skills`, a project's git-excluded skills) to wherever they go
+on the box. This is a distinct problem from provisioning: a **mod runs on the
+box and can't read host-local files**, so host-only files fundamentally need a
+host-side push. (Skills that live in the project repo arrive via `[repo]`; skills
+published on GitHub belong in a mod that clones them box-side — `sync` is only
+for host-local files.)
+
+Configure it with two arrays of `{ src, dst?, include? }` entries:
+
+```toml
+# repo-relative: host = the marker dir (repo root), guest = the checkout
+# ~/<repo.dir>. Requires a [repo] with mode != "none".
+[[repo.sync]]
+src = ".claude/skills"                 # -> ~/<repo.dir>/.claude/skills on the box
+
+# $HOME/~/absolute-anchored, resolved per side (host home reading src, guest
+# home writing dst).
+[[sync]]
+src = "$HOME/.claude/skills"
+include = ["jujutsu"]                   # only this child of src, not every skill
+```
+
+- **`dst` defaults to `src`**, and `$HOME`/`~` resolve **per side** — so the
+  common "same relative location both ends" case needs only `src`. Only
+  `$HOME`/`~` are supported (not arbitrary env vars — guest-side expansion would
+  mean running a shell on the box); both sides resolve offline.
+- **`include`** narrows to named children of `src` (names only for now). Its key
+  subtlety is that it **defines the mirror unit**: an entry with `include`
+  expands to one rsync per child (`src/jujutsu → dst/jujutsu`), each mirrored
+  (`--delete`) within its *own* subtree — so `include = ["jujutsu"]` never
+  `--delete`s box-installed skills outside the list. Without `include`, the whole
+  `src` is one mirror of `src → dst`.
+
+**Mechanism:** `rsync` over the same `devbox-<name>` SSH alias, idempotent and
+incremental (cheap to run often). **Host wins** — a mirror deletes host-removed
+files within a synced subtree, so an agent's box-side edits to a synced skill
+are clobbered on the next `sync` (acceptable for host-authored skills).
+
+**When it runs:** on demand via `devbox sync`, and automatically as the last step
+of `devbox create` — which, for a project with `[[sync]]` entries, waits for the
+box to finish cloud-init provisioning (the sync dsts depend on the repo clone
+being in place) before pushing. It is **not** folded into `devbox provision`:
+skills change on a faster cadence than provisioning, so it stays separate and
+cheap. (`rsync` must be installed on the host; it ships in the box's base
+packages.)
+
 ## Exchanging commits with the sandbox (jj)
 
 The sandbox is a plain SSH-reachable git remote for the host, in both
@@ -501,7 +564,8 @@ uv run pytest        # run the test suite
 
 The code is a `devbox/` package: `config` (global/project config), `provision`
 (modular mods — resolution, env context, payload/driver assembly), `cloudconfig`
-(cloud-config render + payload injection), `cli` (subcommands + argparse), and a
-`providers/` package — a `Provider` seam (`providers/base.py`) with `libvirt`
-and `aws` implementations. Data files (`common-cloud-config.yaml`,
-`provision-driver.sh`, and the built-in `mods/*.sh`) live inside the package.
+(cloud-config render + payload injection), `sync` (host→box rsync file sync),
+`cli` (subcommands + argparse), and a `providers/` package — a `Provider` seam
+(`providers/base.py`) with `libvirt` and `aws` implementations. Data files
+(`common-cloud-config.yaml`, `provision-driver.sh`, and the built-in
+`mods/*.sh`) live inside the package.

@@ -305,13 +305,14 @@ def pubkey(tmp_path):
 
 
 def _project(cloud_config=None, mode="none", dir="", url=None, github_token=None,
-             marker_dir=None, mods=None):
+             marker_dir=None, mods=None, sync=None):
     return devbox.ProjectConfig(
         project="test-project", provider="libvirt", cloud_config=cloud_config, user="alice",
         vcpus=6, memory_mib=1024, disk_gb=10,
         repo=devbox.RepoConfig(mode=mode, dir=dir, url=url),
         marker_dir=marker_dir or devbox.Path("/proj"),
         mods=mods if mods is not None else [],
+        sync=sync if sync is not None else [],
         github_token=github_token,
     )
 
@@ -875,6 +876,141 @@ def test_cmd_jj_fetch_without_repo_dies():
     gc = _global_config(devbox.Path("/nonexistent"))
     with pytest.raises(SystemExit):
         devbox.cli.cmd_jj_fetch(argparse.Namespace(name=None, project_dir=None), gc, _project(mode="none"))
+
+
+# ---- host->box sync ---------------------------------------------------------
+def test_resolve_project_parses_sync_entries(tmp_path, global_config):
+    _write_marker(tmp_path, (
+        '[[sync]]\n'
+        'src = "$HOME/.claude/skills"\n'
+        'include = ["jujutsu"]\n\n'
+        '[repo]\n'
+        'mode = "clone"\n'
+        'dir = "binius64"\n'
+        'url = "https://github.com/x/binius64"\n\n'
+        '[[repo.sync]]\n'
+        'src = ".claude/skills"\n'
+    ))
+    entries = devbox.resolve_project(tmp_path, global_config).sync
+    assert entries == [
+        devbox.SyncEntry(src="$HOME/.claude/skills", dst="$HOME/.claude/skills",
+                         include=["jujutsu"], repo_relative=False),
+        devbox.SyncEntry(src=".claude/skills", dst=".claude/skills",
+                         include=[], repo_relative=True),
+    ]
+
+
+def test_resolve_project_sync_defaults_empty(tmp_path, global_config):
+    _write_marker(tmp_path, 'project = "p"\n')
+    assert devbox.resolve_project(tmp_path, global_config).sync == []
+
+
+def test_resolve_project_repo_sync_without_repo_dies(tmp_path, global_config):
+    _write_marker(tmp_path, '[[repo.sync]]\nsrc = ".claude/skills"\n')  # no [repo]
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_sync_relative_path_dies(tmp_path, global_config):
+    # [[sync]] paths must be $HOME/~/absolute-anchored, not bare-relative.
+    _write_marker(tmp_path, '[[sync]]\nsrc = "relative/skills"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_repo_sync_anchored_path_dies(tmp_path, global_config):
+    _write_marker(tmp_path, (
+        '[repo]\nmode = "push"\ndir = "x"\n\n'
+        '[[repo.sync]]\nsrc = "$HOME/skills"\n'  # repo.sync must be repo-relative
+    ))
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def _sync(src, dst=None, include=None, repo_relative=False):
+    return devbox.SyncEntry(src=src, dst=dst if dst is not None else src,
+                            include=include or [], repo_relative=repo_relative)
+
+
+def test_plan_sync_home_expansion_per_side(tmp_path):
+    (tmp_path / ".claude" / "skills").mkdir(parents=True)
+    proj = _project(sync=[_sync("$HOME/.claude/skills")])
+    jobs = devbox.plan_sync(proj, host_home=str(tmp_path), guest_home="/home/alice")
+    assert len(jobs) == 1
+    assert jobs[0].host_path == f"{tmp_path}/.claude/skills"     # host home
+    assert jobs[0].guest_path == "/home/alice/.claude/skills"    # guest home
+    assert jobs[0].mirror is True
+
+
+def test_plan_sync_include_expands_to_per_child_units(tmp_path):
+    skills = tmp_path / "skills"
+    (skills / "jujutsu").mkdir(parents=True)
+    proj = _project(sync=[_sync("$HOME/skills", include=["jujutsu"])])
+    jobs = devbox.plan_sync(proj, host_home=str(tmp_path), guest_home="/home/alice")
+    assert len(jobs) == 1
+    assert jobs[0].host_path == f"{skills}/jujutsu"
+    assert jobs[0].guest_path == "/home/alice/skills/jujutsu"
+
+
+def test_plan_sync_repo_relative_anchoring(tmp_path):
+    (tmp_path / ".claude" / "skills").mkdir(parents=True)
+    proj = _project(mode="clone", dir="binius64", url="https://x/y", marker_dir=tmp_path,
+                    sync=[_sync(".claude/skills", repo_relative=True)])
+    jobs = devbox.plan_sync(proj, host_home="/host", guest_home="/home/alice")
+    assert jobs[0].host_path == f"{tmp_path}/.claude/skills"                 # marker dir
+    assert jobs[0].guest_path == "/home/alice/binius64/.claude/skills"       # ~/<repo.dir>
+
+
+def test_plan_sync_file_src_is_not_mirrored(tmp_path):
+    (tmp_path / "f.txt").write_text("x")
+    proj = _project(sync=[_sync("$HOME/f.txt")])
+    jobs = devbox.plan_sync(proj, host_home=str(tmp_path), guest_home="/home/alice")
+    assert jobs[0].mirror is False
+
+
+def test_plan_sync_missing_src_dies(tmp_path):
+    proj = _project(sync=[_sync("$HOME/nope")])
+    with pytest.raises(SystemExit):
+        devbox.plan_sync(proj, host_home=str(tmp_path), guest_home="/home/alice")
+
+
+def test_run_sync_rsync_argv_mirror_dir(tmp_path, monkeypatch):
+    (tmp_path / "skills").mkdir()
+    proj = _project(sync=[_sync("$HOME/skills")])
+    calls = []
+    monkeypatch.setattr(devbox.subprocess, "run",
+                        lambda argv, **k: calls.append(argv) or _cp(argv, 0))
+    devbox.run_sync(proj, "devbox-foo", host_home=str(tmp_path), guest_home="/home/alice")
+    # dir -> --delete + trailing slashes (mirror the contents).
+    assert calls == [["rsync", "-az", "--mkpath", "--delete",
+                      f"{tmp_path}/skills/", "devbox-foo:/home/alice/skills/"]]
+
+
+def test_run_sync_rsync_argv_file(tmp_path, monkeypatch):
+    (tmp_path / "f.txt").write_text("x")
+    proj = _project(sync=[_sync("$HOME/f.txt", dst="$HOME/g.txt")])
+    calls = []
+    monkeypatch.setattr(devbox.subprocess, "run",
+                        lambda argv, **k: calls.append(argv) or _cp(argv, 0))
+    devbox.run_sync(proj, "devbox-foo", host_home=str(tmp_path), guest_home="/home/alice")
+    # file -> no --delete, no trailing slash.
+    assert calls == [["rsync", "-az", "--mkpath",
+                      f"{tmp_path}/f.txt", "devbox-foo:/home/alice/g.txt"]]
+
+
+def test_run_sync_dies_on_rsync_failure(tmp_path, monkeypatch):
+    (tmp_path / "skills").mkdir()
+    proj = _project(sync=[_sync("$HOME/skills")])
+    monkeypatch.setattr(devbox.subprocess, "run", lambda argv, **k: _cp(argv, 23))
+    with pytest.raises(SystemExit):
+        devbox.run_sync(proj, "devbox-foo", host_home=str(tmp_path), guest_home="/home/alice")
+
+
+def test_cmd_sync_without_entries_dies():
+    import argparse
+    gc = _global_config(devbox.Path("/nonexistent"))
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_sync(argparse.Namespace(name=None, project_dir=None), gc, _project())
 
 
 # ---- AWS config -------------------------------------------------------------

@@ -34,6 +34,7 @@ packages:
   - git-lfs          # gitconfig declares the lfs clean/smudge filters
   - ca-certificates
   - gh               # GitHub CLI; also used as git's HTTPS credential helper
+  - rsync            # receiver for `devbox sync` (host->box file push)
 
 # `- default` also creates the cloud image's default `ubuntu` user (key-only,
 # no password) as a fallback; %DEVBOX_USER% is the account you actually log

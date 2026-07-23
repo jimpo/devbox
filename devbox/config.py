@@ -145,6 +145,19 @@ class RepoConfig:
 
 
 @dataclasses.dataclass
+class SyncEntry:
+    """One host->box file-sync rule (see sync.py). `src`/`dst` are `$HOME`/`~`/
+    absolute-anchored for `[[sync]]`, or repo-relative for `[[repo.sync]]`
+    (host = the marker dir, guest = ~/<repo.dir>). `include` narrows to named
+    children of `src` (each mirrored in its own subtree); empty = the whole
+    `src`. `dst` defaults to `src`."""
+    src: str
+    dst: str
+    include: list                # child names; empty = whole src
+    repo_relative: bool          # True for [[repo.sync]], False for [[sync]]
+
+
+@dataclasses.dataclass
 class AwsProjectConfig:
     """Per-project `[aws]` launch defaults (cfleet's "instance template")."""
     instance_type: str
@@ -170,6 +183,8 @@ class ProjectConfig:
     # Ordered provisioning mods appended after the built-in base playbook (see
     # provision.py). Resolved by name project > global > built-in.
     mods: list = dataclasses.field(default_factory=list)
+    # Host->box file-sync rules from [[sync]] / [[repo.sync]] (see sync.py).
+    sync: list = dataclasses.field(default_factory=list)
     # Project-level [github].token, overriding the global one when set. Lives in
     # git-excluded .devbox/config.toml, so a per-project fine-grained PAT belongs
     # here. Unset falls back to the global token (see resolve_github_token).
@@ -209,6 +224,49 @@ def _resolve_repo_config(data: dict, config_path: Path) -> RepoConfig:
     if mode != "clone" and url:
         die(f"{config_path}: [repo] url is only used when mode = \"clone\" (mode is \"{mode}\")")
     return RepoConfig(mode=mode, dir=repo_dir, url=url)
+
+
+def _path_anchored(path: str) -> bool:
+    """A path anchored at $HOME/~/absolute (vs. a bare relative path)."""
+    return (path == "~" or path.startswith("~/")
+            or path == "$HOME" or path.startswith("$HOME/")
+            or path.startswith("/"))
+
+
+def _parse_sync_entry(raw: dict, config_path: Path, repo_relative: bool) -> SyncEntry:
+    table = "[[repo.sync]]" if repo_relative else "[[sync]]"
+    if not isinstance(raw, dict):
+        die(f"{config_path}: each {table} entry must be a table with a `src` key")
+    src = raw.get("src")
+    if not isinstance(src, str) or not src:
+        die(f"{config_path}: {table} requires a non-empty string `src`")
+    dst = raw.get("dst", src)
+    if not isinstance(dst, str) or not dst:
+        die(f"{config_path}: {table} `dst` must be a non-empty string (defaults to `src`)")
+    include = raw.get("include", [])
+    if not isinstance(include, list) or not all(isinstance(i, str) for i in include):
+        die(f"{config_path}: {table} `include` must be a list of child names (strings)")
+    # [[sync]] paths are $HOME/~/absolute-anchored (resolved per side); [[repo.sync]]
+    # paths are repo-relative. Reject the wrong shape so anchoring is unambiguous.
+    for label, value in (("src", src), ("dst", dst)):
+        if repo_relative and _path_anchored(value):
+            die(f"{config_path}: [[repo.sync]] {label} must be repo-relative, not "
+                f"$HOME/~/absolute (got {value!r}); use [[sync]] for anchored paths")
+        if not repo_relative and not _path_anchored(value):
+            die(f"{config_path}: [[sync]] {label} must be anchored at $HOME, ~, or / "
+                f"(got {value!r}); use [[repo.sync]] for repo-relative paths")
+    return SyncEntry(src=src, dst=dst, include=include, repo_relative=repo_relative)
+
+
+def _resolve_sync(data: dict, config_path: Path, repo: RepoConfig) -> list:
+    entries = [_parse_sync_entry(raw, config_path, repo_relative=False)
+               for raw in data.get("sync", [])]
+    repo_syncs = data.get("repo", {}).get("sync", [])
+    if repo_syncs and (repo.mode == "none" or not repo.dir):
+        die(f"{config_path}: [[repo.sync]] needs a [repo] with mode != \"none\" "
+            f"(paths anchor at the repo checkout ~/<repo.dir>)")
+    entries += [_parse_sync_entry(raw, config_path, repo_relative=True) for raw in repo_syncs]
+    return entries
 
 
 def _resolve_aws_project_config(data: dict, config_path: Path) -> Optional[AwsProjectConfig]:
@@ -253,6 +311,7 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
 
     cloud_config_path = devbox_dir / PROJECT_CLOUD_CONFIG_FILE
     github = data.get("github", {})
+    repo = _resolve_repo_config(data, config_path)
     return ProjectConfig(
         project=data.get("project", marker_dir.name),
         provider=provider,
@@ -261,9 +320,10 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         vcpus=data.get("vcpus", global_config.vcpus),
         memory_mib=data.get("memory_mib", global_config.memory_mib),
         disk_gb=data.get("disk_gb", global_config.disk_gb),
-        repo=_resolve_repo_config(data, config_path),
+        repo=repo,
         marker_dir=marker_dir,
         mods=_resolve_mods(data, config_path),
+        sync=_resolve_sync(data, config_path, repo),
         github_token=github.get("token"),
         aws=_resolve_aws_project_config(data, config_path),
     )
