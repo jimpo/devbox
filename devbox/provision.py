@@ -14,14 +14,12 @@ context via the **environment** (DEVBOX_USER, DEVBOX_JJ_NAME, ...) rather than
 `%TOKEN%` substitution; the GitHub PAT goes in a mode-0600 env file the driver
 sources without tracing, so it never lands in a script on disk or a log.
 
-One driver (`provision-driver.sh`) runs the resolved set in order, two delivery
-paths sharing this single source of truth:
-
-  * first boot - the payload is written into the cloud-init seed's write_files
-    and a runcmd invokes the driver (see cloudconfig.render_cloud_config).
-  * `devbox provision` - the payload is tarred, piped over SSH, and the driver
-    is run against the already-booted box - covering base AND project mods (the
-    gap in the old monolithic-script model).
+One driver (`provision-driver.sh`) runs the resolved set in order. Provisioning
+is delivered entirely over SSH (single path): devbox tars the payload
+(`build_tarball`), pipes it to the box, extracts into a per-run temp dir owned by
+the SSH user, and runs the driver - on `devbox create` (after boot) and on
+`devbox sync --mods` alike (see cli.py). The cloud-config layer only does base
+setup (user/packages/BASH_ENV); it carries no provisioning payload.
 """
 from __future__ import annotations
 
@@ -50,21 +48,16 @@ PROJECT_MODS_SUBDIR = "mods"
 # `jj git clone` can authenticate. A project's `mods` are appended after this.
 DEFAULT_BASE_MODS = ("jj", "github-auth", "dotfiles", "vim", "claude-code", "repo-bootstrap")
 
-# Where the first-boot cloud-init seed stages the payload (root-owned; the
-# driver runs as the dev user, who is chowned the 0600 secret file first). The
-# reconverge path extracts into a per-run mktemp dir owned by the SSH user.
-REMOTE_PROVISION_ROOT = "/usr/local/lib/devbox-provision"
-
-# Provisioning output log, under the dev user's $HOME - written (tee'd) by both
-# the first-boot runcmd and `devbox provision`, and tailed by `devbox status`.
-# The driver additionally keeps a per-mod log at ~/provision/<name>.log.
+# Provisioning output log, under the dev user's $HOME - written (tee'd) when the
+# driver runs over SSH, and tailed by `devbox status`. The driver additionally
+# keeps a per-mod log at ~/provision/<name>.log.
 PROVISION_LOG = "provision.log"
 
 
 @dataclasses.dataclass
 class PayloadFile:
     """One file in the provisioning payload, positioned relative to the payload
-    root (the seed's REMOTE_PROVISION_ROOT, or the reconverge mktemp dir)."""
+    root (the per-run temp dir the tarball is extracted into on the box)."""
     path: str          # relative path, e.g. "provision-driver.sh" or "mods/jj.sh"
     content: str
     mode: int          # unix permission bits (e.g. 0o755, 0o600)
@@ -133,7 +126,7 @@ def resolve_mod(name: str, marker_dir: Path,
 def _provision_env(project: ProjectConfig, gc: GlobalConfig) -> tuple:
     """(context, secret) env dicts the driver exposes to every mod. Context is
     non-secret (safe to trace); secret holds only the GitHub PAT, kept out of
-    any log. Same resolution for the first-boot render and `devbox provision`."""
+    any log."""
     jj_name, jj_email = resolve_jj_identity(gc)
     github_token = resolve_github_token(project, gc)
     if github_token is None:
@@ -163,8 +156,8 @@ def render_env_file(env: dict) -> str:
 # ---- payload assembly -------------------------------------------------------
 def build_payload(project: ProjectConfig, gc: GlobalConfig) -> list:
     """The full provisioning payload (driver + manifest + env + resolved mods),
-    as PayloadFiles positioned under the payload root. Shared by both delivery
-    paths so first-boot and reconverge run the identical set."""
+    as PayloadFiles. Tarred and run over SSH by both `devbox create` and
+    `devbox sync --mods` - the identical set either way."""
     if not DRIVER_PATH.is_file():
         die(f"devbox internal error: provisioning driver not found at "
             f"{DRIVER_PATH} (broken install?)")
@@ -186,10 +179,9 @@ def build_payload(project: ProjectConfig, gc: GlobalConfig) -> list:
 
 
 def build_tarball(payload: list) -> bytes:
-    """A gzip tar of the payload, for `devbox provision` to pipe over SSH and
-    extract (as the SSH user, so the 0600 secret file is user-owned with no
-    chown needed). Deterministic (mtime=0) so identical inputs produce identical
-    bytes."""
+    """A gzip tar of the payload, piped over SSH and extracted as the SSH user
+    (so the 0600 secret file is user-owned, no chown needed). Deterministic
+    (mtime=0) so identical inputs produce identical bytes."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for pf in payload:

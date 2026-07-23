@@ -32,9 +32,9 @@ live EC2 launch — those need a real libvirt daemon + booted VM, or real AWS.
 Verify such changes by reading the `virsh`/`virt-install`/boto3 calls, the
 rendered cloud-config, and the mod/driver scripts (`bash -n`, shellcheck)
 carefully; with a real libvirt setup, exercise by hand (`devbox create` +
-`devbox status` through to `cloud-init status --long` reporting `done`, then
-`devbox ssh`; for provisioning edits, `devbox provision` and re-check) before
-calling it done.
+`devbox status` through to a fully provisioned box (create blocks through it),
+then `devbox ssh`; for provisioning edits, `devbox sync --mods` and re-check)
+before calling it done.
 
 `tests/conftest.py` just puts the repo root on `sys.path` so `import devbox`
 resolves the package (works with or without an editable install). Tests
@@ -52,16 +52,16 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   resolution, `resolve_instance`/`parse_instance_name`.
 - `sync.py` — host→box file sync (`[[sync]]`/`[[repo.sync]]`): resolve entries
   to per-mirror-unit rsync jobs, run rsync over the `devbox-<name>` alias. Used
-  by `devbox sync` and auto-run at the end of `create`.
+  by `devbox sync --files` and auto-run at the end of `create`.
 - `provision.py` — modular provisioning: mod resolution (project > global >
   built-in), the base playbook, env context (jj/GitHub resolution), and payload
   assembly (driver + resolved `mods/*.sh` + `context.env`/`secret.env` +
-  manifest) for both delivery paths. Ships `provision-driver.sh` + `mods/*.sh`.
-- `cloudconfig.py` — token substitution (`%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%`),
-  common+project merge, and injection of the provisioning payload + driver
-  runcmd into the render of `common-cloud-config.yaml`. One cloud-config, two
-  delivery paths (libvirt NoCloud seed / EC2 user-data); `devbox provision` tars
-  the same payload over SSH.
+  manifest). Ships `provision-driver.sh` + `mods/*.sh`. Delivered entirely over
+  SSH (tar → extract → run driver) by `create` and `devbox sync --mods`.
+- `cloudconfig.py` — token substitution (`%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%`) +
+  common+project merge only. The cloud-config carries just base setup
+  (user/packages/BASH_ENV) — no provisioning payload; provisioning runs over SSH
+  after boot. One cloud-config, two providers (libvirt NoCloud seed / EC2 user-data).
 - `providers/` — the backend seam. `base.py` (`Provider` ABC, `InstanceSpec`,
   `Instance`); `libvirt.py`; `aws.py` (boto3, lazily imported + injectable client
   for tests); `__init__.py` (`get_provider`, `all_providers` — AWS gated on

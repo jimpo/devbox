@@ -23,9 +23,9 @@ via `.devbox/config.toml`. Full reference: `README.md` in this repo.
 | `devbox list` | All devbox-managed instances (libvirt on this host + AWS account-wide): name, provider, state, resources. |
 | `devbox up` / `stop` / `destroy` | Start / graceful-shutdown / tear down (destroy also deletes the disk). |
 | `devbox ip` / `ssh [-- args]` / `status` | Print IP / SSH in / show cloud-init progress + `~/provision.log`. |
-| `devbox provision [mods…]` | Re-run provisioning mods over SSH on a live box (reconverge, no rebuild). No args = whole playbook; names = just those. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo (refreshes the SSH alias + `devbox-<name>` jj remote, runs `jj git fetch`). |
-| `devbox sync` | Push host-local non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync (agent skills, git-excluded files). Auto-run at the end of `create`. |
+| `devbox sync --mods[=a,b]` | Run provisioning mods over SSH on a live box (reconverge, no rebuild). No list = whole playbook; else just those. |
+| `devbox sync --files` | Push host-local non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync (agent skills, git-excluded files). |
 | `devbox host` | Refresh/print the `devbox-<name>` SSH alias used for `jj fetch`. |
 
 Instances: the libvirt default is **bare-named = the project**; cloud instances
@@ -80,8 +80,8 @@ architecture = "arm64"    # x86_64 | arm64
 - **Repo modes:** `clone` (existing remote; needs `dir` + `url`), `push`
   (brand-new project, no remote yet; `dir` only — seed it after create, below),
   `none` (scratch VM; omit `[repo]`).
-- **File sync:** `devbox sync` rsyncs host-local, non-VCS files onto the box
-  (auto-run at the end of `create`). Use it for host-only files a mod can't
+- **File sync:** `devbox sync --files` rsyncs host-local, non-VCS files onto the
+  box (auto-run at the end of `create`). Use it for host-only files a mod can't
   reach (a mod runs box-side); skills in the repo arrive via `[repo]`, and
   GitHub-published skills belong in a mod. `dst` defaults to `src`; `$HOME`/`~`
   resolve per side; `include` narrows to named children (each its own
@@ -109,20 +109,23 @@ repo-bootstrap`) is built in. Add a project mod only for extra tooling
    ```
 
 Resolution is **project > global (`~/.config/devbox/mods`) > built-in** by name.
-Every mod must be idempotent (it runs on first boot *and* every `devbox
-provision`): overwrite unconditionally or guard on "already done". A `.devbox/
+Every mod must be idempotent (it runs on `create` *and* every `devbox sync
+--mods`): overwrite unconditionally or guard on "already done". A `.devbox/
 cloud-config.yaml` is now rarely needed (only genuine cloud-init concerns);
-prefer a mod, since a cloud-config `runcmd` is first-boot-only.
+prefer a mod.
 
-**What takes effect how:** a mod change (or the `mods` list) reconverges live via
-`devbox provision`. A cloud-config-layer change (`packages`/`users`/the common
-template) needs `devbox destroy` + `create` — the cloud-init seed is read only on
-first boot.
+**What takes effect how:** provisioning runs entirely over SSH. A mod change (or
+the `mods` list) reconverges a live box via `devbox sync --mods` — no rebuild. A
+cloud-config-layer change (`packages`/`users`/the common template) needs `devbox
+destroy` + `create`, since the cloud-init seed is read only on first boot.
 
 ## Setting up & syncing
 
+`devbox create` blocks: it boots the box, runs the mods over SSH, then pushes any
+`[[sync]]` files — so when it returns the box is fully provisioned.
+
 ```bash
-devbox create && devbox status   # boot + provision; wait for "status: done"
+devbox create        # boot + provision (mods) + sync files; blocks until ready
 devbox ssh
 ```
 

@@ -1,33 +1,31 @@
-"""Cloud-config rendering: token substitution, common+project merge, and
-injection of the modular provisioning payload. Provider-agnostic - both libvirt
-(NoCloud seed) and AWS (EC2 user-data) render the same cloud-config, and the
-same driver + mods run on first boot and via `devbox provision` (see provision.py).
+"""Cloud-config rendering: token substitution and common+project merge.
+Provider-agnostic - libvirt (NoCloud seed) and AWS (EC2 user-data) render the
+same cloud-config. The cloud-config layer covers only genuine first-boot concerns
+(the login user, baseline packages, BASH_ENV wiring); provisioning (the mods) is
+driven entirely over SSH after boot (see cli.py / provision.py), not injected here.
 """
 from __future__ import annotations
 
-import shlex
 from pathlib import Path
 
 import yaml
 
 from .config import GlobalConfig, ProjectConfig
-from .provision import PROVISION_LOG, REMOTE_PROVISION_ROOT, build_payload
 from .util import die
 
 COMMON_CLOUD_CONFIG_PATH = Path(__file__).parent / "common-cloud-config.yaml"
 
 # Cloud-config keys whose values get concatenated (common-first) rather than
 # whole-value-overridden when merging the common template with a project's
-# fragment. Order matters: common's write_files/runcmd (the provisioning payload
-# and the driver run) come before any project-specific step that might assume it.
+# fragment.
 LIST_MERGE_KEYS = {"packages", "write_files", "runcmd", "bootcmd", "users", "groups"}
 
 
 def substitute_tokens(text: str, tokens: dict) -> str:
     """Literal token substitution (not {{...}}, which collides with cloud-init's
     own jinja syntax and with valid YAML flow-mapping syntax). Only %DEVBOX_USER%
-    and %DEVBOX_SSH_PUBKEY% are substituted into the YAML now - the mods get
-    their context via the environment (see provision.py), not %TOKEN%s."""
+    and %DEVBOX_SSH_PUBKEY% are substituted into the YAML - the mods get their
+    context via the environment (see provision.py), not %TOKEN%s."""
     for key, value in tokens.items():
         text = text.replace(f"%{key}%", value)
     return text
@@ -70,19 +68,6 @@ class _CloudConfigDumper(yaml.SafeDumper):
 _CloudConfigDumper.add_representer(str, _represent_multiline_str)
 
 
-def _provision_runcmd(user: str) -> list:
-    """The first-boot runcmd that runs the provisioning driver. write_files
-    stages the payload root-owned; here (as root) we hand the 0600 secret.env to
-    the dev user, then run the driver as them, teeing the combined log that
-    `devbox status` tails (per-mod logs land in ~/provision/)."""
-    driver = f"{REMOTE_PROVISION_ROOT}/provision-driver.sh"
-    secret = f"{REMOTE_PROVISION_ROOT}/secret.env"
-    inner = f"bash {driver} 2>&1 | tee $HOME/{PROVISION_LOG}"
-    script = (f"[ -e {secret} ] && chown {user}: {secret}; "
-              f"runuser -l {user} -c {shlex.quote(inner)}")
-    return ["bash", "-c", script]
-
-
 def render_cloud_config(project: ProjectConfig, gc: GlobalConfig,
                         instance_name: str = None) -> str:
     if not gc.ssh_pubkey_path.is_file():
@@ -97,20 +82,6 @@ def render_cloud_config(project: ProjectConfig, gc: GlobalConfig,
     }
     common_text = substitute_tokens(COMMON_CLOUD_CONFIG_PATH.read_text(), tokens)
     common = _load_cloud_config_yaml(common_text, COMMON_CLOUD_CONFIG_PATH)
-
-    # Inject the modular provisioning payload (driver + resolved mods + env +
-    # manifest) into write_files, and a runcmd that runs the driver on first
-    # boot. Appended after the template's own write_files so /etc/environment
-    # stays first. `devbox provision` delivers the identical payload over SSH.
-    write_files = common.setdefault("write_files", [])
-    for pf in build_payload(project, gc):
-        write_files.append({
-            "path": f"{REMOTE_PROVISION_ROOT}/{pf.path}",
-            "owner": "root:root",
-            "permissions": f"{pf.mode:04o}",
-            "content": pf.content,
-        })
-    common.setdefault("runcmd", []).append(_provision_runcmd(project.user))
 
     if project.cloud_config is not None:
         project_text = substitute_tokens(project.cloud_config.read_text(), tokens)
@@ -127,6 +98,6 @@ def render_cloud_config(project: ProjectConfig, gc: GlobalConfig,
     body = yaml.dump(merged, Dumper=_CloudConfigDumper, sort_keys=False, default_flow_style=False)
     # yaml.safe_load drops comments, so the magic first-line marker cloud-init's
     # NoCloud datasource relies on to recognize this as cloud-config does not
-    # survive a parse->dump round trip. Without it, the VM boots but is
-    # silently never provisioned - no error anywhere.
+    # survive a parse->dump round trip. Without it, the VM boots but cloud-init
+    # never runs (no user, no packages) - silently.
     return "#cloud-config\n" + body

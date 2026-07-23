@@ -7,10 +7,10 @@ Provider seam.
     devbox ip                  # print the VM's IPv4
     devbox ssh [args...]       # ssh into the VM
     devbox status              # cloud-init progress + tail provision.log
-    devbox provision [mods...] # re-run provisioning mods over SSH (reconverge)
     devbox list                # list devbox-managed instances on this host
     devbox jj fetch            # jj git fetch the instance's work into the host repo
-    devbox sync                # rsync host-local files ([[sync]]) onto the box
+    devbox sync --mods[=a,b]   # (re)run provisioning mods over SSH (reconverge)
+    devbox sync --files        # rsync host-local files ([[sync]]) onto the box
     devbox host                # refresh the SSH alias used for jj fetch
     devbox destroy             # tear down, removing the overlay disk
 
@@ -141,6 +141,10 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
     if aws_cfg is not None and (args.spot or args.on_demand):
         aws_cfg = dataclasses.replace(aws_cfg, spot=bool(args.spot))
 
+    # Build the provisioning payload up front so a bad jj identity / missing mod
+    # surfaces before we boot a box (build_payload resolves both).
+    tarball = build_tarball(build_payload(project, gc))
+
     spec = InstanceSpec(
         name=name,
         project=project.project,
@@ -159,25 +163,16 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
     d = args.project_dir or "."
     target = f"devbox -C {d}" + (f" --name {name}" if provider_name != "libvirt" else "")
 
-    # With [[sync]] entries, wait for the box to finish provisioning (the sync
-    # dsts, e.g. ~/<repo>/.claude/skills, need the repo clone in place) and then
-    # push host-local files. Without any, create stays fire-and-forget.
+    # Provisioning is driven over SSH (single path shared with `devbox sync`):
+    # wait for the box's base cloud-init (user + packages) to be ready, run the
+    # mods, then push host-local files. `create` blocks through all of it.
+    alias = _wait_ready(provider, name, project.user)
+    print("==> provisioning (running mods over SSH; several minutes) ...")
+    _run_mods(alias, tarball, [])
     if project.sync:
-        alias = _wait_until_provisioned(provider, name, project.user, gc)
         print("==> syncing host-local files onto the box ...")
         run_sync(project, alias)
-        print(f"\n==> '{name}' is ready and synced.\n\n  SSH:  {target} ssh\n")
-        return
-
-    console = (f"\n  Console:   virsh -c {gc.libvirt_uri} console {name}   # ctrl-] to exit"
-               if provider_name == "libvirt" else "")
-    print(f"""
-==> '{name}' is booting. cloud-init provisioning runs on first boot (several minutes).
-
-  IP:        {target} ip
-  SSH:       {target} ssh
-  Progress:  {target} status{console}
-""")
+    print(f"\n==> '{name}' is ready.\n\n  SSH:  {target} ssh\n")
 
 
 def _poll(fn, timeout: int, interval: int = 5):
@@ -199,11 +194,10 @@ def _ssh_ok(alias: str) -> bool:
     return r.returncode == 0
 
 
-def _wait_until_provisioned(provider, name: str, user: str, gc: GlobalConfig) -> str:
-    """Block until a freshly-created box is reachable and cloud-init has finished
-    provisioning, then return its refreshed `devbox-<name>` SSH alias. Used by
-    `create` before an auto-sync (the sync dsts depend on provisioning). Times
-    out with a clear message pointing at `devbox status`."""
+def _wait_ready(provider, name: str, user: str) -> str:
+    """Block until a freshly-created box has an address, accepts SSH, and its base
+    cloud-init (user + packages the mods lean on) has finished; return the
+    refreshed `devbox-<name>` SSH alias. Times out pointing at `devbox status`."""
     print("==> waiting for the instance to get an address ...")
     ip = _poll(lambda: provider.address(name), timeout=300)
     if not ip:
@@ -214,14 +208,32 @@ def _wait_until_provisioned(provider, name: str, user: str, gc: GlobalConfig) ->
     if not _poll(lambda: _ssh_ok(alias), timeout=300):
         die(f"timed out waiting for SSH to '{name}'; check `devbox status`")
 
-    print("==> waiting for cloud-init provisioning to finish (several minutes) ...")
+    print("==> waiting for base cloud-init (user + packages) to finish ...")
     # `cloud-init status --wait` blocks until done: exit 0 = done, 2 = done with
     # recoverable warnings (degraded); anything else is a real failure.
     r = subprocess.run(["ssh", alias, "cloud-init status --wait"])
     if r.returncode not in (0, 2):
-        die(f"cloud-init provisioning did not finish cleanly on '{name}' "
+        die(f"base cloud-init did not finish cleanly on '{name}' "
             f"(exit {r.returncode}); check `devbox status`")
     return alias
+
+
+def _run_mods(alias: str, tarball: bytes, mods: list) -> None:
+    """Deliver the provisioning payload over SSH and run the driver: pipe the
+    tarball into a per-run temp dir (extracted as the SSH user, so the 0600
+    secret.env is user-owned), run the driver, tee to ~/provision.log (the log
+    `devbox status` tails). `mods` selects a subset; empty = the whole playbook."""
+    selected = " ".join(shlex.quote(m) for m in mods)
+    remote = (
+        'set -e; d="$(mktemp -d)"; tar -xzf - -C "$d"; '
+        f'bash "$d/provision-driver.sh" {selected} 2>&1 | tee "$HOME/{PROVISION_LOG}"; '
+        'rc=${PIPESTATUS[0]}; rm -rf "$d"; exit "$rc"'
+    )
+    result = subprocess.run(
+        ["ssh", alias, "bash", "-c", shlex.quote(remote)], input=tarball)
+    if result.returncode != 0:
+        die(f"provisioning failed (exit {result.returncode}); see the output above "
+            f"or ~/{PROVISION_LOG} on the box")
 
 
 def cmd_up(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
@@ -281,39 +293,6 @@ def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
         "ssh", f"{project.user}@{ip}",
         "cloud-init status --long; echo ---; tail -n 80 ~/provision.log 2>/dev/null",
     ], check=False)
-
-
-def cmd_provision(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name, _, provider = _resolve_target(args, project, gc)
-    state = provider.state(name)
-    if state is None:
-        die(f"instance '{name}' is not defined; run `devbox create` first")
-    if state != "running":
-        die(f"instance '{name}' is not running ({state}); run `devbox up` first")
-    ip = provider.address(name)
-    if not ip:
-        die(f"no address for '{name}' yet (still booting?).")
-
-    tarball = build_tarball(build_payload(project, gc))
-    scope = f" (mods: {', '.join(args.mods)})" if args.mods else ""
-    print(f"==> re-running provisioning on '{name}' ({ip}){scope} ...")
-    # Pipe the payload tarball over stdin into a per-run temp dir (extracted as
-    # the SSH user, so the 0600 secret.env is user-owned - no chown needed), then
-    # run the driver, tee'ing to ~/provision.log (the log `devbox status` tails).
-    # Positional mod names select a subset; none => the whole playbook.
-    selected = " ".join(shlex.quote(m) for m in args.mods)
-    remote = (
-        'set -e; d="$(mktemp -d)"; tar -xzf - -C "$d"; '
-        f'bash "$d/provision-driver.sh" {selected} 2>&1 | tee "$HOME/{PROVISION_LOG}"; '
-        'rc=${PIPESTATUS[0]}; rm -rf "$d"; exit "$rc"'
-    )
-    result = subprocess.run(
-        ["ssh", f"{project.user}@{ip}", "bash", "-c", shlex.quote(remote)],
-        input=tarball,
-    )
-    if result.returncode != 0:
-        die(f"provisioning failed (exit {result.returncode}); see the output above "
-            f"or ~/{PROVISION_LOG} on the box")
 
 
 def cmd_list(args: argparse.Namespace, gc: GlobalConfig, project: Optional[ProjectConfig]) -> None:
@@ -425,19 +404,41 @@ def cmd_jj_fetch(args: argparse.Namespace, gc: GlobalConfig, project: ProjectCon
     print(f"fetched. Check out an agent bookmark with e.g. `jj new <bookmark>@{alias}`.")
 
 
+def _split_mods(value: str) -> list:
+    """The `--mods` optional argument -> a mod list: "" (flag with no value) =>
+    [] (the whole playbook); "a,b,c" => ["a", "b", "c"]."""
+    return [m.strip() for m in value.split(",") if m.strip()]
+
+
 def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    # Host->box file push (non-VCS files, e.g. host-local agent skills). rsync
-    # over the provider-resolved SSH alias; re-runnable and incremental. Auto-run
-    # as the last step of `devbox create` too (see cmd_create).
-    if not project.sync:
-        die("this project has no [[sync]]/[[repo.sync]] entries; nothing to sync")
+    # Reconverge a live box: run provisioning mods (--mods) and/or push
+    # host-local files (--files), both over the provider-resolved SSH alias.
+    # `devbox create` runs the same two steps on a fresh box (see cmd_create).
+    do_mods = args.mods is not None      # --mods present (with or without a value)
+    do_files = args.files
+    if not (do_mods or do_files):
+        die("nothing to do: pass --mods (run provisioning mods) and/or --files "
+            "(push host-local [[sync]] files)")
+    if do_files and not project.sync:
+        die("this project has no [[sync]]/[[repo.sync]] entries; drop --files")
+
     name, _, provider = _resolve_target(args, project, gc)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
     alias = _refresh_ssh_alias(name, ip, project.user)
-    run_sync(project, alias)
-    print("sync complete.")
+
+    # Mods before files: file dsts (e.g. ~/<repo>/.claude/skills) depend on the
+    # repo/provisioning being in place.
+    if do_mods:
+        mods = _split_mods(args.mods)
+        scope = f" (mods: {', '.join(mods)})" if mods else ""
+        print(f"==> provisioning '{name}' over SSH{scope} ...")
+        _run_mods(alias, build_tarball(build_payload(project, gc)), mods)
+    if do_files:
+        print(f"==> syncing host-local files to '{name}' ...")
+        run_sync(project, alias)
+    print("done.")
 
 
 def main() -> None:
@@ -466,9 +467,6 @@ def main() -> None:
     s.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
     s.set_defaults(func=cmd_ssh)
     sub.add_parser("status", help="show cloud-init progress + provision log").set_defaults(func=cmd_status)
-    pr = sub.add_parser("provision", help="re-run provisioning mods over SSH (reconverge a running VM)")
-    pr.add_argument("mods", nargs="*", help="run only these mods (default: the whole playbook)")
-    pr.set_defaults(func=cmd_provision)
     # Global view - doesn't resolve a project (works anywhere).
     sub.add_parser("list", help="list devbox-managed instances").set_defaults(func=cmd_list, needs_project=False)
     # `jj` groups jj-specific operations; `jj fetch` pulls the instance's
@@ -476,7 +474,13 @@ def main() -> None:
     jj = sub.add_parser("jj", help="jj operations against the instance")
     jj_sub = jj.add_subparsers(dest="jj_cmd", required=True)
     jj_sub.add_parser("fetch", help="jj git fetch the instance's bookmarked work into the host repo").set_defaults(func=cmd_jj_fetch)
-    sub.add_parser("sync", help="push host-local files ([[sync]]/[[repo.sync]]) to the box via rsync").set_defaults(func=cmd_sync)
+    # `sync` reconverges a live box: provisioning mods and/or host-local files.
+    sy = sub.add_parser("sync", help="reconverge a running box: --mods and/or --files")
+    sy.add_argument("--files", action="store_true",
+                    help="push host-local files ([[sync]]/[[repo.sync]]) to the box via rsync")
+    sy.add_argument("--mods", nargs="?", const="", default=None, metavar="a,b,c",
+                    help="run provisioning mods over SSH (all if no list; else comma-separated)")
+    sy.set_defaults(func=cmd_sync)
     sub.add_parser("host", help="refresh the SSH alias used for jj-fetch, print the alias name").set_defaults(func=cmd_host)
 
     args = p.parse_args()

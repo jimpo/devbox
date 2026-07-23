@@ -13,10 +13,12 @@ It currently supports two VM providers: **libvirt** (local VMs) and **AWS**
 ## Basics & Architecture
 
 Every devbox starts from the latest Ubuntu LTS as its base image — currently
-Ubuntu 26.04 "Resolute Raccoon" — customized on first boot with
-[cloud-init](https://cloud-init.io/). Provisioning beyond first boot is a
-standalone, re-runnable shell script, so a box can be reconverged in place
-(`devbox provision`) instead of rebuilt.
+Ubuntu 26.04 "Resolute Raccoon" — brought to life on first boot with
+[cloud-init](https://cloud-init.io/) (just the login user, baseline packages,
+and `BASH_ENV` wiring). Everything else — jj, dotfiles, Claude Code, the repo,
+a project's toolchain — is provisioned by composable, idempotent **mods** run
+**over SSH** after boot, so a box can be reconverged in place (`devbox sync
+--mods`) instead of rebuilt.
 
 Once a box is up, the way you work with it —
 `ssh`/`exec`/`list`/`provision`/`jj fetch`/`sync` — is backend-independent; only
@@ -45,8 +47,8 @@ Then, from anywhere inside the project:
 
 ```bash
 devbox create      # download the base image (cached), boot the VM, provision it
-devbox status      # watch cloud-init progress until it reports "done"
-devbox ssh         # log into the sandbox once it's ready
+                   #   over SSH (mods + [[sync]] files) — blocks until ready
+devbox ssh         # log into the sandbox
 ```
 
 Work in the sandbox (e.g. let an agent make changes), bookmark what should be
@@ -77,10 +79,14 @@ setup](#per-project-setup) for the `[aws]` config.
 | `devbox ip` | Print the domain's IPv4. |
 | `devbox ssh [-- args...]` | `ssh` into the domain. |
 | `devbox status` | SSH in and show `cloud-init status --long` plus the tail of `~/provision.log`. |
-| `devbox provision [mods...]` | Re-run the provisioning **mods** over SSH against a running domain — reconverge (bump jj, add a plugin, re-apply a project's rust mod) without destroy+create. Covers base **and** project mods. Idempotent; tees to `~/provision.log` (per-mod logs in `~/provision/`). Positional mod names run just those (fast iteration); no args runs the whole playbook. |
+| `devbox sync --mods[=a,b,c]` | (Re-)run the provisioning **mods** over SSH against a running box — reconverge (bump jj, add a plugin, re-apply a project's rust mod) without destroy+create. Covers base **and** project mods. Idempotent; tees to `~/provision.log` (per-mod logs in `~/provision/`). No list runs the whole playbook; a comma-separated list runs just those (fast iteration). |
+| `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync — agent skills, git-excluded project files. Re-runnable + incremental. See "Host→box file sync" below. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or AWS), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
-| `devbox sync` | Push host-local, non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync — agent skills, git-excluded project files. Re-runnable + incremental; auto-run at the end of `create`. See "Host→box file sync" below. |
 | `devbox host` | Refresh the SSH alias used for `jj fetch` (below); prints the alias name. |
+
+`devbox sync` requires at least one of `--mods`/`--files` (both may be combined —
+mods run first, since file dsts can depend on the repo being cloned). It's the
+same two steps `devbox create` runs on a fresh box.
 
 Every subcommand accepts `-C/--project-dir PATH` and `--name NAME` (both
 before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
@@ -91,7 +97,7 @@ specific instance instead of the project's libvirt default.
 common template or a project's `.devbox/cloud-config.yaml`) only takes effect
 via `destroy` + `create`, never `up`** — cloud-init's NoCloud seed ISO is only
 attached on first boot, so an already-defined domain never re-reads it. The
-provisioning **mods**, by contrast, reconverge in place: `devbox provision`
+provisioning **mods**, by contrast, reconverge in place: `devbox sync --mods`
 re-delivers the driver + mods + env over SSH and re-runs them on a live box, so
 edits to a mod (or to the context it consumes — jj identity, GitHub token,
 `[repo]`, a project's `mods` list) apply without a rebuild.
@@ -369,20 +375,28 @@ has NOPASSWD sudo; apt-install is idempotent) rather than relying on
 cloud-config's `packages:` — which is why most projects no longer need a
 `.devbox/cloud-config.yaml` at all.
 
-**One driver, two delivery paths** (single source of truth):
+**Delivered over SSH** (one path). devbox tars the resolved driver + mods + env
++ manifest, pipes it to the box over the `devbox-<name>` SSH alias, extracts it
+into a per-run temp dir (owned by the SSH user, so the 0600 `secret.env` needs no
+chown), and runs the driver. This is the **only** delivery path — the same for a
+fresh box and a reconverge:
 
-- **First boot** — devbox writes the resolved driver + mods + env + manifest
-  into the cloud-init seed's `write_files` and a `runcmd` invokes the driver.
-- **`devbox provision`** — devbox tars the same payload, pipes it over SSH, and
-  runs the driver — covering base **and** project mods.
+- **`devbox create`** — after boot (once base cloud-init has created the user and
+  installed packages), runs the mods, then pushes `[[sync]]` files. `create`
+  blocks through all of it, so when it returns the box is fully provisioned.
+- **`devbox sync --mods[=a,b,c]`** — reconverge a live box; no list runs the
+  whole playbook, a list runs just those (fast iteration while writing a mod).
+
+The cloud-config carries **no** provisioning payload — it only does base setup.
+(Trade-off: the host must stay attached during `create`; if it disconnects
+mid-provision, re-run `devbox sync --mods`.)
 
 The driver runs each mod in playbook order, stops at the first failure (naming
 which mod), and tees each mod's output to `~/provision/<name>.log` plus the
-combined `~/provision.log` that `devbox status` tails. `devbox provision <name>…`
-runs just a subset for fast iteration while writing a mod.
+combined `~/provision.log` that `devbox status` tails.
 
 **Idempotency contract:** every mod either overwrites unconditionally or guards
-on "already done", so both first-boot and reconverge are safe. Each built-in
+on "already done", so `create` and every reconverge are safe. Each built-in
 mod's header documents which pattern it uses.
 
 ### Example: a rust project
@@ -405,15 +419,14 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 # ... cargo tools, claude plugin install rust-analyzer-lsp, etc.
 ```
 
-`devbox provision rust` re-applies just that mod on reconverge (which the old
-first-boot-only `runcmd` never did).
+`devbox sync --mods=rust` re-applies just that mod on a live box.
 
 ### How the cloud-config layer merges
 
 devbox ships `common-cloud-config.yaml` (baseline `packages`, the dev user, the
-`BASH_ENV` wiring). `devbox create` substitutes its `%DEVBOX_USER%`/
-`%DEVBOX_SSH_PUBKEY%` tokens, injects the provisioning payload + driver `runcmd`,
-and merges the template with the project's optional `.devbox/cloud-config.yaml`:
+`BASH_ENV` wiring — no provisioning payload). `devbox create` substitutes its
+`%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%` tokens and merges the template with the
+project's optional `.devbox/cloud-config.yaml`:
 
 - Cloud-config keys that are lists — `packages`, `write_files`, `runcmd`,
   `bootcmd`, `users`, `groups` — are **concatenated common-then-project**.
@@ -428,13 +441,13 @@ and merges the template with the project's optional `.devbox/cloud-config.yaml`:
 
 ## Host→box file sync
 
-`devbox sync` pushes **host-local, non-VCS-tracked files** onto the box —
+`devbox sync --files` pushes **host-local, non-VCS-tracked files** onto the box —
 primarily agent **skills** (which change often) from wherever they live on the
 host (`~/.claude/skills`, a project's git-excluded skills) to wherever they go
 on the box. This is a distinct problem from provisioning: a **mod runs on the
 box and can't read host-local files**, so host-only files fundamentally need a
 host-side push. (Skills that live in the project repo arrive via `[repo]`; skills
-published on GitHub belong in a mod that clones them box-side — `sync` is only
+published on GitHub belong in a mod that clones them box-side — `--files` is only
 for host-local files.)
 
 Configure it with two arrays of `{ src, dst?, include? }` entries:
@@ -466,15 +479,14 @@ include = ["jujutsu"]                   # only this child of src, not every skil
 **Mechanism:** `rsync` over the same `devbox-<name>` SSH alias, idempotent and
 incremental (cheap to run often). **Host wins** — a mirror deletes host-removed
 files within a synced subtree, so an agent's box-side edits to a synced skill
-are clobbered on the next `sync` (acceptable for host-authored skills).
+are clobbered on the next sync (acceptable for host-authored skills).
 
-**When it runs:** on demand via `devbox sync`, and automatically as the last step
-of `devbox create` — which, for a project with `[[sync]]` entries, waits for the
-box to finish cloud-init provisioning (the sync dsts depend on the repo clone
-being in place) before pushing. It is **not** folded into `devbox provision`:
-skills change on a faster cadence than provisioning, so it stays separate and
-cheap. (`rsync` must be installed on the host; it ships in the box's base
-packages.)
+**When it runs:** on demand via `devbox sync --files`, and automatically as the
+last step of `devbox create` (after the mods run, since the sync dsts depend on
+the repo clone being in place). Files and mods are separate flags of `devbox
+sync` precisely because skills change on a faster cadence than provisioning —
+`devbox sync --files` alone is cheap. (`rsync` must be installed on the host; it
+ships in the box's base packages.)
 
 ## Exchanging commits with the sandbox (jj)
 

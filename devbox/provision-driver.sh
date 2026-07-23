@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 #
 # devbox provisioning driver: runs an ordered set of idempotent "mods". Ships
-# with devbox and is delivered two ways over the SAME payload (see provision.py):
-#
-#   * first boot  - the cloud-init seed stages the payload under
-#                   /usr/local/lib/devbox-provision and a runcmd runs this driver
-#                   as the dev user.
-#   * reconverge  - `devbox provision` tars the payload, pipes it over SSH into a
-#                   mktemp dir, and runs this driver there.
+# with devbox and delivered entirely over SSH (see provision.py): devbox tars the
+# payload, pipes it to the box, extracts into a per-run temp dir (owned by the
+# SSH user), and runs this driver there - on `devbox create` (after boot) and on
+# `devbox sync --mods` alike.
 #
 # Layout next to this script:  mods/<name>.sh  manifest  context.env  [secret.env]
 #

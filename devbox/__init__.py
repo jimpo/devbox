@@ -25,8 +25,8 @@ from .cloudconfig import (COMMON_CLOUD_CONFIG_PATH, merge_cloud_config,  # noqa:
                           render_cloud_config, substitute_tokens)
 from .provision import (BUILTIN_MODS_DIR, DEFAULT_BASE_MODS, DRIVER_PATH,  # noqa: F401
                         GLOBAL_MODS_DIR, PROVISION_LOG, PayloadFile,
-                        REMOTE_PROVISION_ROOT, build_payload, build_tarball,
-                        effective_mods, render_env_file, resolve_github_token,
+                        build_payload, build_tarball, effective_mods,
+                        render_env_file, resolve_github_token,
                         resolve_jj_identity, resolve_mod)
 from .config import (AwsConfig, AwsProjectConfig, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
                      DEFAULT_CACHE_DIR, DEFAULT_DISK_GB, DEFAULT_LIBVIRT_URI,
