@@ -9,8 +9,8 @@ Provider seam.
     devbox status              # cloud-init progress + tail provision.log
     devbox provision [mods...] # re-run provisioning mods over SSH (reconverge)
     devbox list                # list devbox-managed instances on this host
-    devbox sync                # jj git fetch the instance's work into the host repo
-    devbox host                # refresh the SSH alias used for jj-sync
+    devbox jj fetch            # jj git fetch the instance's work into the host repo
+    devbox host                # refresh the SSH alias used for jj fetch
     devbox destroy             # tear down, removing the overlay disk
 
 An instance is no longer the same thing as a project: a project is a label,
@@ -279,7 +279,7 @@ def cmd_list(args: argparse.Namespace, gc: GlobalConfig, project: Optional[Proje
 
 def _refresh_ssh_alias(name: str, ip: str, user: str) -> str:
     """Write/refresh the `devbox-<name>` SSH alias (host, user, dedicated
-    known-hosts) that jj-sync addresses the instance through, and return it.
+    known-hosts) that `devbox jj fetch` addresses the instance through, and return it.
     Provider-agnostic - `ip` is whatever the provider resolved (libvirt DHCP
     lease or EC2 public IP)."""
     alias = f"devbox-{name}"
@@ -330,7 +330,7 @@ def _ensure_jj_remote(repo_dir: Path, remote: str, url: str) -> None:
                              capture_output=True, text=True)
     if listing.returncode != 0:
         die(f"`jj git remote list` failed in {repo_dir} - is this a jj repo? "
-            f"Run `devbox sync` from your project's jj checkout (or pass -C).")
+            f"Run `devbox jj fetch` from your project's jj checkout (or pass -C).")
     current = None
     for line in listing.stdout.splitlines():
         parts = line.split()
@@ -343,13 +343,13 @@ def _ensure_jj_remote(repo_dir: Path, remote: str, url: str) -> None:
         subprocess.run(["jj", "git", "remote", "set-url", remote, url], cwd=repo_dir, check=True)
 
 
-def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    # Unified jj-remote sync: refresh the SSH alias (address via the provider,
+def cmd_jj_fetch(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    # jj git fetch (box->host): refresh the SSH alias (address via the provider,
     # so this is identical for libvirt or AWS), ensure the local jj remote points
     # at the instance's colocated repo, and fetch. `[repo]` is project-level, so
-    # any instance in the project is synced the same way.
+    # any instance in the project is fetched the same way.
     if project.repo.mode == "none" or not project.repo.dir:
-        die("this project has no [repo] configured (set [repo] mode/dir); nothing to sync")
+        die("this project has no [repo] configured (set [repo] mode/dir); nothing to fetch")
     name, _, provider = _resolve_target(args, project, gc)
     ip = provider.address(name)
     if not ip:
@@ -398,8 +398,12 @@ def main() -> None:
     pr.set_defaults(func=cmd_provision)
     # Global view - doesn't resolve a project (works anywhere).
     sub.add_parser("list", help="list devbox-managed instances").set_defaults(func=cmd_list, needs_project=False)
-    sub.add_parser("sync", help="jj git fetch the instance's bookmarked work into the host repo").set_defaults(func=cmd_sync)
-    sub.add_parser("host", help="refresh the SSH alias used for jj-sync, print the alias name").set_defaults(func=cmd_host)
+    # `jj` groups jj-specific operations; `jj fetch` pulls the instance's
+    # bookmarked work box->host (the global -C/--name still go before `jj`).
+    jj = sub.add_parser("jj", help="jj operations against the instance")
+    jj_sub = jj.add_subparsers(dest="jj_cmd", required=True)
+    jj_sub.add_parser("fetch", help="jj git fetch the instance's bookmarked work into the host repo").set_defaults(func=cmd_jj_fetch)
+    sub.add_parser("host", help="refresh the SSH alias used for jj-fetch, print the alias name").set_defaults(func=cmd_host)
 
     args = p.parse_args()
     global_config = GlobalConfig.load()

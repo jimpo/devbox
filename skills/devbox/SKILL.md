@@ -1,6 +1,6 @@
 ---
 name: devbox
-description: devbox is a multi-project dev-sandbox VM manager for local libvirt VMs and AWS EC2 instances, provisioned by composable idempotent "mods". Covers what it is, its command set, and how to configure a project (`.devbox/config.toml`: repo bootstrap, mods, AWS) plus the global `~/.config/devbox/config.toml`. Use when asked to set up devbox for a project, create/manage a dev sandbox VM, or when devbox subcommands (create/up/ssh/provision/sync/…) come up.
+description: devbox is a multi-project dev-sandbox VM manager for local libvirt VMs and AWS EC2 instances, provisioned by composable idempotent "mods". Covers what it is, its command set, and how to configure a project (`.devbox/config.toml`: repo bootstrap, mods, AWS) plus the global `~/.config/devbox/config.toml`. Use when asked to set up devbox for a project, create/manage a dev sandbox VM, or when devbox subcommands (create/up/ssh/provision/jj fetch/…) come up.
 allowed-tools: Bash(devbox *), Bash(jj *), Bash(git *), Bash(gh *), Read, Write, Edit, AskUserQuestion
 ---
 
@@ -24,8 +24,8 @@ via `.devbox/config.toml`. Full reference: `README.md` in this repo.
 | `devbox up` / `stop` / `destroy` | Start / graceful-shutdown / tear down (destroy also deletes the disk). |
 | `devbox ip` / `ssh [-- args]` / `status` | Print IP / SSH in / show cloud-init progress + `~/provision.log`. |
 | `devbox provision [mods…]` | Re-run provisioning mods over SSH on a live box (reconverge, no rebuild). No args = whole playbook; names = just those. |
-| `devbox sync` | jj-fetch the instance's bookmarked work into your local repo (refreshes the SSH alias + `devbox-<name>` jj remote, runs `jj git fetch`). |
-| `devbox host` | Refresh/print the `devbox-<name>` SSH alias used for jj-sync. |
+| `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo (refreshes the SSH alias + `devbox-<name>` jj remote, runs `jj git fetch`). |
+| `devbox host` | Refresh/print the `devbox-<name>` SSH alias used for `jj fetch`. |
 
 Instances: the libvirt default is **bare-named = the project**; cloud instances
 take an explicit `--name` and get a canonical `<provider>-<name>` (e.g.
@@ -112,7 +112,7 @@ devbox ssh
 ```
 
 **Fetch the agent's work** (any provider): in the sandbox `jj bookmark create
-wip -r @`; on the host `devbox sync` then `jj new wip@devbox-<name>`.
+wip -r @`; on the host `devbox jj fetch` then `jj new wip@devbox-<name>`.
 
 **Seed a `mode = "push"` project** (once, after create):
 
@@ -125,5 +125,5 @@ jj git push --remote devbox-<name> -b main
 
 The bookmark must be `main` (matches the sandbox's `initial-branch`;
 `receive.denyCurrentBranch=updateInstead` only updates the working tree for the
-checked-out branch, and refuses a dirty tree — don't force it). See README's "jj
-sync" for the full model.
+checked-out branch, and refuses a dirty tree — don't force it). See README's
+"Exchanging commits with the sandbox" for the full model.

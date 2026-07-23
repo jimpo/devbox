@@ -817,7 +817,7 @@ def test_fetch_verified_checksum_filename_not_listed(monkeypatch, tmp_path):
         devbox.fetch_verified_checksum("https://example.com/dir/image.img")
 
 
-# ---- jj sync ----------------------------------------------------------------
+# ---- jj fetch ---------------------------------------------------------------
 def _cp(argv, code=0, out="", err=""):
     return subprocess.CompletedProcess(argv, code, out, err)
 
@@ -870,11 +870,11 @@ def test_ensure_jj_remote_not_a_repo_dies(monkeypatch, tmp_path):
         devbox.cli._ensure_jj_remote(tmp_path, "devbox-foo", "ssh://x")
 
 
-def test_cmd_sync_without_repo_dies():
+def test_cmd_jj_fetch_without_repo_dies():
     import argparse
     gc = _global_config(devbox.Path("/nonexistent"))
     with pytest.raises(SystemExit):
-        devbox.cli.cmd_sync(argparse.Namespace(name=None, project_dir=None), gc, _project(mode="none"))
+        devbox.cli.cmd_jj_fetch(argparse.Namespace(name=None, project_dir=None), gc, _project(mode="none"))
 
 
 # ---- AWS config -------------------------------------------------------------

@@ -19,10 +19,11 @@ precedence, env-file quoting, payload/tarball assembly), the libvirt
 `<metadata>` stamp/parse + `list` formatting (monkeypatched `virsh`), and the
 **AWS provider against a fake EC2 client** (`AwsProvider` with an injected
 `client=`: list/state/address, run-instances request shape, spot, AMI lookup,
-subnet capacity fallback, lifecycle), and the jj-remote wiring for `devbox sync`
-(`_ensure_jj_remote` add/set-url/noop with a monkeypatched `subprocess`). It does
-not and cannot exercise `create`/`up`/`stop`/`destroy`/`host`/`provision`/`list`/
-`sync` end-to-end against real infra (`sync`'s actual `jj git fetch` needs a
+subnet capacity fallback, lifecycle), and the jj-remote wiring for `devbox jj
+fetch` (`_ensure_jj_remote` add/set-url/noop with a monkeypatched `subprocess`).
+It does not and cannot exercise `create`/`up`/`stop`/`destroy`/`host`/`provision`/
+`list`/`jj fetch` end-to-end against real infra (`jj fetch`'s actual `jj git
+fetch` needs a
 booted, provisioned instance), the actual behavior of the built-in mods or the
 driver on a real box (jj install, dotfiles, Claude Code, repo bootstrap), or a
 live EC2 launch — those need a real libvirt daemon + booted VM, or real AWS.

@@ -19,7 +19,7 @@ standalone, re-runnable shell script, so a box can be reconverged in place
 (`devbox provision`) instead of rebuilt.
 
 Once a box is up, the way you work with it —
-`ssh`/`exec`/`list`/`provision`/`sync` — is backend-independent; only
+`ssh`/`exec`/`list`/`provision`/`jj fetch` — is backend-independent; only
 `create`/`up`/`stop`/`destroy` and address discovery are provider-specific (a
 thin `Provider` seam). All projects share one cached base image (libvirt), one
 global config, and one base provisioning playbook of idempotent "mods" (jj,
@@ -56,7 +56,7 @@ visible to the host, and pull it back:
 # in the sandbox:
 jj bookmark create wip -r @
 # on the host:
-devbox sync                    # fetch the sandbox's bookmarked work
+devbox jj fetch                # fetch the sandbox's bookmarked work
 jj new wip@devbox-my-project   # check it out locally
 ```
 
@@ -78,8 +78,8 @@ setup](#per-project-setup) for the `[aws]` config.
 | `devbox ssh [-- args...]` | `ssh` into the domain. |
 | `devbox status` | SSH in and show `cloud-init status --long` plus the tail of `~/provision.log`. |
 | `devbox provision [mods...]` | Re-run the provisioning **mods** over SSH against a running domain — reconverge (bump jj, add a plugin, re-apply a project's rust mod) without destroy+create. Covers base **and** project mods. Idempotent; tees to `~/provision.log` (per-mod logs in `~/provision/`). Positional mod names run just those (fast iteration); no args runs the whole playbook. |
-| `devbox sync` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or AWS), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "jj sync" below. |
-| `devbox host` | Refresh the SSH alias used for jj-sync (below); prints the alias name. |
+| `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or AWS), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
+| `devbox host` | Refresh the SSH alias used for `jj fetch` (below); prints the alias name. |
 
 Every subcommand accepts `-C/--project-dir PATH` and `--name NAME` (both
 before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
@@ -222,7 +222,7 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    URLs are mutable (Canonical overwrites the file in place on respins), so
    a hand-pinned checksum inevitably goes stale and breaks `create` until
    someone updates it.
-2. **SSH `Include`** — `devbox host` (see "jj sync" below) appends `Include
+2. **SSH `Include`** — `devbox host` (see "Exchanging commits" below) appends `Include
    ~/.config/devbox/ssh/*.conf` to `~/.ssh/config` the first time it runs, so
    there's nothing to do here manually; it's idempotent.
 
@@ -277,7 +277,7 @@ instance's owner. The scheme:
   queries AWS even from a libvirt-default project.
 - `--provider` is **create-only**; `project.provider` is purely the
   bare-`create` default. Per-instance commands (`ip`/`ssh`/`status`/`stop`/
-  `up`/`destroy`/`provision`/`host`/`sync`) derive the provider by parsing the
+  `up`/`destroy`/`provision`/`host`/`jj fetch`) derive the provider by parsing the
   name: the first `-`-delimited segment routes to that provider if it's a known
   keyword (`aws`, …), else libvirt.
 - The `<provider>-` prefix is **added automatically** — pass the bare name to
@@ -305,7 +305,7 @@ cloud-config template (see below) — no project needs to author this by hand:
   runs `jj git clone <url> ~/<dir>` on first boot.
 - **`mode = "push"`** — brand-new project with nothing pushed anywhere yet.
   The sandbox creates an empty colocated jj+git repo at `~/<dir>`, ready to
-  receive a push from the host — see "jj sync" below. `url` is not used
+  receive a push from the host — see "Exchanging commits" below. `url` is not used
   (and not allowed) in this mode.
 - **Omit `[repo]` entirely** (or `mode = "none"`) — no repo bootstrap at all,
   e.g. a scratch/experiment VM.
@@ -413,7 +413,7 @@ and merges the template with the project's optional `.devbox/cloud-config.yaml`:
   drops comments, so the original magic first line doesn't survive a
   parse→merge→dump round trip on its own).
 
-## jj sync: exchanging commits with the sandbox
+## Exchanging commits with the sandbox (jj)
 
 The sandbox is a plain SSH-reachable git remote for the host, in both
 directions: the host **fetches** the agent's work to view/test it, and, for
@@ -422,9 +422,9 @@ to seed the sandbox with an initial commit. This is **identical whether the
 instance is libvirt or AWS** — the address is resolved through the provider
 (libvirt DHCP lease or EC2 public IP); everything above that is the same
 jj-remote model. `[repo]` is project-level, so any instance in the project
-(`--name` to pick one) syncs the same way.
+(`--name` to pick one) is fetched the same way.
 
-Both directions go through the `devbox-<name>` SSH alias, which `devbox sync`
+Both directions go through the `devbox-<name>` SSH alias, which `devbox jj fetch`
 and `devbox host` set up/refresh:
 
 - A dedicated known-hosts file, `~/.config/devbox/ssh/known_hosts`,
@@ -450,11 +450,11 @@ the host's fetch reads:
 jj bookmark create wip -r @
 
 # Host side (from your local jj checkout): one command, any provider.
-devbox sync                          # refreshes the alias, wires the jj remote, fetches
+devbox jj fetch                      # refreshes the alias, wires the jj remote, fetches
 jj new wip@devbox-my-project         # check out the fetched bookmark
 ```
 
-`devbox sync` refreshes the SSH alias (address via the provider), ensures a jj
+`devbox jj fetch` refreshes the SSH alias (address via the provider), ensures a jj
 git remote named after the alias (`devbox-<name>`) points at the instance's
 colocated repo (`ssh://devbox-<name>/home/<user>/<dir>`), and runs `jj git
 fetch`. It's equivalent to the manual flow:
