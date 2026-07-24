@@ -1437,3 +1437,77 @@ def test_aws_start_stop_destroy_by_name():
     assert ops["start_instances"]["InstanceIds"] == ["i-123"]
     assert ops["stop_instances"]["InstanceIds"] == ["i-123"]
     assert ops["terminate_instances"]["InstanceIds"] == ["i-123"]
+
+
+# ---- destroy confirmation guard (JIM-69) ------------------------------------
+class _FakeStdin:
+    """Minimal stdin stand-in: only `isatty()` matters to _confirm_destroy."""
+    def __init__(self, isatty: bool):
+        self._isatty = isatty
+
+    def isatty(self) -> bool:
+        return self._isatty
+
+
+def test_confirm_destroy_assume_yes_bypasses_even_non_tty(monkeypatch):
+    # --yes short-circuits before any TTY check or prompt.
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("input() must not be called"))
+    assert devbox.cli._confirm_destroy("foo", "libvirt", assume_yes=True,
+                                       stdin=_FakeStdin(isatty=False)) is True
+
+
+def test_confirm_destroy_non_tty_without_yes_dies(monkeypatch):
+    # No TTY and no --yes -> die (can't safely prompt); input() never reached.
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("input() must not be called"))
+    with pytest.raises(SystemExit):
+        devbox.cli._confirm_destroy("foo", "libvirt", assume_yes=False,
+                                    stdin=_FakeStdin(isatty=False))
+
+
+def test_confirm_destroy_tty_full_yes_confirms(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda *a: "yes")
+    assert devbox.cli._confirm_destroy("foo", "libvirt", assume_yes=False,
+                                       stdin=_FakeStdin(isatty=True)) is True
+
+
+@pytest.mark.parametrize("response", ["y", "no", "", "YES", "yes please"])
+def test_confirm_destroy_tty_anything_but_yes_aborts(monkeypatch, response):
+    # Only the exact word 'yes' proceeds; 'y' / 'no' / '' / etc. abort.
+    monkeypatch.setattr("builtins.input", lambda *a: response)
+    assert devbox.cli._confirm_destroy("foo", "libvirt", assume_yes=False,
+                                       stdin=_FakeStdin(isatty=True)) is False
+
+
+class _RecordingProvider:
+    """Provider seam stub recording whether destroy() was invoked."""
+    def __init__(self):
+        self.destroyed = []
+
+    def destroy(self, name):
+        self.destroyed.append(name)
+
+
+def _destroy_args(name=None, yes=False):
+    import argparse
+    return argparse.Namespace(name=name, yes=yes)
+
+
+def test_cmd_destroy_yes_flag_destroys(monkeypatch, capsys):
+    provider = _RecordingProvider()
+    monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: provider)
+    gc = _global_config(devbox.Path("/nonexistent"))
+    devbox.cli.cmd_destroy(_destroy_args(yes=True), gc, _project())
+    assert provider.destroyed == ["test-project"]
+    assert "Destroyed 'test-project'" in capsys.readouterr().out
+
+
+def test_cmd_destroy_declined_leaves_untouched(monkeypatch, capsys):
+    # A TTY that answers 'no' aborts: provider.destroy is never called.
+    provider = _RecordingProvider()
+    monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: provider)
+    monkeypatch.setattr(devbox.cli.sys, "stdin", _FakeStdin(isatty=True))
+    monkeypatch.setattr("builtins.input", lambda *a: "no")
+    gc = _global_config(devbox.Path("/nonexistent"))
+    devbox.cli.cmd_destroy(_destroy_args(yes=False), gc, _project())
+    assert provider.destroyed == []
+    assert "Aborted" in capsys.readouterr().out

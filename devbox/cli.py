@@ -25,6 +25,7 @@ import dataclasses
 import os
 import shlex
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -265,8 +266,32 @@ def cmd_stop(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
     provider.stop(name)
 
 
+def _confirm_destroy(name: str, provider_name: str, assume_yes: bool,
+                     stdin=None) -> bool:
+    """Decide whether a destroy may proceed. `destroy` deletes the overlay disk
+    irreversibly, so guard it: --yes (assume_yes) skips the prompt outright;
+    otherwise a non-TTY stdin can't be prompted safely (would hang or silently
+    proceed) so we die pointing at --yes; on a TTY we require the full word
+    'yes'. Anything else -> False (no destroy). Factored out of cmd_destroy so
+    the decision is unit-testable without real infra. `stdin` defaults to the
+    live sys.stdin (resolved at call time so it's patchable)."""
+    if assume_yes:
+        return True
+    if stdin is None:
+        stdin = sys.stdin
+    if not stdin.isatty():
+        die(f"refusing to destroy '{name}' without a TTY; pass --yes to confirm")
+        return False  # unreachable (die exits); kept for clarity
+    print(f"About to destroy '{name}' ({provider_name}) and DELETE its disk. "
+          f"This is irreversible.")
+    return input("Type 'yes' to confirm: ").strip() == "yes"
+
+
 def cmd_destroy(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name, provider_name, provider = _resolve_target(args, project, gc)
+    if not _confirm_destroy(name, provider_name, args.yes):
+        print(f"Aborted; '{name}' left untouched.")
+        return
     provider.destroy(name)
     tail = (f" (cached base image left in {gc.cache_dir})"
             if provider_name == "libvirt" else "")
@@ -471,7 +496,10 @@ def main() -> None:
     c.set_defaults(func=cmd_create)
     sub.add_parser("up", help="start an already-defined, shut-off VM").set_defaults(func=cmd_up)
     sub.add_parser("stop", help="gracefully shut down a running VM").set_defaults(func=cmd_stop)
-    sub.add_parser("destroy", help="tear down the VM and its overlay disk").set_defaults(func=cmd_destroy)
+    d = sub.add_parser("destroy", help="tear down the VM and its overlay disk")
+    d.add_argument("-y", "--yes", "--force", action="store_true", dest="yes",
+                   help="skip the confirmation prompt (for scripts)")
+    d.set_defaults(func=cmd_destroy)
     sub.add_parser("ip", help="print the VM's IPv4").set_defaults(func=cmd_ip)
     s = sub.add_parser("ssh", help="ssh into the VM")
     s.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
