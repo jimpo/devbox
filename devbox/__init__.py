@@ -42,4 +42,4 @@ from .providers import (AwsProvider, Instance, InstanceSpec, LibvirtProvider,  #
 from .providers.libvirt import (CLOUDIMAGE_KEYRING_PATH, _format_resources,  # noqa: F401
                                 build_metadata_xml, fetch_verified_checksum, read_domain_instance)
 from .cli import _format_age  # noqa: F401
-from .util import die  # noqa: F401
+from .util import die, warn  # noqa: F401

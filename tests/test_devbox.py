@@ -170,6 +170,51 @@ def test_resolve_project_legacy_name_field_dies(tmp_path, global_config):
         devbox.resolve_project(tmp_path, global_config)
 
 
+# ---- unknown-key warnings -----------------------------------------------
+def test_resolve_project_unknown_top_level_key_warns(tmp_path, global_config, capsys):
+    _write_marker(tmp_path, 'project = "myproj"\nvpcus = 4\n')  # typo: vpcus
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.project == "myproj"  # still loads
+    err = capsys.readouterr().err
+    assert "unknown key 'vpcus'" in err
+
+
+def test_resolve_project_unknown_section_key_warns(tmp_path, global_config, capsys):
+    _write_marker(tmp_path, '[aws]\ninstance_type = "t3.micro"\nname = "x"\n')
+    devbox.resolve_project(tmp_path, global_config)
+    err = capsys.readouterr().err
+    assert "unknown key 'aws.name'" in err
+
+
+def test_resolve_project_known_config_no_warning(tmp_path, global_config, capsys):
+    _write_marker(tmp_path, 'project = "myproj"\nvcpus = 2\n[aws]\ninstance_type = "t3.micro"\n')
+    devbox.resolve_project(tmp_path, global_config)
+    assert capsys.readouterr().err == ""
+
+
+def test_resolve_project_unknown_env_key_does_not_warn(tmp_path, global_config, capsys):
+    # [env] holds arbitrary user-defined keys; they must not be flagged.
+    _write_marker(tmp_path, '[env]\nANYTHING_GOES = "value"\n')
+    devbox.resolve_project(tmp_path, global_config)
+    assert capsys.readouterr().err == ""
+
+
+def test_global_config_unknown_top_level_key_warns(tmp_path, capsys):
+    path = tmp_path / "config.toml"
+    path.write_text('netwrok = "custom-net"\n')  # typo: netwrok
+    gc = devbox.GlobalConfig.load(path)
+    assert gc.network == devbox.DEFAULT_NETWORK  # typo ignored, default kept
+    err = capsys.readouterr().err
+    assert "unknown key 'netwrok'" in err
+
+
+def test_global_config_known_config_no_warning(tmp_path, capsys):
+    path = tmp_path / "config.toml"
+    path.write_text('network = "custom-net"\n[jj]\nname = "Alice"\n[env]\nX = "y"\n')
+    devbox.GlobalConfig.load(path)
+    assert capsys.readouterr().err == ""
+
+
 def test_resolve_project_invalid_provider_dies(tmp_path, global_config):
     _write_marker(tmp_path, 'provider = "gcp"\n')
     with pytest.raises(SystemExit):

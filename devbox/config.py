@@ -13,7 +13,7 @@ import tomllib
 from pathlib import Path
 from typing import Optional
 
-from .util import die
+from .util import die, warn
 
 PROJECT_MARKER_DIR = ".devbox"
 PROJECT_CONFIG_FILE = "config.toml"                # .devbox/config.toml
@@ -60,6 +60,34 @@ DEFAULT_AMI_NAME_FILTER = {
 }
 
 
+# Sentinel for a known section whose inner keys are user-defined (`[env]`) or
+# validated by their own parser (`[[sync]]`): mark the section known, but skip
+# checking the keys inside it.
+_ANY_KEYS = None
+
+
+def _warn_unknown_keys(data: dict, known_top, known_sections: dict, config_path: Path) -> None:
+    """Warn (non-fatally) on config keys devbox doesn't recognize, so a typo or
+    misplaced setting doesn't silently no-op. Forward-compat by design: an older
+    devbox reading a newer config should keep working, not die.
+
+    `known_top` is the set of accepted top-level scalar keys; `known_sections`
+    maps a known section name to its set of accepted keys (or `_ANY_KEYS` to skip
+    inner validation). An unknown section name is itself an unknown top-level key.
+    """
+    allowed_top = set(known_top) | set(known_sections)
+    for key, value in data.items():
+        if key not in allowed_top:
+            warn(f"{config_path}: unknown key '{key}' (ignored)")
+            continue
+        allowed = known_sections.get(key, _ANY_KEYS)
+        if allowed is _ANY_KEYS or not isinstance(value, dict):
+            continue  # scalar top-level key, or a section we don't key-check
+        for subkey in value:
+            if subkey not in allowed:
+                warn(f"{config_path}: unknown key '{key}.{subkey}' (ignored)")
+
+
 # ---- global config ----------------------------------------------------------
 @dataclasses.dataclass
 class AwsConfig:
@@ -96,6 +124,20 @@ class GlobalConfig:
         if path.is_file():
             with path.open("rb") as f:
                 data = tomllib.load(f)
+        _warn_unknown_keys(
+            data,
+            known_top={"libvirt_uri", "network", "cache_dir"},
+            known_sections={
+                "base_image": {"url"},
+                "defaults": {"vcpus", "memory_mib", "disk_gb"},
+                "ssh": {"pubkey_path"},
+                "jj": {"name", "email"},
+                "env": _ANY_KEYS,  # arbitrary user-defined credentials/vars
+                "aws": {"region", "profile", "default_security_groups",
+                        "default_subnets", "spot"},
+            },
+            config_path=path,
+        )
         base_image = data.get("base_image", {})
         defaults = data.get("defaults", {})
         ssh = data.get("ssh", {})
@@ -313,6 +355,19 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
             f"not a project. Remove it; the project defaults to the directory name "
             f"('{marker_dir.name}', override with 'project = ...'). Address a specific "
             f"instance with --name.")
+
+    _warn_unknown_keys(
+        data,
+        known_top={"project", "provider", "user", "vcpus", "memory_mib", "disk_gb", "mods"},
+        known_sections={
+            "repo": {"mode", "dir", "url", "sync"},
+            "sync": _ANY_KEYS,  # array-of-tables, validated by _parse_sync_entry
+            "env": _ANY_KEYS,   # arbitrary user-defined credentials/vars
+            "aws": {"instance_type", "architecture", "ami", "ami_name_filter",
+                    "ami_owner", "spot", "interruption_behavior"},
+        },
+        config_path=config_path,
+    )
 
     provider = data.get("provider", DEFAULT_PROVIDER)
     if provider not in PROVIDERS:
