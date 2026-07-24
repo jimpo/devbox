@@ -5,7 +5,7 @@ dotfiles, Claude Code, a project's rust toolchain, ...). A project's effective
 playbook is the built-in base list plus the project's own `mods` (appended),
 each resolved by name with precedence **project > global > built-in**:
 
-    devbox/mods/*.sh              # built-in, shipped in the package
+    mods/*.sh                     # built-in, at the repo root
     ~/.config/devbox/mods/*.sh    # global user (shared across projects)
     .devbox/mods/*.sh             # project-local (can shadow a built-in by name)
 
@@ -37,7 +37,7 @@ from .config import GLOBAL_CONFIG_PATH, GlobalConfig, ProjectConfig, PROJECT_MAR
 from .util import die
 
 # The built-in mods (shipped in the package) and the standalone driver.
-BUILTIN_MODS_DIR = Path(__file__).parent / "mods"
+BUILTIN_MODS_DIR = Path(__file__).parent.parent / "mods"
 DRIVER_PATH = Path(__file__).parent / "provision-driver.sh"
 # Global user mods, shared across a user's projects.
 GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
