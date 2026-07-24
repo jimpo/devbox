@@ -23,7 +23,7 @@ REPO_MODES = ("none", "clone", "push")
 # Providers a project can launch instances on. Validated against `provider` in a
 # project's config and the `--provider` flag.
 DEFAULT_PROVIDER = "libvirt"
-PROVIDERS = ("libvirt", "aws")
+PROVIDERS = ("libvirt", "ec2")
 
 # Providers whose instances carry a "<provider>-" prefix in their canonical
 # name. libvirt (the default) stays bare - local is the common case, and
@@ -51,7 +51,7 @@ DEFAULT_MEMORY_MIB = 12288
 DEFAULT_DISK_GB = 60
 DEFAULT_SSH_PUBKEY_PATH = "~/.ssh/id_ed25519.pub"
 
-# AWS AMI defaults (Canonical's Ubuntu cloud images). A project's [aws] section
+# EC2 AMI defaults (Canonical's Ubuntu cloud images). A project's [ec2] section
 # can override the name glob / owner, or pin an explicit `ami`.
 DEFAULT_AMI_OWNER = "099720109477"  # Canonical
 DEFAULT_AMI_NAME_FILTER = {
@@ -91,10 +91,17 @@ def _warn_unknown_keys(data: dict, known_top, known_sections: dict, config_path:
 # ---- global config ----------------------------------------------------------
 @dataclasses.dataclass
 class AwsConfig:
-    """Global `[aws]` section - the single configured target (multi-region /
-    multi-profile deferred). Absent section => AWS provider unavailable."""
+    """Global `[aws]` section - the shared AWS account creds, used by every
+    AWS-family provider (ec2 today). One configured target (multi-region /
+    multi-profile deferred). Absent section => no AWS provider available."""
     region: str
     profile: Optional[str] = None
+
+
+@dataclasses.dataclass
+class Ec2Config:
+    """Global `[ec2]` section - EC2-specific launch defaults (the account creds
+    live in `[aws]`). Absent section => empty lists / spot off."""
     security_groups: list = dataclasses.field(default_factory=list)
     # Candidate subnets, tried in order; each pins the AZ. Empty => AWS chooses.
     subnets: list = dataclasses.field(default_factory=list)
@@ -116,7 +123,8 @@ class GlobalConfig:
     # [env]: credentials/vars injected into every box's shell env (see sync.py).
     # A project's [env] overrides per-key.
     env: dict = dataclasses.field(default_factory=dict)
-    aws: Optional[AwsConfig] = None
+    aws: Optional[AwsConfig] = None      # shared AWS account creds
+    ec2: Optional[Ec2Config] = None      # EC2-specific globals
 
     @classmethod
     def load(cls, path: Path = GLOBAL_CONFIG_PATH) -> "GlobalConfig":
@@ -133,8 +141,8 @@ class GlobalConfig:
                 "ssh": {"pubkey_path"},
                 "jj": {"name", "email"},
                 "env": _ANY_KEYS,  # arbitrary user-defined credentials/vars
-                "aws": {"region", "profile", "default_security_groups",
-                        "default_subnets", "spot"},
+                "aws": {"region", "profile"},
+                "ec2": {"default_security_groups", "default_subnets", "spot"},
             },
             config_path=path,
         )
@@ -159,6 +167,7 @@ class GlobalConfig:
             jj_name=jj.get("name"),
             jj_email=jj.get("email"),
             aws=_load_aws_config(data.get("aws"), path),
+            ec2=_load_ec2_config(data.get("ec2"), path),
         )
 
 
@@ -178,12 +187,16 @@ def _load_aws_config(aws_data: Optional[dict], path: Path) -> Optional[AwsConfig
     region = aws_data.get("region")
     if not region:
         die(f"{path}: [aws] requires 'region'")
-    return AwsConfig(
-        region=region,
-        profile=aws_data.get("profile"),
-        security_groups=aws_data.get("default_security_groups", []),
-        subnets=aws_data.get("default_subnets", []),
-        spot=aws_data.get("spot", False),
+    return AwsConfig(region=region, profile=aws_data.get("profile"))
+
+
+def _load_ec2_config(ec2_data: Optional[dict], path: Path) -> Optional[Ec2Config]:
+    if ec2_data is None:
+        return None
+    return Ec2Config(
+        security_groups=ec2_data.get("default_security_groups", []),
+        subnets=ec2_data.get("default_subnets", []),
+        spot=ec2_data.get("spot", False),
     )
 
 
@@ -209,14 +222,14 @@ class SyncEntry:
 
 
 @dataclasses.dataclass
-class AwsProjectConfig:
-    """Per-project `[aws]` launch defaults (cfleet's "instance template")."""
+class Ec2ProjectConfig:
+    """Per-project `[ec2]` launch defaults (cfleet's "instance template")."""
     instance_type: str
     architecture: str = "x86_64"           # "x86_64" | "arm64"
     ami: Optional[str] = None              # explicit AMI id; else looked up
     ami_name_filter: Optional[str] = None  # name glob for the AMI lookup
     ami_owner: str = DEFAULT_AMI_OWNER
-    spot: Optional[bool] = None            # overrides global [aws].spot
+    spot: Optional[bool] = None            # overrides global [ec2].spot
     interruption_behavior: str = "stop"    # spot only: stop | terminate | hibernate
 
 
@@ -240,7 +253,7 @@ class ProjectConfig:
     # the global [env] per-key (see sync.py). .devbox/config.toml is git-excluded,
     # so hardcoding scoped creds here is acceptable.
     env: dict = dataclasses.field(default_factory=dict)
-    aws: Optional[AwsProjectConfig] = None
+    ec2: Optional[Ec2ProjectConfig] = None
 
 
 def _load_toml(path: Path) -> dict:
@@ -320,24 +333,24 @@ def _resolve_sync(data: dict, config_path: Path, repo: RepoConfig) -> list:
     return entries
 
 
-def _resolve_aws_project_config(data: dict, config_path: Path) -> Optional[AwsProjectConfig]:
-    aws_data = data.get("aws")
-    if aws_data is None:
+def _resolve_ec2_project_config(data: dict, config_path: Path) -> Optional[Ec2ProjectConfig]:
+    ec2_data = data.get("ec2")
+    if ec2_data is None:
         return None
-    instance_type = aws_data.get("instance_type")
+    instance_type = ec2_data.get("instance_type")
     if not instance_type:
-        die(f"{config_path}: [aws] requires 'instance_type'")
-    arch = aws_data.get("architecture", "x86_64")
+        die(f"{config_path}: [ec2] requires 'instance_type'")
+    arch = ec2_data.get("architecture", "x86_64")
     if arch not in ("x86_64", "arm64"):
-        die(f"{config_path}: [aws] architecture must be 'x86_64' or 'arm64' (got {arch!r})")
-    return AwsProjectConfig(
+        die(f"{config_path}: [ec2] architecture must be 'x86_64' or 'arm64' (got {arch!r})")
+    return Ec2ProjectConfig(
         instance_type=instance_type,
         architecture=arch,
-        ami=aws_data.get("ami"),
-        ami_name_filter=aws_data.get("ami_name_filter"),
-        ami_owner=aws_data.get("ami_owner", DEFAULT_AMI_OWNER),
-        spot=aws_data.get("spot"),
-        interruption_behavior=aws_data.get("interruption_behavior", "stop"),
+        ami=ec2_data.get("ami"),
+        ami_name_filter=ec2_data.get("ami_name_filter"),
+        ami_owner=ec2_data.get("ami_owner", DEFAULT_AMI_OWNER),
+        spot=ec2_data.get("spot"),
+        interruption_behavior=ec2_data.get("interruption_behavior", "stop"),
     )
 
 
@@ -363,7 +376,7 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
             "repo": {"mode", "dir", "url", "sync"},
             "sync": _ANY_KEYS,  # array-of-tables, validated by _parse_sync_entry
             "env": _ANY_KEYS,   # arbitrary user-defined credentials/vars
-            "aws": {"instance_type", "architecture", "ami", "ami_name_filter",
+            "ec2": {"instance_type", "architecture", "ami", "ami_name_filter",
                     "ami_owner", "spot", "interruption_behavior"},
         },
         config_path=config_path,
@@ -388,7 +401,7 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         mods=_resolve_mods(data, config_path),
         sync=_resolve_sync(data, config_path, repo),
         env=_resolve_env(data, config_path),
-        aws=_resolve_aws_project_config(data, config_path),
+        ec2=_resolve_ec2_project_config(data, config_path),
     )
 
 
@@ -425,7 +438,7 @@ def compose_instance_name(provider: str, name: str) -> str:
 
 def resolve_instance(args, project: ProjectConfig) -> str:
     """Which instance a command targets, as its canonical name. Explicit --name
-    wins (the full canonical name, e.g. `aws-binius-arm`); otherwise the
+    wins (the full canonical name, e.g. `ec2-binius-arm`); otherwise the
     project's bare-named libvirt default (= the project name). Cloud instances
     are always named, so they only ever match via --name."""
     return args.name or project.project

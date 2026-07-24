@@ -80,7 +80,7 @@ def truncate_known_hosts() -> None:
 def _resolve_target(args: argparse.Namespace, project: ProjectConfig, gc: GlobalConfig):
     """The (canonical name, provider) a per-instance command acts on. The
     provider is derived from the name (parse_instance_name), not project.provider
-    (the bare-create default) - so `devbox ip --name aws-binius-arm` queries AWS
+    (the bare-create default) - so `devbox ip --name ec2-binius-arm` queries EC2
     even from a libvirt-default project, routed offline from the name alone."""
     name = resolve_instance(args, project)
     provider_name, _ = parse_instance_name(name)
@@ -89,7 +89,7 @@ def _resolve_target(args: argparse.Namespace, project: ProjectConfig, gc: Global
 
 def _check_name_unique(gc: GlobalConfig, name: str) -> None:
     """Instance names are globally unique across providers - enforced at create
-    by checking the union `list`. A provider that can't be listed (e.g. AWS creds
+    by checking the union `list`. A provider that can't be listed (e.g. EC2 creds
     missing) is warned about, not fatal, so a local create isn't blocked by it."""
     for provider in all_providers(gc):
         try:
@@ -114,7 +114,7 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
             die("libvirt instances are the project's bare default (name = the project); "
                 "--name is only for cloud instances")
         bare = project.project
-        # A project literally named e.g. 'aws-foo' would make the bare libvirt
+        # A project literally named e.g. 'ec2-foo' would make the bare libvirt
         # name misparse as another provider. Reject it so the name stays routable.
         misparsed = parse_instance_name(bare)[0]
         if misparsed != "libvirt":
@@ -128,7 +128,7 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
                 f"(e.g. `devbox create --provider {provider_name} --name foo-gpu`)")
         bare = args.name
         # The provider prefix is composed in automatically; a --name that already
-        # carries one would double it (e.g. aws-aws-foo).
+        # carries one would double it (e.g. ec2-ec2-foo).
         if parse_instance_name(bare)[0] != "libvirt":
             die(f"--name '{bare}' must not start with a provider prefix "
                 f"('{provider_name}-' is added automatically); "
@@ -139,9 +139,9 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
     name = compose_instance_name(provider_name, bare)
     _check_name_unique(gc, name)
 
-    aws_cfg = project.aws
-    if aws_cfg is not None and (args.spot or args.on_demand):
-        aws_cfg = dataclasses.replace(aws_cfg, spot=bool(args.spot))
+    ec2_cfg = project.ec2
+    if ec2_cfg is not None and (args.spot or args.on_demand):
+        ec2_cfg = dataclasses.replace(ec2_cfg, spot=bool(args.spot))
 
     # Build the provisioning payload up front so a bad jj identity / missing mod
     # surfaces before we boot a box (build_payload resolves both).
@@ -156,7 +156,7 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
         created_at=datetime.now(timezone.utc).isoformat(),
         vcpus=project.vcpus,
         memory_mib=project.memory_mib,
-        aws=aws_cfg,
+        ec2=ec2_cfg,
     )
     provider.create(spec)
 
@@ -327,7 +327,7 @@ def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
 
 def cmd_list(args: argparse.Namespace, gc: GlobalConfig, project: Optional[ProjectConfig]) -> None:
     # Global view: every devbox-managed instance, unioned across providers.
-    # AWS is account-wide; libvirt is this-host-only.
+    # EC2 is account-wide; libvirt is this-host-only.
     instances = [inst for provider in all_providers(gc) for inst in provider.list()]
     instances.sort(key=lambda i: i.name)
     if not instances:
@@ -491,8 +491,9 @@ def main() -> None:
     c.add_argument("--provider", choices=PROVIDERS, default=None,
                     help=f"provider to launch on (default: the project's, else {DEFAULT_PROVIDER})")
     market = c.add_mutually_exclusive_group()
-    market.add_argument("--spot", action="store_true", help="AWS: force a spot instance")
-    market.add_argument("--on-demand", action="store_true", help="AWS: force an on-demand instance")
+    market.add_argument("--spot", action="store_true", help="EC2: force a spot instance")
+    market.add_argument("--on-demand", action="store_true",
+                        help="EC2: force an on-demand instance")
     c.set_defaults(func=cmd_create)
     sub.add_parser("up", help="start an already-defined, shut-off VM").set_defaults(func=cmd_up)
     sub.add_parser("stop", help="gracefully shut down a running VM").set_defaults(func=cmd_stop)

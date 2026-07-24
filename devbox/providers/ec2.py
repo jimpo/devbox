@@ -1,25 +1,29 @@
-"""The AWS/EC2 provider (ported from cfleet's src/aws/ec2.ts). No local DB:
+"""The EC2 provider (ported from cfleet's src/aws/ec2.ts). No local DB:
 state is discovered via describe-instances filtered by devbox tags. run-instances
 covers spot + on-demand, AMI-filter lookup, EBS sizing, and subnet capacity
 fallback. boto3 is imported lazily so libvirt-only users need not have it, and
 tests inject a fake client.
 
+Config comes from two global sections: `[aws]` (the shared account creds every
+AWS-family provider uses) and `[ec2]` (this provider's security groups / subnets
+/ spot default).
+
 Tags stamped on every instance:
   devbox:managed = "true"       (the filter for "mine")
-  devbox:name    = <name>       (devbox's canonical name, e.g. aws-binius-arm;
+  devbox:name    = <name>       (devbox's canonical name, e.g. ec2-binius-arm;
                                  how commands address the instance)
   devbox:project = <project>
   devbox:created-at = <ISO-8601>
   Name           = devbox-<bare> (console display; the provider prefix is
-                                  redundant AWS-side, so aws-binius-arm shows
+                                  redundant AWS-side, so ec2-binius-arm shows
                                   as devbox-binius-arm)
 """
 from __future__ import annotations
 
 from typing import Optional
 
-from ..config import (AwsConfig, AwsProjectConfig, DEFAULT_AMI_NAME_FILTER,
-                      GlobalConfig, parse_instance_name)
+from ..config import (AwsConfig, DEFAULT_AMI_NAME_FILTER, Ec2Config,
+                      Ec2ProjectConfig, GlobalConfig, parse_instance_name)
 from ..util import die
 from .base import Instance, InstanceSpec, Provider
 
@@ -42,7 +46,7 @@ def _make_ec2_client(aws: AwsConfig):
     try:
         import boto3
     except ImportError:
-        die("boto3 is required for the AWS provider: pip install boto3 "
+        die("boto3 is required for the EC2 provider: pip install boto3 "
             "(or `uv tool install --with boto3 devbox`)")
     session = boto3.Session(profile_name=aws.profile, region_name=aws.region)
     return session.client("ec2")
@@ -56,14 +60,17 @@ def _error_code(err: Exception) -> Optional[str]:
     return None
 
 
-class AwsProvider(Provider):
-    name = "aws"
+class Ec2Provider(Provider):
+    name = "ec2"
 
     def __init__(self, gc: GlobalConfig, client=None):
         if gc.aws is None:
             die("[aws] is not configured in the global config (needs region/profile)")
         self.gc = gc
-        self.aws = gc.aws
+        self.aws = gc.aws                      # shared account creds (region/profile)
+        # EC2-specific globals; the section is optional (=> no security groups,
+        # AWS picks the subnet/AZ, on-demand by default).
+        self.defaults = gc.ec2 or Ec2Config()
         self._client = client  # injected in tests; lazily created otherwise
 
     @property
@@ -113,7 +120,7 @@ class AwsProvider(Provider):
                 continue
             out.append(Instance(
                 name=name,
-                provider="aws",
+                provider="ec2",
                 project=self._tag(inst, PROJECT_TAG),
                 state=inst.get("State", {}).get("Name", "unknown"),
                 resources=inst.get("InstanceType", "?"),
@@ -146,45 +153,45 @@ class AwsProvider(Provider):
         return inst
 
     # ---- AMI lookup ---------------------------------------------------------
-    def _resolve_ami(self, aws: AwsProjectConfig) -> str:
-        if aws.ami:
-            return aws.ami
-        name_filter = aws.ami_name_filter or DEFAULT_AMI_NAME_FILTER[aws.architecture]
+    def _resolve_ami(self, cfg: Ec2ProjectConfig) -> str:
+        if cfg.ami:
+            return cfg.ami
+        name_filter = cfg.ami_name_filter or DEFAULT_AMI_NAME_FILTER[cfg.architecture]
         resp = self.ec2.describe_images(
-            Owners=[aws.ami_owner],
+            Owners=[cfg.ami_owner],
             Filters=[
                 {"Name": "name", "Values": [name_filter]},
-                {"Name": "architecture", "Values": [aws.architecture]},
+                {"Name": "architecture", "Values": [cfg.architecture]},
                 {"Name": "state", "Values": ["available"]},
             ],
         )
         images = resp.get("Images", [])
         if not images:
-            die(f"no AMI found matching name={name_filter!r} arch={aws.architecture} "
-                f"owner={aws.ami_owner}")
+            die(f"no AMI found matching name={name_filter!r} arch={cfg.architecture} "
+                f"owner={cfg.ami_owner}")
         images.sort(key=lambda i: i.get("CreationDate", ""), reverse=True)
         return images[0]["ImageId"]
 
     # ---- create -------------------------------------------------------------
     def create(self, spec: InstanceSpec) -> None:
-        aws = spec.aws
-        if aws is None:
-            die("project has no [aws] section; add instance_type (and optionally "
-                "architecture/ami/spot) under [aws] to launch on AWS")
+        cfg = spec.ec2
+        if cfg is None:
+            die("project has no [ec2] section; add instance_type (and optionally "
+                "architecture/ami/spot) under [ec2] to launch on EC2")
 
         if self._find(spec.name) is not None:
             die(f"instance '{spec.name}' already exists; run `devbox destroy` first")
 
-        ami = self._resolve_ami(aws)
-        use_spot = aws.spot if aws.spot is not None else self.aws.spot
+        ami = self._resolve_ami(cfg)
+        use_spot = cfg.spot if cfg.spot is not None else self.defaults.spot
 
         # The console-display Name drops the redundant provider prefix (the
-        # instance is already known to be on AWS): aws-binius-arm -> devbox-binius-arm.
+        # instance is already known to be on EC2): ec2-binius-arm -> devbox-binius-arm.
         _, bare = parse_instance_name(spec.name)
 
         params = {
             "ImageId": ami,
-            "InstanceType": aws.instance_type,
+            "InstanceType": cfg.instance_type,
             "MinCount": 1,
             "MaxCount": 1,
             # boto3 base64-encodes UserData for run_instances.
@@ -204,22 +211,22 @@ class AwsProvider(Provider):
                 ],
             }],
         }
-        if self.aws.security_groups:
-            params["SecurityGroupIds"] = self.aws.security_groups
+        if self.defaults.security_groups:
+            params["SecurityGroupIds"] = self.defaults.security_groups
         if use_spot:
             params["InstanceMarketOptions"] = {
                 "MarketType": "spot",
                 "SpotOptions": {
                     "SpotInstanceType": "persistent",
-                    "InstanceInterruptionBehavior": aws.interruption_behavior,
+                    "InstanceInterruptionBehavior": cfg.interruption_behavior,
                 },
             }
 
         # Candidate subnets, tried in order; [] means "let AWS choose the AZ".
         # On insufficient capacity against an *explicit* subnet, fall back.
-        candidates = self.aws.subnets or [None]
+        candidates = self.defaults.subnets or [None]
         market = "spot" if use_spot else "on-demand"
-        print(f"==> Launching {market} {aws.instance_type} instance '{spec.name}' ...")
+        print(f"==> Launching {market} {cfg.instance_type} instance '{spec.name}' ...")
         last_error = None
         for i, subnet in enumerate(candidates):
             call = dict(params)
@@ -239,5 +246,5 @@ class AwsProvider(Provider):
             return
 
         detail = f": {last_error}" if last_error else ""
-        die(f"no capacity for {aws.instance_type} in any configured subnet "
-            f"({', '.join(str(s) for s in self.aws.subnets)}){detail}")
+        die(f"no capacity for {cfg.instance_type} in any configured subnet "
+            f"({', '.join(str(s) for s in self.defaults.subnets)}){detail}")

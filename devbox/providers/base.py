@@ -9,14 +9,14 @@ import abc
 import dataclasses
 from typing import Optional
 
-from ..config import AwsProjectConfig
+from ..config import Ec2ProjectConfig
 
 
 @dataclasses.dataclass
 class InstanceSpec:
     """What `create` needs to launch one instance. Common fields plus the
-    provider-specific bits each backend reads (libvirt: vcpus/memory_mib; aws:
-    the [aws] launch config)."""
+    provider-specific bits each backend reads (libvirt: vcpus/memory_mib; ec2:
+    the [ec2] launch config)."""
     name: str
     project: str
     provider: str
@@ -25,13 +25,13 @@ class InstanceSpec:
     created_at: str       # ISO-8601, stamped onto the instance
     vcpus: Optional[int] = None
     memory_mib: Optional[int] = None
-    aws: Optional[AwsProjectConfig] = None
+    ec2: Optional[Ec2ProjectConfig] = None
 
 
 @dataclasses.dataclass
 class Instance:
     """One row of `devbox list`. `resources` is provider-formatted (libvirt:
-    vCPU/RAM; aws: the instance type). `cost_hint` flags a paid provider so the
+    vCPU/RAM; ec2: the instance type). `cost_hint` flags a paid provider so the
     listing can mark running instances that are costing money."""
     name: str
     provider: str

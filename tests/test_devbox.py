@@ -180,14 +180,14 @@ def test_resolve_project_unknown_top_level_key_warns(tmp_path, global_config, ca
 
 
 def test_resolve_project_unknown_section_key_warns(tmp_path, global_config, capsys):
-    _write_marker(tmp_path, '[aws]\ninstance_type = "t3.micro"\nname = "x"\n')
+    _write_marker(tmp_path, '[ec2]\ninstance_type = "t3.micro"\nname = "x"\n')
     devbox.resolve_project(tmp_path, global_config)
     err = capsys.readouterr().err
-    assert "unknown key 'aws.name'" in err
+    assert "unknown key 'ec2.name'" in err
 
 
 def test_resolve_project_known_config_no_warning(tmp_path, global_config, capsys):
-    _write_marker(tmp_path, 'project = "myproj"\nvcpus = 2\n[aws]\ninstance_type = "t3.micro"\n')
+    _write_marker(tmp_path, 'project = "myproj"\nvcpus = 2\n[ec2]\ninstance_type = "t3.micro"\n')
     devbox.resolve_project(tmp_path, global_config)
     assert capsys.readouterr().err == ""
 
@@ -213,6 +213,34 @@ def test_global_config_known_config_no_warning(tmp_path, capsys):
     path.write_text('network = "custom-net"\n[jj]\nname = "Alice"\n[env]\nX = "y"\n')
     devbox.GlobalConfig.load(path)
     assert capsys.readouterr().err == ""
+
+
+def test_global_config_aws_ec2_split_known_keys_no_warning(tmp_path, capsys):
+    # [aws] = creds only; the EC2 knobs live in [ec2]. Both fully recognized.
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[aws]\nregion = "us-east-1"\nprofile = "dev"\n'
+        '[ec2]\ndefault_security_groups = ["sg-1"]\ndefault_subnets = ["subnet-a"]\n'
+        "spot = true\n"
+    )
+    devbox.GlobalConfig.load(path)
+    assert capsys.readouterr().err == ""
+
+
+def test_global_config_ec2_key_under_aws_warns(tmp_path, capsys):
+    # An EC2 knob left behind in [aws] is no longer a known key -> warned, not
+    # silently ignored (the JIM-72 guard catching the JIM-79 config move).
+    path = tmp_path / "config.toml"
+    path.write_text('[aws]\nregion = "us-east-1"\nspot = true\n')
+    devbox.GlobalConfig.load(path)
+    assert "unknown key 'aws.spot'" in capsys.readouterr().err
+
+
+def test_global_config_unknown_ec2_key_warns(tmp_path, capsys):
+    path = tmp_path / "config.toml"
+    path.write_text('[ec2]\ndefault_subnet = "subnet-a"\n')  # typo: singular
+    devbox.GlobalConfig.load(path)
+    assert "unknown key 'ec2.default_subnet'" in capsys.readouterr().err
 
 
 def test_resolve_project_invalid_provider_dies(tmp_path, global_config):
@@ -655,8 +683,8 @@ def test_resolve_instance_defaults_to_project():
 
 def test_resolve_instance_name_overrides():
     import argparse
-    args = argparse.Namespace(name="aws-foo-gpu")
-    assert devbox.resolve_instance(args, _project()) == "aws-foo-gpu"
+    args = argparse.Namespace(name="ec2-foo-gpu")
+    assert devbox.resolve_instance(args, _project()) == "ec2-foo-gpu"
 
 
 def test_parse_instance_name_bare_is_libvirt():
@@ -665,7 +693,7 @@ def test_parse_instance_name_bare_is_libvirt():
 
 
 def test_parse_instance_name_provider_prefixed():
-    assert devbox.parse_instance_name("aws-binius-arm") == ("aws", "binius-arm")
+    assert devbox.parse_instance_name("ec2-binius-arm") == ("ec2", "binius-arm")
 
 
 def test_parse_instance_name_unknown_prefix_is_libvirt():
@@ -683,7 +711,7 @@ def test_compose_instance_name_libvirt_is_bare():
 
 
 def test_compose_instance_name_cloud_is_prefixed():
-    assert devbox.compose_instance_name("aws", "binius-arm") == "aws-binius-arm"
+    assert devbox.compose_instance_name("ec2", "binius-arm") == "ec2-binius-arm"
 
 
 def test_compose_parse_round_trip():
@@ -693,14 +721,14 @@ def test_compose_parse_round_trip():
 
 
 def test_resolve_target_routes_by_instance_name(monkeypatch):
-    # The heart of JIM-71: a canonical aws-* name routes to the AWS provider even
+    # The heart of JIM-71: a canonical ec2-* name routes to the EC2 provider even
     # when the project's default provider is libvirt, from the name alone.
     import argparse
     monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: f"prov:{name}")
     gc = _global_config(devbox.Path("/nonexistent"))
-    args = argparse.Namespace(name="aws-binius-arm")
+    args = argparse.Namespace(name="ec2-binius-arm")
     assert devbox.cli._resolve_target(args, _project(), gc) == (
-        "aws-binius-arm", "aws", "prov:aws")
+        "ec2-binius-arm", "ec2", "prov:ec2")
     args = argparse.Namespace(name=None)  # bare default -> libvirt
     assert devbox.cli._resolve_target(args, _project(), gc) == (
         "test-project", "libvirt", "prov:libvirt")
@@ -713,11 +741,11 @@ def _create_args(provider=None, name=None):
 
 
 def test_cmd_create_rejects_provider_prefixed_project_name():
-    # A project literally named 'aws-foo' would make its bare libvirt name
-    # misparse as the aws provider -> rejected at create.
+    # A project literally named 'ec2-foo' would make its bare libvirt name
+    # misparse as the ec2 provider -> rejected at create.
     import dataclasses
     gc = _global_config(devbox.Path("/nonexistent"))
-    project = dataclasses.replace(_project(), project="aws-foo")
+    project = dataclasses.replace(_project(), project="ec2-foo")
     with pytest.raises(SystemExit):
         devbox.cli.cmd_create(_create_args(), gc, project)
 
@@ -729,7 +757,7 @@ def test_cmd_create_rejects_name_with_provider_prefix():
     gc = dataclasses.replace(_global_config(devbox.Path("/nonexistent")),
                              aws=devbox.AwsConfig(region="us-east-1"))
     with pytest.raises(SystemExit):
-        devbox.cli.cmd_create(_create_args(provider="aws", name="aws-foo"), gc, _project())
+        devbox.cli.cmd_create(_create_args(provider="ec2", name="ec2-foo"), gc, _project())
 
 
 # ---- libvirt <metadata> stamp -----------------------------------------------
@@ -800,7 +828,7 @@ def test_get_provider_libvirt():
 def test_get_provider_unknown_dies():
     gc = _global_config(devbox.Path("/nonexistent"))
     with pytest.raises(SystemExit):
-        devbox.get_provider("aws", gc)
+        devbox.get_provider("gcp", gc)
 
 
 def test_libvirt_provider_list_returns_instances(monkeypatch):
@@ -1146,28 +1174,48 @@ def test_cmd_sync_files_without_entries_dies():
         devbox.cli.cmd_sync(_sync_args(files=True), gc, _project())
 
 
-# ---- AWS config -------------------------------------------------------------
-def test_global_config_aws_section(tmp_path):
+# ---- AWS creds / EC2 config --------------------------------------------------
+def test_global_config_aws_section_is_creds_only(tmp_path):
+    # [aws] is the shared AWS account config: region/profile, nothing EC2-specific.
+    path = tmp_path / "config.toml"
+    path.write_text('[aws]\nregion = "us-west-2"\nprofile = "dev"\n')
+    gc = devbox.GlobalConfig.load(path)
+    assert gc.aws is not None
+    assert gc.aws.region == "us-west-2"
+    assert gc.aws.profile == "dev"
+    assert gc.ec2 is None  # no [ec2] section => no EC2 globals
+
+
+def test_global_config_ec2_section(tmp_path):
+    # The EC2-specific globals live in their own section, separate from the creds.
     path = tmp_path / "config.toml"
     path.write_text(
         "[aws]\n"
         'region = "us-west-2"\n'
-        'profile = "dev"\n'
+        "[ec2]\n"
         'default_security_groups = ["sg-1", "sg-2"]\n'
         'default_subnets = ["subnet-a", "subnet-b"]\n'
         "spot = true\n"
     )
     gc = devbox.GlobalConfig.load(path)
-    assert gc.aws is not None
     assert gc.aws.region == "us-west-2"
-    assert gc.aws.profile == "dev"
-    assert gc.aws.security_groups == ["sg-1", "sg-2"]
-    assert gc.aws.subnets == ["subnet-a", "subnet-b"]
-    assert gc.aws.spot is True
+    assert gc.ec2 is not None
+    assert gc.ec2.security_groups == ["sg-1", "sg-2"]
+    assert gc.ec2.subnets == ["subnet-a", "subnet-b"]
+    assert gc.ec2.spot is True
+
+
+def test_global_config_ec2_section_defaults(tmp_path):
+    # An [ec2] section with nothing in it => empty lists, on-demand.
+    path = tmp_path / "config.toml"
+    path.write_text("[ec2]\n")
+    gc = devbox.GlobalConfig.load(path)
+    assert gc.ec2.security_groups == [] and gc.ec2.subnets == [] and gc.ec2.spot is False
 
 
 def test_global_config_no_aws_section_is_none(tmp_path):
-    assert devbox.GlobalConfig.load(tmp_path / "missing.toml").aws is None
+    gc = devbox.GlobalConfig.load(tmp_path / "missing.toml")
+    assert gc.aws is None and gc.ec2 is None
 
 
 def test_global_config_aws_requires_region(tmp_path):
@@ -1177,31 +1225,36 @@ def test_global_config_aws_requires_region(tmp_path):
         devbox.GlobalConfig.load(path)
 
 
-def test_resolve_project_aws_section(tmp_path, global_config):
+def test_resolve_project_ec2_section(tmp_path, global_config):
     _write_marker(
         tmp_path,
-        'provider = "aws"\n[aws]\ninstance_type = "g5.xlarge"\narchitecture = "x86_64"\nspot = true\n',
+        'provider = "ec2"\n[ec2]\ninstance_type = "g5.xlarge"\narchitecture = "x86_64"\nspot = true\n',
     )
     project = devbox.resolve_project(tmp_path, global_config)
-    assert project.provider == "aws"
-    assert project.aws.instance_type == "g5.xlarge"
-    assert project.aws.architecture == "x86_64"
-    assert project.aws.spot is True
+    assert project.provider == "ec2"
+    assert project.ec2.instance_type == "g5.xlarge"
+    assert project.ec2.architecture == "x86_64"
+    assert project.ec2.spot is True
 
 
-def test_resolve_project_aws_requires_instance_type(tmp_path, global_config):
-    _write_marker(tmp_path, '[aws]\narchitecture = "arm64"\n')
+def test_resolve_project_no_ec2_section_is_none(tmp_path, global_config):
+    _write_marker(tmp_path, 'project = "myproj"\n')
+    assert devbox.resolve_project(tmp_path, global_config).ec2 is None
+
+
+def test_resolve_project_ec2_requires_instance_type(tmp_path, global_config):
+    _write_marker(tmp_path, '[ec2]\narchitecture = "arm64"\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
 
-def test_resolve_project_aws_invalid_architecture_dies(tmp_path, global_config):
-    _write_marker(tmp_path, '[aws]\ninstance_type = "c7i.large"\narchitecture = "ppc64"\n')
+def test_resolve_project_ec2_invalid_architecture_dies(tmp_path, global_config):
+    _write_marker(tmp_path, '[ec2]\ninstance_type = "c7i.large"\narchitecture = "ppc64"\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
 
-# ---- AWS provider -----------------------------------------------------------
+# ---- EC2 provider -----------------------------------------------------------
 class _FakeClientError(Exception):
     """Stands in for botocore.exceptions.ClientError (duck-typed .response)."""
     def __init__(self, code):
@@ -1247,10 +1300,11 @@ class _FakeEC2:
         return {}
 
 
-def _aws_gc(security_groups=("sg-1",), subnets=(), spot=False):
+def _ec2_gc(security_groups=("sg-1",), subnets=(), spot=False):
+    """A global config with AWS creds ([aws]) plus the EC2 globals ([ec2])."""
     gc = devbox.GlobalConfig.load(devbox.Path("/nonexistent"))
-    gc.aws = devbox.AwsConfig(region="us-east-1", profile=None,
-                              security_groups=list(security_groups),
+    gc.aws = devbox.AwsConfig(region="us-east-1", profile=None)
+    gc.ec2 = devbox.Ec2Config(security_groups=list(security_groups),
                               subnets=list(subnets), spot=spot)
     return gc
 
@@ -1271,62 +1325,74 @@ def _reservations(*instances):
     return {"Reservations": [{"Instances": list(instances)}]}
 
 
-def _aws_spec(name="foo-gpu", instance_type="g5.xlarge", architecture="x86_64",
+def _ec2_spec(name="foo-gpu", instance_type="g5.xlarge", architecture="x86_64",
               spot=None, ami=None, disk_gb=64):
     return devbox.InstanceSpec(
-        name=name, project="proj", provider="aws", disk_gb=disk_gb,
+        name=name, project="proj", provider="ec2", disk_gb=disk_gb,
         user_data="#cloud-config\n", created_at="2026-07-21T12:00:00+00:00",
-        aws=devbox.AwsProjectConfig(instance_type=instance_type, architecture=architecture,
+        ec2=devbox.Ec2ProjectConfig(instance_type=instance_type, architecture=architecture,
                                     spot=spot, ami=ami),
     )
 
 
-def test_get_provider_aws_requires_config():
+def test_get_provider_ec2_requires_aws_creds():
     with pytest.raises(SystemExit):
-        devbox.get_provider("aws", devbox.GlobalConfig.load(devbox.Path("/nonexistent")))
+        devbox.get_provider("ec2", devbox.GlobalConfig.load(devbox.Path("/nonexistent")))
 
 
-def test_get_provider_aws_configured():
-    assert isinstance(devbox.get_provider("aws", _aws_gc()), devbox.AwsProvider)
+def test_get_provider_ec2_configured():
+    assert isinstance(devbox.get_provider("ec2", _ec2_gc()), devbox.Ec2Provider)
 
 
-def test_all_providers_gates_aws_on_config():
+def test_ec2_provider_without_ec2_section_uses_empty_defaults():
+    # [ec2] is optional: no security groups, AWS picks the subnet, on-demand.
+    import dataclasses
+    gc = dataclasses.replace(_ec2_gc(), ec2=None)
+    provider = devbox.Ec2Provider(gc, client=_FakeEC2())
+    provider.create(_ec2_spec())
+    params = [kw for (op, kw) in provider.ec2.calls if op == "run_instances"][0]
+    assert "SecurityGroupIds" not in params
+    assert "SubnetId" not in params
+    assert "InstanceMarketOptions" not in params
+
+
+def test_all_providers_gates_ec2_on_aws_creds():
     names = lambda gc: [p.name for p in devbox.all_providers(gc)]
     assert names(devbox.GlobalConfig.load(devbox.Path("/nonexistent"))) == ["libvirt"]
-    assert names(_aws_gc()) == ["libvirt", "aws"]
+    assert names(_ec2_gc()) == ["libvirt", "ec2"]
 
 
-def test_aws_list_parses_and_flags_cost():
+def test_ec2_list_parses_and_flags_cost():
     client = _FakeEC2(describe_instances=_reservations(
         _ec2_instance(name="foo", state="running", itype="c7i.large"),
         _ec2_instance(name=None),  # no devbox:name tag -> skipped
     ))
-    provider = devbox.AwsProvider(_aws_gc(), client=client)
+    provider = devbox.Ec2Provider(_ec2_gc(), client=client)
     instances = provider.list()
     assert len(instances) == 1
     i = instances[0]
     assert (i.name, i.provider, i.project, i.state, i.resources) == \
-        ("foo", "aws", "proj", "running", "c7i.large")
+        ("foo", "ec2", "proj", "running", "c7i.large")
     assert i.cost_hint is True
 
 
-def test_aws_state_and_address():
+def test_ec2_state_and_address():
     client = _FakeEC2(describe_instances=_reservations(_ec2_instance(state="running")))
-    provider = devbox.AwsProvider(_aws_gc(), client=client)
+    provider = devbox.Ec2Provider(_ec2_gc(), client=client)
     assert provider.state("foo") == "running"
     assert provider.address("foo") == "1.2.3.4"
 
 
-def test_aws_state_none_when_absent():
-    provider = devbox.AwsProvider(_aws_gc(), client=_FakeEC2())
+def test_ec2_state_none_when_absent():
+    provider = devbox.Ec2Provider(_ec2_gc(), client=_FakeEC2())
     assert provider.state("nope") is None
     assert provider.address("nope") is None
 
 
-def test_aws_create_on_demand_request_shape():
+def test_ec2_create_on_demand_request_shape():
     client = _FakeEC2()  # describe_instances empty (no existing), images present
-    provider = devbox.AwsProvider(_aws_gc(security_groups=["sg-1"]), client=client)
-    provider.create(_aws_spec(name="foo-gpu", instance_type="g5.xlarge", disk_gb=64))
+    provider = devbox.Ec2Provider(_ec2_gc(security_groups=["sg-1"]), client=client)
+    provider.create(_ec2_spec(name="foo-gpu", instance_type="g5.xlarge", disk_gb=64))
     run = [kw for (op, kw) in client.calls if op == "run_instances"]
     assert len(run) == 1
     params = run[0]
@@ -1345,51 +1411,51 @@ def test_aws_create_on_demand_request_shape():
     assert tags["Name"] == "devbox-foo-gpu"
 
 
-def test_aws_create_name_tag_strips_provider_prefix():
-    # The canonical devbox name is 'aws-binius-arm' (how commands address it),
+def test_ec2_create_name_tag_strips_provider_prefix():
+    # The canonical devbox name is 'ec2-binius-arm' (how commands address it),
     # but the AWS-side console Name drops the redundant provider prefix.
     client = _FakeEC2()
-    provider = devbox.AwsProvider(_aws_gc(), client=client)
-    provider.create(_aws_spec(name="aws-binius-arm"))
+    provider = devbox.Ec2Provider(_ec2_gc(), client=client)
+    provider.create(_ec2_spec(name="ec2-binius-arm"))
     params = [kw for (op, kw) in client.calls if op == "run_instances"][0]
     tags = {t["Key"]: t["Value"] for t in params["TagSpecifications"][0]["Tags"]}
-    assert tags["devbox:name"] == "aws-binius-arm"  # addressing tag: canonical
+    assert tags["devbox:name"] == "ec2-binius-arm"  # addressing tag: canonical
     assert tags["Name"] == "devbox-binius-arm"       # console display: bare
 
 
-def test_aws_create_spot_adds_market_options():
+def test_ec2_create_spot_adds_market_options():
     client = _FakeEC2()
-    provider = devbox.AwsProvider(_aws_gc(spot=False), client=client)
-    provider.create(_aws_spec(spot=True))  # project overrides global default
+    provider = devbox.Ec2Provider(_ec2_gc(spot=False), client=client)
+    provider.create(_ec2_spec(spot=True))  # project overrides global default
     params = [kw for (op, kw) in client.calls if op == "run_instances"][0]
     assert params["InstanceMarketOptions"]["MarketType"] == "spot"
     assert params["InstanceMarketOptions"]["SpotOptions"]["SpotInstanceType"] == "persistent"
 
 
-def test_aws_create_explicit_ami_skips_lookup():
+def test_ec2_create_explicit_ami_skips_lookup():
     client = _FakeEC2()
-    provider = devbox.AwsProvider(_aws_gc(), client=client)
-    provider.create(_aws_spec(ami="ami-pinned"))
+    provider = devbox.Ec2Provider(_ec2_gc(), client=client)
+    provider.create(_ec2_spec(ami="ami-pinned"))
     assert not any(op == "describe_images" for (op, _) in client.calls)
     params = [kw for (op, kw) in client.calls if op == "run_instances"][0]
     assert params["ImageId"] == "ami-pinned"
 
 
-def test_aws_create_no_ami_found_dies():
+def test_ec2_create_no_ami_found_dies():
     client = _FakeEC2(images=[])
-    provider = devbox.AwsProvider(_aws_gc(), client=client)
+    provider = devbox.Ec2Provider(_ec2_gc(), client=client)
     with pytest.raises(SystemExit):
-        provider.create(_aws_spec())
+        provider.create(_ec2_spec())
 
 
-def test_aws_create_existing_dies():
+def test_ec2_create_existing_dies():
     client = _FakeEC2(describe_instances=_reservations(_ec2_instance(name="foo-gpu")))
-    provider = devbox.AwsProvider(_aws_gc(), client=client)
+    provider = devbox.Ec2Provider(_ec2_gc(), client=client)
     with pytest.raises(SystemExit):
-        provider.create(_aws_spec(name="foo-gpu"))
+        provider.create(_ec2_spec(name="foo-gpu"))
 
 
-def test_aws_create_subnet_capacity_fallback():
+def test_ec2_create_subnet_capacity_fallback():
     attempts = []
 
     def run_side_effect(kw):
@@ -1400,36 +1466,36 @@ def test_aws_create_subnet_capacity_fallback():
                                "InstanceType": kw["InstanceType"]}]}
 
     client = _FakeEC2(run_side_effect=run_side_effect)
-    provider = devbox.AwsProvider(_aws_gc(subnets=["subnet-a", "subnet-b"]), client=client)
-    provider.create(_aws_spec())
+    provider = devbox.Ec2Provider(_ec2_gc(subnets=["subnet-a", "subnet-b"]), client=client)
+    provider.create(_ec2_spec())
     assert attempts == ["subnet-a", "subnet-b"]
 
 
-def test_aws_create_all_subnets_exhausted_dies():
+def test_ec2_create_all_subnets_exhausted_dies():
     def run_side_effect(kw):
         raise _FakeClientError("InsufficientInstanceCapacity")
 
     client = _FakeEC2(run_side_effect=run_side_effect)
-    provider = devbox.AwsProvider(_aws_gc(subnets=["subnet-a", "subnet-b"]), client=client)
+    provider = devbox.Ec2Provider(_ec2_gc(subnets=["subnet-a", "subnet-b"]), client=client)
     with pytest.raises(SystemExit):
-        provider.create(_aws_spec())
+        provider.create(_ec2_spec())
 
 
-def test_aws_create_non_capacity_error_reraises():
+def test_ec2_create_non_capacity_error_reraises():
     def run_side_effect(kw):
         raise _FakeClientError("UnauthorizedOperation")
 
     client = _FakeEC2(run_side_effect=run_side_effect)
-    provider = devbox.AwsProvider(_aws_gc(subnets=["subnet-a", "subnet-b"]), client=client)
+    provider = devbox.Ec2Provider(_ec2_gc(subnets=["subnet-a", "subnet-b"]), client=client)
     with pytest.raises(_FakeClientError):
-        provider.create(_aws_spec())
+        provider.create(_ec2_spec())
     # Not retried against the second subnet.
     assert len([1 for (op, _) in client.calls if op == "run_instances"]) == 1
 
 
-def test_aws_start_stop_destroy_by_name():
+def test_ec2_start_stop_destroy_by_name():
     client = _FakeEC2(describe_instances=_reservations(_ec2_instance(name="foo", state="stopped")))
-    provider = devbox.AwsProvider(_aws_gc(), client=client)
+    provider = devbox.Ec2Provider(_ec2_gc(), client=client)
     provider.start("foo")
     provider.stop("foo")
     provider.destroy("foo")

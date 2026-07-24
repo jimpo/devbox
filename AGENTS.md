@@ -20,7 +20,7 @@ precedence, env-file quoting, payload/tarball assembly, `[env]` merge +
 expansion, repo-relative anchoring, `include` mirror-unit expansion, rsync argv),
 the libvirt
 `<metadata>` stamp/parse + `list` formatting (monkeypatched `virsh`), and the
-**AWS provider against a fake EC2 client** (`AwsProvider` with an injected
+**EC2 provider against a fake EC2 client** (`Ec2Provider` with an injected
 `client=`: list/state/address, run-instances request shape, spot, AMI lookup,
 subnet capacity fallback, lifecycle), and the jj-remote wiring for `devbox jj
 fetch` (`_ensure_jj_remote` add/set-url/noop with a monkeypatched `subprocess`).
@@ -48,8 +48,9 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 
 `devbox/` is a package split by concern:
 
-- `config.py` — global (`GlobalConfig`, incl. `[aws]`, `[env]`) + per-project
-  (`ProjectConfig`, incl. `[aws]`, `mods`, `sync`, `env`, `marker_dir`) config,
+- `config.py` — global (`GlobalConfig`, incl. `[aws]` shared AWS creds, `[ec2]`
+  EC2 globals, `[env]`) + per-project (`ProjectConfig`, incl. `[ec2]`, `mods`,
+  `sync`, `env`, `marker_dir`) config,
   marker resolution, `resolve_instance`/`parse_instance_name`.
 - `sync.py` — host→box file sync (`[[sync]]`/`[[repo.sync]]`) via `run_sync`
   (per-mirror-unit rsync jobs over the `devbox-<name>` alias), and `run_envvars`
@@ -67,9 +68,9 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   (user/packages/BASH_ENV) — no provisioning payload; provisioning runs over SSH
   after boot. One cloud-config, two providers (libvirt NoCloud seed / EC2 user-data).
 - `providers/` — the backend seam. `base.py` (`Provider` ABC, `InstanceSpec`,
-  `Instance`); `libvirt.py`; `aws.py` (boto3, lazily imported + injectable client
-  for tests); `__init__.py` (`get_provider`, `all_providers` — AWS gated on
-  `[aws]` being configured). Only `create`/`start`/`stop`/`destroy`/`state`/
+  `Instance`); `libvirt.py`; `ec2.py` (boto3, lazily imported + injectable client
+  for tests); `__init__.py` (`get_provider`, `all_providers` — ec2 gated on
+  `[aws]` creds being configured). Only `create`/`start`/`stop`/`destroy`/`state`/
   `address`/`list` are per-backend; everything above (config, render,
   provisioning, ssh/exec, target resolution, list aggregation) is shared, and
   subcommands go through the seam rather than calling `virsh`/boto3 directly.
@@ -80,4 +81,4 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 `pyproject.toml` (hatchling) declares the `devbox.cli:main` entry point,
 force-includes the package data files (`common-cloud-config.yaml`,
 `provision-driver.sh`, `mods/`) into the wheel, and declares runtime deps
-`pyyaml` (cloud-config merge) + `boto3` (AWS provider).
+`pyyaml` (cloud-config merge) + `boto3` (ec2 provider).

@@ -7,8 +7,8 @@ benchmarking on cloud VMs.
 devbox gives you an easy-to-use CLI for creating, managing, and interacting with
 those machines, and ships with an agent skill.
 
-It currently supports two VM providers: **libvirt** (local VMs) and **AWS**
-(EC2).
+It currently supports two VM providers: **libvirt** (local VMs) and **ec2**
+(AWS EC2).
 
 ## Basics & Architecture
 
@@ -64,15 +64,15 @@ jj new wip@devbox-my-project   # check it out locally
 
 `devbox stop` shuts the box down (keeping its disk); `devbox destroy` tears it
 down entirely. Launching a cloud box instead is the same flow with `devbox
-create --provider aws --name my-project-arm` — see [Per-project
-setup](#per-project-setup) for the `[aws]` config.
+create --provider ec2 --name my-project-arm` — see [Per-project
+setup](#per-project-setup) for the `[ec2]` config.
 
 ## Usage
 
 | Command | Behavior |
 |---|---|
-| `devbox create` | Launch the project's default libvirt VM (bare-named = the project), or a named cloud instance with `--provider aws --name <n>`. Renders + merges the cloud-config, first-boots via cloud-init (libvirt NoCloud seed / EC2 user-data), and stamps the instance (libvirt `<metadata>` / EC2 tags). Errors if the name already exists anywhere (global-uniqueness). |
-| `devbox list` | List devbox-managed instances — name, provider, project, state, resources, uptime (AWS rows show the instance type and a `($)` cost flag while running). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + AWS (account-wide, by `devbox:managed` tag). |
+| `devbox create` | Launch the project's default libvirt VM (bare-named = the project), or a named cloud instance with `--provider ec2 --name <n>`. Renders + merges the cloud-config, first-boots via cloud-init (libvirt NoCloud seed / EC2 user-data), and stamps the instance (libvirt `<metadata>` / EC2 tags). Errors if the name already exists anywhere (global-uniqueness). |
+| `devbox list` | List devbox-managed instances — name, provider, project, state, resources, uptime (EC2 rows show the instance type and a `($)` cost flag while running). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + EC2 (account-wide, by `devbox:managed` tag). |
 | `devbox up` | Start an already-defined, shut-off domain. Errors if undefined — run `create` first. |
 | `devbox stop` | Gracefully shut down (ACPI) a running domain. |
 | `devbox destroy` | Tear down the domain and its overlay disk (the cached base image is left alone). |
@@ -82,7 +82,7 @@ setup](#per-project-setup) for the `[aws]` config.
 | `devbox sync --envvars` | (Re-)write the box's devbox-managed 0600 `[env]` file — scoped creds/vars (`GITHUB_TOKEN`, API keys) into its shell env. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
 | `devbox sync --mods[=a,b,c]` | (Re-)run the provisioning **mods** over SSH against a running box — reconverge (bump jj, add a plugin, re-apply a project's rust mod) without destroy+create. Covers base **and** project mods. Idempotent; tees to `~/provision.log` (per-mod logs in `~/provision/`). No list runs the whole playbook; a comma-separated list runs just those (fast iteration). |
 | `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync — agent skills, git-excluded project files. Re-runnable + incremental. See "Host→box file sync" below. |
-| `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or AWS), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
+| `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or EC2), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
 | `devbox host` | Refresh the SSH alias used for `jj fetch` (below); prints the alias name. |
 
 `devbox sync` requires at least one of `--envvars`/`--mods`/`--files` (any
@@ -130,12 +130,12 @@ otherwise the project's libvirt default (bare-named = the project). Daily use
   sudo), or invoke `devbox` with sudo. `ubuntu-cloudimage-keyring` provides
   Canonical's signing key at `/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg`,
   used by `devbox create` to verify the base image's checksum (see below).
-- For the **AWS** provider (optional): configured AWS credentials (e.g. a named
+- For the **ec2** provider (optional): configured AWS credentials (e.g. a named
   profile) with EC2 permissions. `boto3` ships as a devbox dependency; the
-  `[aws]` global-config section enables it.
+  `[aws]` global-config section (the shared AWS account creds) enables it.
 - [`uv`](https://docs.astral.sh/uv/) — manages devbox's install and runtime
   environment (its dependencies: `pyyaml` for the cloud-config merge, `boto3`
-  for the AWS provider).
+  for the ec2 provider).
 - `jj` (jujutsu) and `rsync` on the host — for `devbox jj fetch` and `devbox
   sync` respectively (both also shipped in the box's base packages). Skip if you
   use neither.
@@ -183,19 +183,22 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    [env]                                # creds/vars injected into every box (see below)
    GITHUB_TOKEN = "github_pat_..."
 
-   [aws]                                # optional — only needed for --provider aws
+   [aws]                                # shared AWS account creds — needed for --provider ec2
    region = "us-east-1"                 # required if [aws] is present
    profile = "dev"                      # optional AWS named profile
+
+   [ec2]                                # optional — EC2-specific defaults
    default_security_groups = ["sg-..."] # optional
    default_subnets = ["subnet-a", "subnet-b"]  # optional; tried in order (capacity fallback)
    spot = true                          # optional default market (projects can override)
    ```
 
-   `[aws]` is optional and enables the AWS/EC2 provider. Omit it entirely on a
-   libvirt-only host — `devbox list` then never reaches for AWS credentials.
-   Single region/profile only for now (multi-region/profile deferred). `boto3`
-   is a declared dependency, so it's always installed, but only touched when you
-   actually use AWS.
+   `[aws]` holds the shared AWS account credentials and is what enables the
+   **ec2** provider; `[ec2]` holds the EC2-specific knobs (both optional). Omit
+   them entirely on a libvirt-only host — `devbox list` then never reaches for
+   AWS credentials. Single region/profile only for now (multi-region/profile
+   deferred). `boto3` is a declared dependency, so it's always installed, but
+   only touched when you actually use AWS.
 
    `[jj]` is optional — if unset, `devbox create` falls back to the host's
    own `jj config get user.name`/`user.email` (which you almost certainly
@@ -260,20 +263,20 @@ url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
 # [[repo.sync]]
 # src = ".claude/skills"         # -> ~/<repo.dir>/.claude/skills on the box
 
-[aws]                       # optional; EC2 launch defaults for --provider aws
-instance_type = "g5.xlarge"  # required if [aws] is present
+[ec2]                       # optional; EC2 launch defaults for --provider ec2
+instance_type = "g5.xlarge"  # required if [ec2] is present
 architecture = "x86_64"      # "x86_64" | "arm64" (drives the AMI lookup)
 # ami = "ami-0123..."        # optional: pin an explicit AMI (skips the lookup)
 # ami_name_filter = "..."    # optional: override the Ubuntu AMI name glob
-# spot = true                # optional: override the global [aws].spot default
+# spot = true                # optional: override the global [ec2].spot default
 # interruption_behavior = "stop"   # spot only: stop | terminate | hibernate
-# disk_gb (above) doubles as the EBS root volume size on AWS
+# disk_gb (above) doubles as the EBS root volume size on EC2
 ```
 
 A **project** is a label, not a machine: it can have several instances. The
 default one is a libvirt domain **bare-named = the project**, which `devbox
 create` (no args) makes. Cloud instances always carry an explicit name:
-`devbox create --provider aws --name binius-arm`.
+`devbox create --provider ec2 --name binius-arm`.
 
 Instance names encode the provider so every command can route to the right
 backend from the name alone — no API call or credential load just to find an
@@ -281,22 +284,22 @@ instance's owner. The scheme:
 
 - **Canonical name** = `<provider>-<name>` for cloud providers, **bare** for
   libvirt (local is the common case, and "bare = the project's libvirt
-  default" is worth keeping). So `create --provider aws --name binius-arm`
-  composes **`aws-binius-arm`** — that's the identity `devbox list` shows and
-  that every later command references: `devbox --name aws-binius-arm ssh`
-  queries AWS even from a libvirt-default project.
+  default" is worth keeping). So `create --provider ec2 --name binius-arm`
+  composes **`ec2-binius-arm`** — that's the identity `devbox list` shows and
+  that every later command references: `devbox --name ec2-binius-arm ssh`
+  queries EC2 even from a libvirt-default project.
 - `--provider` is **create-only**; `project.provider` is purely the
   bare-`create` default. Per-instance commands (`ip`/`ssh`/`status`/`stop`/
   `up`/`destroy`/`provision`/`host`/`jj fetch`) derive the provider by parsing the
   name: the first `-`-delimited segment routes to that provider if it's a known
-  keyword (`aws`, …), else libvirt.
+  keyword (`ec2`, …), else libvirt.
 - The `<provider>-` prefix is **added automatically** — pass the bare name to
-  `--name` (`binius-arm`, not `aws-binius-arm`). devbox rejects a `--name` (or
+  `--name` (`binius-arm`, not `ec2-binius-arm`). devbox rejects a `--name` (or
   a project name, for the bare libvirt case) that already starts with a known
   provider prefix, so a name can't misparse.
 - Provider-side, the prefix is redundant, so the **AWS console `Name` tag drops
-  it**: `aws-binius-arm` shows as `devbox-binius-arm` in EC2. devbox's own
-  addressing tag keeps the canonical `aws-binius-arm`.
+  it**: `ec2-binius-arm` shows as `devbox-binius-arm` in EC2. devbox's own
+  addressing tag keeps the canonical `ec2-binius-arm`.
 
 Instance names are globally unique across providers (the prefix makes that fall
 out for free). Every config key is optional; an empty `config.toml` is a valid
@@ -304,7 +307,7 @@ marker. `name` is no longer a field — devbox errors if it's present, to flag
 the migration.
 
 cfleet's "instance templates" (`instance_type`/`architecture`/AMI/`spot`) fold
-into this `[aws]` section; the same re-runnable provisioning (jj, dotfiles,
+into this `[ec2]` section; the same re-runnable provisioning (jj, dotfiles,
 Claude Code, `[repo]` bootstrap) runs on EC2 via cloud-init user-data, so a
 sandbox is identical whether it's a local libvirt VM or an EC2 instance.
 
@@ -534,7 +537,7 @@ The sandbox is a plain SSH-reachable git remote for the host, in both
 directions: the host **fetches** the agent's work to view/test it, and, for
 projects with no git server yet (`[repo] mode = "push"`), the host **pushes**
 to seed the sandbox with an initial commit. This is **identical whether the
-instance is libvirt or AWS** — the address is resolved through the provider
+instance is libvirt or EC2** — the address is resolved through the provider
 (libvirt DHCP lease or EC2 public IP); everything above that is the same
 jj-remote model. `[repo]` is project-level, so any instance in the project
 (`--name` to pick one) is fetched the same way.
@@ -618,6 +621,6 @@ The code is a `devbox/` package: `config` (global/project config), `provision`
 (modular mods — resolution, env context, payload/driver assembly), `cloudconfig`
 (cloud-config render + payload injection), `sync` (host→box rsync file sync),
 `cli` (subcommands + argparse), and a `providers/` package — a `Provider` seam
-(`providers/base.py`) with `libvirt` and `aws` implementations. Data files
+(`providers/base.py`) with `libvirt` and `ec2` implementations. Data files
 (`common-cloud-config.yaml`, `provision-driver.sh`, and the built-in
 `mods/*.sh`) live inside the package.
