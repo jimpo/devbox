@@ -1,13 +1,14 @@
 ---
 name: devbox
-description: devbox is a multi-project dev-sandbox VM manager for local libvirt VMs and AWS EC2 instances, provisioned by composable idempotent "mods". Covers what it is, its command set, and how to configure a project (`.devbox/config.toml`: repo bootstrap, mods, EC2) plus the global `~/.config/devbox/config.toml`. Use when asked to set up devbox for a project, create/manage a dev sandbox VM, or when devbox subcommands (create/up/ssh/provision/jj fetch/…) come up.
+description: devbox is a multi-project dev-sandbox VM manager for local libvirt VMs and AWS EC2 / Lightsail instances, provisioned by composable idempotent "mods". Covers what it is, its command set, and how to configure a project (`.devbox/config.toml`: repo bootstrap, mods, EC2, Lightsail) plus the global `~/.config/devbox/config.toml`. Use when asked to set up devbox for a project, create/manage a dev sandbox VM, or when devbox subcommands (create/up/ssh/provision/jj fetch/…) come up.
 allowed-tools: Bash(devbox *), Bash(jj *), Bash(git *), Bash(gh *), Read, Write, Edit, AskUserQuestion
 ---
 
 # devbox
 
-A multi-project dev-sandbox VM manager for two providers — **libvirt** (local
-VMs) and **ec2** (AWS EC2). All projects share one cached base image and a base
+A multi-project dev-sandbox VM manager for three providers — **libvirt** (local
+VMs), **ec2** (AWS EC2), and **aws** (AWS Lightsail — flat-rate bundles, no
+security groups to configure). All projects share one cached base image and a base
 playbook of idempotent provisioning **mods** (jj, dotfiles, Claude Code, GitHub
 auth, repo bootstrap) that devbox owns; each project adds only what's different
 via `.devbox/config.toml`. Full reference: `README.md` in this repo.
@@ -19,8 +20,8 @@ via `.devbox/config.toml`. Full reference: `README.md` in this repo.
 
 | Command | Behavior |
 |---|---|
-| `devbox create` | Boot + provision the project's default libvirt VM, or a named cloud instance with `--provider ec2 --name <n>`. |
-| `devbox list` | All devbox-managed instances (libvirt on this host + EC2 account-wide): name, provider, state, resources. |
+| `devbox create` | Boot + provision the project's default libvirt VM, or a named cloud instance with `--provider ec2\|aws --name <n>`. |
+| `devbox list` | All devbox-managed instances (libvirt on this host + EC2/Lightsail account-wide): name, provider, state, resources. |
 | `devbox up` / `stop` / `destroy` | Start / graceful-shutdown / tear down (destroy also deletes the disk). |
 | `devbox ip` / `ssh [-- args]` / `status` | Print IP / SSH in / show cloud-init progress + `~/provision.log`. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo (refreshes the SSH alias + `devbox-<name>` jj remote, runs `jj git fetch`). |
@@ -31,8 +32,8 @@ via `.devbox/config.toml`. Full reference: `README.md` in this repo.
 
 Instances: the libvirt default is **bare-named = the project**; cloud instances
 take an explicit `--name` and get a canonical `<provider>-<name>` (e.g.
-`ec2-foo`) — use that in later commands. `--provider` is create-only (the
-provider is derived from the name).
+`ec2-foo`, `aws-foo`) — use that in later commands. `--provider` is create-only
+(the provider is derived from the name).
 
 ## Configuration
 
@@ -46,9 +47,10 @@ provider is derived from the name).
   clones/pushes); `gh`/`git`/`jj git` read it. A project's `[env]` overrides
   per-key. Unset is fine for public repos.
 - `[aws] region` (+ optional `profile`) — the shared AWS account creds; enables
-  the ec2 provider. `[ec2]` (optional `default_security_groups`,
-  `default_subnets`, `spot`) holds the EC2-specific defaults. Omit both for a
-  libvirt-only host.
+  **both** the `ec2` and `aws` (Lightsail) providers. `[ec2]` (optional
+  `default_security_groups`, `default_subnets`, `spot`) holds the EC2-specific
+  defaults. Lightsail has no global section — its knobs are per-project. Omit
+  all of it for a libvirt-only host.
 - `[defaults]` (vcpus/memory_mib/disk_gb), `[ssh] pubkey_path`, `[base_image]
   url` — all defaulted.
 
@@ -78,7 +80,24 @@ src = ".claude/skills"
 [ec2]                    # only for --provider ec2
 instance_type = "m9g.xlarge"
 architecture = "arm64"    # x86_64 | arm64
+
+[lightsail]              # only for --provider aws; ALL keys optional (the whole
+                         #   section can be omitted — `provider = "aws"` suffices)
+# bundle = "xlarge_3_0"          # default: xlarge_3_0 = 16 GB RAM / 4 vCPU /
+                                 #   320 GB SSD (~$84/mo). No `architecture`
+                                 #   key: Lightsail bundles are x86-only.
+# blueprint = "ubuntu_24_04"     # the OS image; default = newest Ubuntu LTS
+                                 #   blueprint (older than the 26.04 userland
+                                 #   libvirt/ec2 boot)
+# availability_zone = "us-east-1b"   # default: <[aws].region> + "a"
 ```
+
+- **Lightsail (`--provider aws`) specifics:** a bundle fixes CPU/RAM/disk
+  together, so `disk_gb` is **ignored**, and bundles are **x86-only** (no ARM
+  tier, hence no `architecture` key); the public IPv4 is **dynamic** (no
+  static IP — `devbox ip`/`ssh` re-resolve it, so it may change across
+  `stop`/`up`); **port 22 is open by default** (no security groups); and
+  `--spot`/`--on-demand` are EC2-only and do nothing here.
 
 - `name` is **not** a field (it errors — an instance is no longer a project).
 - Exclude the dir locally (never `.gitignore`):

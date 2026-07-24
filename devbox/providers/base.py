@@ -9,14 +9,15 @@ import abc
 import dataclasses
 from typing import Optional
 
-from ..config import Ec2ProjectConfig
+from ..config import Ec2ProjectConfig, LightsailProjectConfig
 
 
 @dataclasses.dataclass
 class InstanceSpec:
     """What `create` needs to launch one instance. Common fields plus the
     provider-specific bits each backend reads (libvirt: vcpus/memory_mib; ec2:
-    the [ec2] launch config)."""
+    the [ec2] launch config; aws/Lightsail: the [lightsail] launch config, which
+    may be None since all of its fields have defaults)."""
     name: str
     project: str
     provider: str
@@ -26,13 +27,15 @@ class InstanceSpec:
     vcpus: Optional[int] = None
     memory_mib: Optional[int] = None
     ec2: Optional[Ec2ProjectConfig] = None
+    lightsail: Optional[LightsailProjectConfig] = None
 
 
 @dataclasses.dataclass
 class Instance:
     """One row of `devbox list`. `resources` is provider-formatted (libvirt:
-    vCPU/RAM; ec2: the instance type). `cost_hint` flags a paid provider so the
-    listing can mark running instances that are costing money."""
+    vCPU/RAM; ec2: the instance type; aws: the Lightsail bundle id). `cost_hint`
+    flags a paid provider so the listing can mark running instances that are
+    costing money."""
     name: str
     provider: str
     project: Optional[str]

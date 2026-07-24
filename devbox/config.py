@@ -23,7 +23,7 @@ REPO_MODES = ("none", "clone", "push")
 # Providers a project can launch instances on. Validated against `provider` in a
 # project's config and the `--provider` flag.
 DEFAULT_PROVIDER = "libvirt"
-PROVIDERS = ("libvirt", "ec2")
+PROVIDERS = ("libvirt", "ec2", "aws")
 
 # Providers whose instances carry a "<provider>-" prefix in their canonical
 # name. libvirt (the default) stays bare - local is the common case, and
@@ -58,6 +58,17 @@ DEFAULT_AMI_NAME_FILTER = {
     "x86_64": "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-*",
     "arm64": "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-arm64-server-*",
 }
+
+# Lightsail (the `aws` provider) defaults. Lightsail sells fixed bundles rather
+# than an instance type + EBS size, so the bundle picks CPU/RAM/disk together:
+# the default is the 16 GB / 4 vCPU / 320 GB tier (~$84/mo). Lightsail's Linux
+# lineup is x86-only - there are no ARM/Graviton bundles - so there is no
+# architecture knob; a project's [lightsail] section can pin a different
+# `bundle` (or a different `blueprint`).
+DEFAULT_LIGHTSAIL_BUNDLE = "xlarge_3_0"        # 16 GB / 4 vCPU / 320 GB
+# The newest Ubuntu LTS blueprint Lightsail offers - older than the 26.04
+# userland the libvirt/ec2 providers boot, which pull Ubuntu cloud images.
+DEFAULT_LIGHTSAIL_BLUEPRINT = "ubuntu_24_04"
 
 
 # Sentinel for a known section whose inner keys are user-defined (`[env]`) or
@@ -234,6 +245,26 @@ class Ec2ProjectConfig:
 
 
 @dataclasses.dataclass
+class LightsailProjectConfig:
+    """Per-project `[lightsail]` launch defaults for the `aws` provider. Every
+    field is optional: `provider = "aws"` with no `[lightsail]` section at all
+    launches on pure defaults. (The section name intentionally differs from the
+    provider name - `aws` is the user-facing provider, Lightsail the backend.)
+
+    There is no disk knob: a Lightsail bundle fixes CPU/RAM/disk together, so
+    the project's `disk_gb` is ignored on this provider. There is no
+    architecture knob either: Lightsail's Linux bundles are x86-only.
+    """
+    # Explicit Lightsail bundle id; when unset, DEFAULT_LIGHTSAIL_BUNDLE
+    # (xlarge_3_0 = 16 GB / 4 vCPU / 320 GB).
+    bundle: Optional[str] = None
+    blueprint: str = DEFAULT_LIGHTSAIL_BLUEPRINT   # OS image id
+    # When unset, the provider defaults to "<region>a" (the region is only known
+    # there, from the shared [aws] creds).
+    availability_zone: Optional[str] = None
+
+
+@dataclasses.dataclass
 class ProjectConfig:
     project: str                  # label/tag on instances (default: marker dir basename)
     provider: str                 # default provider for a bare `create` ("libvirt")
@@ -254,6 +285,7 @@ class ProjectConfig:
     # so hardcoding scoped creds here is acceptable.
     env: dict = dataclasses.field(default_factory=dict)
     ec2: Optional[Ec2ProjectConfig] = None
+    lightsail: Optional[LightsailProjectConfig] = None
 
 
 def _load_toml(path: Path) -> dict:
@@ -354,6 +386,20 @@ def _resolve_ec2_project_config(data: dict, config_path: Path) -> Optional[Ec2Pr
     )
 
 
+def _resolve_lightsail_project_config(data: dict, config_path: Path) -> Optional[LightsailProjectConfig]:
+    """Parse the optional `[lightsail]` section. Returns None when absent - the
+    provider substitutes an all-defaults config, so `provider = "aws"` alone is
+    a complete project."""
+    ls_data = data.get("lightsail")
+    if ls_data is None:
+        return None
+    return LightsailProjectConfig(
+        bundle=ls_data.get("bundle"),
+        blueprint=ls_data.get("blueprint", DEFAULT_LIGHTSAIL_BLUEPRINT),
+        availability_zone=ls_data.get("availability_zone"),
+    )
+
+
 def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
     marker_dir = find_project_dir(start)
     devbox_dir = marker_dir / PROJECT_MARKER_DIR
@@ -378,6 +424,7 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
             "env": _ANY_KEYS,   # arbitrary user-defined credentials/vars
             "ec2": {"instance_type", "architecture", "ami", "ami_name_filter",
                     "ami_owner", "spot", "interruption_behavior"},
+            "lightsail": {"bundle", "blueprint", "availability_zone"},
         },
         config_path=config_path,
     )
@@ -402,6 +449,7 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         sync=_resolve_sync(data, config_path, repo),
         env=_resolve_env(data, config_path),
         ec2=_resolve_ec2_project_config(data, config_path),
+        lightsail=_resolve_lightsail_project_config(data, config_path),
     )
 
 

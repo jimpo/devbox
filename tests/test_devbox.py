@@ -696,6 +696,12 @@ def test_parse_instance_name_provider_prefixed():
     assert devbox.parse_instance_name("ec2-binius-arm") == ("ec2", "binius-arm")
 
 
+def test_parse_instance_name_aws_prefixed():
+    # The Lightsail-backed provider is prefixed too, so aws-* routes to it.
+    assert devbox.parse_instance_name("aws-foo") == ("aws", "foo")
+    assert devbox.parse_instance_name("aws-binius-arm") == ("aws", "binius-arm")
+
+
 def test_parse_instance_name_unknown_prefix_is_libvirt():
     # A hyphen whose left segment isn't a known prefixed provider is just part of
     # a bare libvirt name (e.g. 'gcp-x' before gcp is a real provider).
@@ -758,6 +764,52 @@ def test_cmd_create_rejects_name_with_provider_prefix():
                              aws=devbox.AwsConfig(region="us-east-1"))
     with pytest.raises(SystemExit):
         devbox.cli.cmd_create(_create_args(provider="ec2", name="ec2-foo"), gc, _project())
+
+
+def test_cmd_create_rejects_aws_name_with_provider_prefix():
+    # Same guard for the aws provider: --name aws-foo would compose aws-aws-foo.
+    import dataclasses
+    gc = dataclasses.replace(_global_config(devbox.Path("/nonexistent")),
+                             aws=devbox.AwsConfig(region="us-east-1"))
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_create(_create_args(provider="aws", name="aws-foo"), gc, _project())
+
+
+def test_cmd_create_passes_lightsail_config_into_spec(monkeypatch, tmp_path, pubkey,
+                                                      common_template):
+    # The [lightsail] section has to reach the provider: without this, dropping
+    # `lightsail=project.lightsail` from the InstanceSpec would stay green,
+    # because every Lightsail field has a default.
+    import dataclasses
+
+    class _Stop(Exception):
+        """Ends cmd_create at create(); everything after it is SSH/provisioning."""
+
+    seen = {}
+
+    class _FakeProvider:
+        name = "aws"
+
+        def create(self, spec):
+            seen["spec"] = spec
+            raise _Stop
+
+    gc = dataclasses.replace(_global_config(pubkey),
+                             aws=devbox.AwsConfig(region="us-east-1"))
+    project = dataclasses.replace(
+        _project(marker_dir=tmp_path),
+        provider="aws",
+        lightsail=devbox.LightsailProjectConfig(bundle="medium_3_0"),
+    )
+    monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: _FakeProvider())
+    monkeypatch.setattr(devbox.cli, "_check_name_unique", lambda gc, name: None)
+    monkeypatch.setattr(devbox.cli, "build_payload", lambda project, gc: [])
+
+    with pytest.raises(_Stop):
+        devbox.cli.cmd_create(_create_args(provider="aws", name="foo-gpu"), gc, project)
+    spec = seen["spec"]
+    assert spec.name == "aws-foo-gpu" and spec.provider == "aws"
+    assert spec.lightsail is project.lightsail
 
 
 # ---- libvirt <metadata> stamp -----------------------------------------------
@@ -1356,10 +1408,11 @@ def test_ec2_provider_without_ec2_section_uses_empty_defaults():
     assert "InstanceMarketOptions" not in params
 
 
-def test_all_providers_gates_ec2_on_aws_creds():
+def test_all_providers_gates_aws_family_on_aws_creds():
+    # Both AWS-backed providers (ec2 + aws/Lightsail) appear only with creds.
     names = lambda gc: [p.name for p in devbox.all_providers(gc)]
     assert names(devbox.GlobalConfig.load(devbox.Path("/nonexistent"))) == ["libvirt"]
-    assert names(_ec2_gc()) == ["libvirt", "ec2"]
+    assert names(_ec2_gc()) == ["libvirt", "ec2", "aws"]
 
 
 def test_ec2_list_parses_and_flags_cost():
@@ -1503,6 +1556,291 @@ def test_ec2_start_stop_destroy_by_name():
     assert ops["start_instances"]["InstanceIds"] == ["i-123"]
     assert ops["stop_instances"]["InstanceIds"] == ["i-123"]
     assert ops["terminate_instances"]["InstanceIds"] == ["i-123"]
+
+
+# ---- aws (Lightsail) provider -----------------------------------------------
+class _FakeLightsail:
+    """Fake boto3 lightsail client: records calls, returns canned dicts.
+    `pages` is the list of instance-list pages get_instances walks (one page by
+    default), so pagination is exercised the way the real API paginates."""
+    def __init__(self, instances=None, pages=None):
+        self.calls = []
+        self._pages = pages if pages is not None else [list(instances or [])]
+
+    def get_instances(self, **kw):
+        self.calls.append(("get_instances", kw))
+        # pageToken is the index of the page to return; absent = the first page.
+        idx = int(kw.get("pageToken", 0))
+        nxt = idx + 1
+        return {"instances": list(self._pages[idx]),
+                "nextPageToken": str(nxt) if nxt < len(self._pages) else None}
+
+    def create_instances(self, **kw):
+        self.calls.append(("create_instances", kw))
+        return {"operations": [{"status": "Started"}]}
+
+    def start_instance(self, **kw):
+        self.calls.append(("start_instance", kw))
+        return {}
+
+    def stop_instance(self, **kw):
+        self.calls.append(("stop_instance", kw))
+        return {}
+
+    def delete_instance(self, **kw):
+        self.calls.append(("delete_instance", kw))
+        return {}
+
+
+def _aws_gc(region="us-west-2"):
+    """A global config with only the shared [aws] creds - the `aws` provider
+    needs no global section of its own."""
+    gc = devbox.GlobalConfig.load(devbox.Path("/nonexistent"))
+    gc.aws = devbox.AwsConfig(region=region, profile=None)
+    return gc
+
+
+def _ls_instance(canonical="aws-foo", bare="foo", state="running",
+                 bundle="xlarge_3_0", project="proj", public_ip="1.2.3.4",
+                 managed="true"):
+    """A get_instances entry. Lightsail tags are lowercase key/value (unlike
+    EC2's Key/Value), and the Lightsail-side `name` is the bare name while the
+    canonical devbox name lives in the devbox:name tag."""
+    tags = ([{"key": "devbox:name", "value": canonical}] if canonical is not None else []) + [
+        {"key": "devbox:project", "value": project},
+        {"key": "devbox:created-at", "value": "2026-07-21T10:00:00+00:00"},
+    ]
+    if managed is not None:
+        tags.append({"key": "devbox:managed", "value": managed})
+    inst = {"name": bare, "state": {"code": 16, "name": state},
+            "bundleId": bundle, "blueprintId": "ubuntu_24_04", "tags": tags}
+    if public_ip:
+        inst["publicIpAddress"] = public_ip
+    return inst
+
+
+_LS_DEFAULT_CFG = object()  # sentinel: "not passed" (None means "no section")
+
+
+def _ls_spec(name="aws-foo-gpu", lightsail=_LS_DEFAULT_CFG):
+    """An InstanceSpec for the aws provider. `lightsail` defaults to a plain
+    LightsailProjectConfig(); pass None for the no-[lightsail]-section case."""
+    cfg = devbox.LightsailProjectConfig() if lightsail is _LS_DEFAULT_CFG else lightsail
+    return devbox.InstanceSpec(
+        name=name, project="proj", provider="aws", disk_gb=64,
+        user_data="#cloud-config\n", created_at="2026-07-21T12:00:00+00:00",
+        lightsail=cfg,
+    )
+
+
+def _create_params(client):
+    return [kw for (op, kw) in client.calls if op == "create_instances"][0]
+
+
+def test_get_provider_aws_requires_aws_creds():
+    with pytest.raises(SystemExit):
+        devbox.get_provider("aws", devbox.GlobalConfig.load(devbox.Path("/nonexistent")))
+
+
+def test_get_provider_aws_configured():
+    assert isinstance(devbox.get_provider("aws", _aws_gc()), devbox.LightsailProvider)
+
+
+def test_lightsail_create_default_request_shape():
+    client = _FakeLightsail()
+    devbox.LightsailProvider(_aws_gc(region="us-west-2"), client=client).create(
+        _ls_spec(name="aws-foo-gpu"))
+    params = _create_params(client)
+    assert params["instanceNames"] == ["foo-gpu"]        # bare, prefix dropped
+    assert params["bundleId"] == "xlarge_3_0"            # 16 GB / 4 vCPU / 320 GB
+    assert params["blueprintId"] == "ubuntu_24_04"
+    assert params["availabilityZone"] == "us-west-2a"    # <region> + "a"
+    assert params["ipAddressType"] == "ipv4"
+    # Lightsail takes userData as plain text (EC2 base64s, Lightsail does not).
+    assert params["userData"] == "#cloud-config\n"
+    assert "keyPairName" not in params                   # SSH comes from cloud-init
+    tags = {t["key"]: t["value"] for t in params["tags"]}
+    assert tags["devbox:managed"] == "true"
+    assert tags["devbox:name"] == "aws-foo-gpu"          # addressing tag: canonical
+    assert tags["devbox:project"] == "proj"
+    assert tags["devbox:created-at"] == "2026-07-21T12:00:00+00:00"
+
+
+def test_lightsail_create_explicit_overrides_win():
+    client = _FakeLightsail()
+    cfg = devbox.LightsailProjectConfig(bundle="medium_3_0", blueprint="debian_12",
+                                        availability_zone="eu-central-1c")
+    devbox.LightsailProvider(_aws_gc(), client=client).create(_ls_spec(lightsail=cfg))
+    params = _create_params(client)
+    # An explicit bundle wins over DEFAULT_LIGHTSAIL_BUNDLE.
+    assert params["bundleId"] == "medium_3_0"
+    assert params["blueprintId"] == "debian_12"
+    assert params["availabilityZone"] == "eu-central-1c"
+
+
+def test_lightsail_create_without_lightsail_section_uses_defaults():
+    # [lightsail] is entirely optional: `provider = "aws"` alone is a complete
+    # project (unlike [ec2], which requires an instance_type).
+    client = _FakeLightsail()
+    devbox.LightsailProvider(_aws_gc(), client=client).create(_ls_spec(lightsail=None))
+    params = _create_params(client)
+    assert params["bundleId"] == "xlarge_3_0"
+    assert params["blueprintId"] == "ubuntu_24_04"
+    assert params["availabilityZone"] == "us-west-2a"
+
+
+def test_lightsail_create_ignores_disk_gb():
+    # The bundle fixes the disk, so there is no volume parameter to send.
+    client = _FakeLightsail()
+    devbox.LightsailProvider(_aws_gc(), client=client).create(_ls_spec())
+    assert not any(k in _create_params(client) for k in ("diskSize", "addOns", "disk_gb"))
+
+
+def test_lightsail_create_existing_dies():
+    client = _FakeLightsail([_ls_instance(canonical="aws-foo-gpu", bare="foo-gpu")])
+    provider = devbox.LightsailProvider(_aws_gc(), client=client)
+    with pytest.raises(SystemExit):
+        provider.create(_ls_spec(name="aws-foo-gpu"))
+    assert not any(op == "create_instances" for (op, _) in client.calls)
+
+
+def test_lightsail_create_bare_name_collision_dies(capsys):
+    # devbox drops the 'aws-' prefix AWS-side, so aws-foo-gpu wants the Lightsail
+    # name 'foo-gpu'. A pre-existing instance holding that name - even one devbox
+    # doesn't manage - must fail with our message, not a raw boto3 error.
+    client = _FakeLightsail([{"name": "foo-gpu", "state": {"name": "running"}, "tags": []}])
+    provider = devbox.LightsailProvider(_aws_gc(), client=client)
+    with pytest.raises(SystemExit):
+        provider.create(_ls_spec(name="aws-foo-gpu"))
+    assert not any(op == "create_instances" for (op, _) in client.calls)
+    assert "--name" in capsys.readouterr().err
+
+
+def test_lightsail_state_and_address_match_canonical_tag():
+    # Lookup is by the devbox:name tag, not the Lightsail-side bare name.
+    client = _FakeLightsail([_ls_instance(canonical="aws-foo", bare="foo")])
+    provider = devbox.LightsailProvider(_aws_gc(), client=client)
+    assert provider.state("aws-foo") == "running"
+    assert provider.address("aws-foo") == "1.2.3.4"
+    assert provider.state("foo") is None  # the bare name is not the devbox name
+
+
+def test_lightsail_state_and_address_none_when_absent():
+    provider = devbox.LightsailProvider(_aws_gc(), client=_FakeLightsail())
+    assert provider.state("aws-nope") is None
+    assert provider.address("aws-nope") is None
+
+
+def test_lightsail_address_none_before_ip_assigned():
+    # A pending instance has no publicIpAddress yet -> None (the create poll waits).
+    client = _FakeLightsail([_ls_instance(state="pending", public_ip=None)])
+    provider = devbox.LightsailProvider(_aws_gc(), client=client)
+    assert provider.state("aws-foo") == "pending"
+    assert provider.address("aws-foo") is None
+
+
+def test_lightsail_find_pages_through_results():
+    # get_instances has no filter param, so discovery pages the whole list.
+    client = _FakeLightsail(pages=[
+        [_ls_instance(canonical="aws-other", bare="other")],
+        [_ls_instance(canonical="aws-foo", bare="foo", public_ip="5.6.7.8")],
+    ])
+    provider = devbox.LightsailProvider(_aws_gc(), client=client)
+    assert provider.address("aws-foo") == "5.6.7.8"
+    assert len([1 for (op, _) in client.calls if op == "get_instances"]) == 2
+
+
+def test_lightsail_list_filters_and_flags_cost():
+    client = _FakeLightsail([
+        _ls_instance(canonical="aws-foo", bare="foo", bundle="xlarge_3_0"),
+        _ls_instance(canonical="aws-unmanaged", bare="unmanaged", managed=None),  # not ours
+        _ls_instance(canonical=None, bare="notag"),  # no devbox:name tag -> skipped
+    ])
+    instances = devbox.LightsailProvider(_aws_gc(), client=client).list()
+    assert len(instances) == 1
+    i = instances[0]
+    assert (i.name, i.provider, i.project, i.state, i.resources) == \
+        ("aws-foo", "aws", "proj", "running", "xlarge_3_0")
+    assert i.cost_hint is True
+
+
+def test_lightsail_start_stop_destroy_use_bare_instance_name():
+    client = _FakeLightsail([_ls_instance(canonical="aws-foo", bare="foo", state="stopped")])
+    provider = devbox.LightsailProvider(_aws_gc(), client=client)
+    provider.start("aws-foo")
+    provider.stop("aws-foo")
+    provider.destroy("aws-foo")
+    ops = {op: kw for (op, kw) in client.calls if op != "get_instances"}
+    assert ops["start_instance"] == {"instanceName": "foo"}
+    assert ops["stop_instance"] == {"instanceName": "foo"}
+    assert ops["delete_instance"] == {"instanceName": "foo"}
+
+
+def test_lightsail_destroy_missing_is_a_no_op(capsys):
+    client = _FakeLightsail()
+    devbox.LightsailProvider(_aws_gc(), client=client).destroy("aws-gone")
+    assert not any(op == "delete_instance" for (op, _) in client.calls)
+    assert "not found" in capsys.readouterr().out
+
+
+def test_lightsail_start_missing_dies():
+    provider = devbox.LightsailProvider(_aws_gc(), client=_FakeLightsail())
+    with pytest.raises(SystemExit):
+        provider.start("aws-gone")
+
+
+# ---- [lightsail] project config ---------------------------------------------
+def test_resolve_project_lightsail_section(tmp_path, global_config):
+    _write_marker(
+        tmp_path,
+        'provider = "aws"\n[lightsail]\nbundle = "medium_3_0"\n'
+        'blueprint = "debian_12"\navailability_zone = "us-east-1b"\n',
+    )
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.provider == "aws"
+    assert project.lightsail.bundle == "medium_3_0"
+    assert project.lightsail.blueprint == "debian_12"
+    assert project.lightsail.availability_zone == "us-east-1b"
+
+
+def test_resolve_project_lightsail_defaults(tmp_path, global_config):
+    # An empty [lightsail] section => default bundle / Ubuntu / region AZ.
+    _write_marker(tmp_path, 'provider = "aws"\n[lightsail]\n')
+    ls = devbox.resolve_project(tmp_path, global_config).lightsail
+    assert ls.bundle is None  # DEFAULT_LIGHTSAIL_BUNDLE is applied at create
+    assert ls.blueprint == devbox.DEFAULT_LIGHTSAIL_BLUEPRINT == "ubuntu_24_04"
+    assert ls.availability_zone is None  # defaulted to <region>a at create
+
+
+def test_resolve_project_no_lightsail_section_is_none(tmp_path, global_config):
+    # provider = "aws" with no section at all is valid; the provider defaults it.
+    _write_marker(tmp_path, 'provider = "aws"\n')
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.provider == "aws" and project.lightsail is None
+
+
+def test_resolve_project_lightsail_known_keys_no_warning(tmp_path, global_config, capsys):
+    _write_marker(
+        tmp_path,
+        '[lightsail]\nbundle = "medium_3_0"\n'
+        'blueprint = "ubuntu_24_04"\navailability_zone = "us-west-2b"\n',
+    )
+    devbox.resolve_project(tmp_path, global_config)
+    assert "unknown key" not in capsys.readouterr().err
+
+
+def test_resolve_project_lightsail_architecture_key_warns(tmp_path, global_config, capsys):
+    # Lightsail's Linux bundles are x86-only, so there is no architecture knob
+    # (unlike [ec2]); the key is unknown rather than silently accepted.
+    _write_marker(tmp_path, '[lightsail]\narchitecture = "arm64"\n')
+    devbox.resolve_project(tmp_path, global_config)
+    assert "unknown key 'lightsail.architecture'" in capsys.readouterr().err
+
+
+def test_resolve_project_unknown_lightsail_key_warns(tmp_path, global_config, capsys):
+    _write_marker(tmp_path, '[lightsail]\ninstance_type = "t3.micro"\n')  # an EC2 knob
+    devbox.resolve_project(tmp_path, global_config)
+    assert "unknown key 'lightsail.instance_type'" in capsys.readouterr().err
 
 
 # ---- destroy confirmation guard (JIM-69) ------------------------------------

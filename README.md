@@ -7,8 +7,8 @@ benchmarking on cloud VMs.
 devbox gives you an easy-to-use CLI for creating, managing, and interacting with
 those machines, and ships with an agent skill.
 
-It currently supports two VM providers: **libvirt** (local VMs) and **ec2**
-(AWS EC2).
+It currently supports three VM providers: **libvirt** (local VMs), **ec2**
+(AWS EC2), and **aws** (AWS Lightsail — flat-rate bundles, simpler than EC2).
 
 ## Basics & Architecture
 
@@ -64,15 +64,16 @@ jj new wip@devbox-my-project   # check it out locally
 
 `devbox stop` shuts the box down (keeping its disk); `devbox destroy` tears it
 down entirely. Launching a cloud box instead is the same flow with `devbox
-create --provider ec2 --name my-project-arm` — see [Per-project
-setup](#per-project-setup) for the `[ec2]` config.
+create --provider ec2 --name my-project-arm` (or `--provider aws` for
+Lightsail) — see [Per-project setup](#per-project-setup) for the `[ec2]` /
+`[lightsail]` config.
 
 ## Usage
 
 | Command | Behavior |
 |---|---|
-| `devbox create` | Launch the project's default libvirt VM (bare-named = the project), or a named cloud instance with `--provider ec2 --name <n>`. Renders + merges the cloud-config, first-boots via cloud-init (libvirt NoCloud seed / EC2 user-data), and stamps the instance (libvirt `<metadata>` / EC2 tags). Errors if the name already exists anywhere (global-uniqueness). |
-| `devbox list` | List devbox-managed instances — name, provider, project, state, resources, uptime (EC2 rows show the instance type and a `($)` cost flag while running). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + EC2 (account-wide, by `devbox:managed` tag). |
+| `devbox create` | Launch the project's default libvirt VM (bare-named = the project), or a named cloud instance with `--provider ec2\|aws --name <n>`. Renders + merges the cloud-config, first-boots via cloud-init (libvirt NoCloud seed / EC2 + Lightsail user-data), and stamps the instance (libvirt `<metadata>` / AWS tags). Errors if the name already exists anywhere (global-uniqueness). |
+| `devbox list` | List devbox-managed instances — name, provider, project, state, resources, uptime (cloud rows show the EC2 instance type / Lightsail bundle and a `($)` cost flag while running). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + EC2 + Lightsail (account-wide, by `devbox:managed` tag). |
 | `devbox up` | Start an already-defined, shut-off domain. Errors if undefined — run `create` first. |
 | `devbox stop` | Gracefully shut down (ACPI) a running domain. |
 | `devbox destroy` | Tear down the domain and its overlay disk (the cached base image is left alone). |
@@ -130,12 +131,13 @@ otherwise the project's libvirt default (bare-named = the project). Daily use
   sudo), or invoke `devbox` with sudo. `ubuntu-cloudimage-keyring` provides
   Canonical's signing key at `/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg`,
   used by `devbox create` to verify the base image's checksum (see below).
-- For the **ec2** provider (optional): configured AWS credentials (e.g. a named
-  profile) with EC2 permissions. `boto3` ships as a devbox dependency; the
-  `[aws]` global-config section (the shared AWS account creds) enables it.
+- For the **ec2** and **aws** (Lightsail) providers (optional): configured AWS
+  credentials (e.g. a named profile) with EC2 / Lightsail permissions. `boto3`
+  ships as a devbox dependency; the `[aws]` global-config section (the shared
+  AWS account creds) enables both providers.
 - [`uv`](https://docs.astral.sh/uv/) — manages devbox's install and runtime
   environment (its dependencies: `pyyaml` for the cloud-config merge, `boto3`
-  for the ec2 provider).
+  for the AWS providers).
 - `jj` (jujutsu) and `rsync` on the host — for `devbox jj fetch` and `devbox
   sync` respectively (both also shipped in the box's base packages). Skip if you
   use neither.
@@ -183,8 +185,8 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    [env]                                # creds/vars injected into every box (see below)
    GITHUB_TOKEN = "github_pat_..."
 
-   [aws]                                # shared AWS account creds — needed for --provider ec2
-   region = "us-east-1"                 # required if [aws] is present
+   [aws]                                # shared AWS account creds — needed for
+   region = "us-east-1"                 #   --provider ec2 and --provider aws
    profile = "dev"                      # optional AWS named profile
 
    [ec2]                                # optional — EC2-specific defaults
@@ -193,9 +195,11 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    spot = true                          # optional default market (projects can override)
    ```
 
-   `[aws]` holds the shared AWS account credentials and is what enables the
-   **ec2** provider; `[ec2]` holds the EC2-specific knobs (both optional). Omit
-   them entirely on a libvirt-only host — `devbox list` then never reaches for
+   `[aws]` holds the shared AWS account credentials and is what enables **both**
+   AWS-backed providers (**ec2** and **aws**/Lightsail); `[ec2]` holds the
+   EC2-specific knobs (both sections optional). Lightsail has no global section
+   at all — its knobs are all per-project, under `[lightsail]`. Omit them
+   entirely on a libvirt-only host — `devbox list` then never reaches for
    AWS credentials. Single region/profile only for now (multi-region/profile
    deferred). `boto3` is a declared dependency, so it's always installed, but
    only touched when you actually use AWS.
@@ -271,6 +275,19 @@ architecture = "x86_64"      # "x86_64" | "arm64" (drives the AMI lookup)
 # spot = true                # optional: override the global [ec2].spot default
 # interruption_behavior = "stop"   # spot only: stop | terminate | hibernate
 # disk_gb (above) doubles as the EBS root volume size on EC2
+
+[lightsail]                 # optional; launch defaults for --provider aws
+                            #   (Lightsail). Every key has a default, so the
+                            #   section can be omitted entirely.
+# bundle = "xlarge_3_0"     # optional: pin an explicit Lightsail bundle id.
+                            #   Default: xlarge_3_0 — 16 GB RAM / 4 vCPU /
+                            #   320 GB SSD (~$84/mo). x86 only: Lightsail has
+                            #   no ARM bundles, so there is no `architecture`.
+# blueprint = "ubuntu_24_04"        # optional: the OS image. Default = the
+                            #   newest Ubuntu LTS blueprint Lightsail offers,
+                            #   which trails the 26.04 libvirt/ec2 userland.
+# availability_zone = "us-east-1b"  # optional; default = <[aws].region> + "a"
+# disk_gb does NOT apply here — a Lightsail bundle fixes CPU/RAM/disk together
 ```
 
 A **project** is a label, not a machine: it can have several instances. The
@@ -292,14 +309,15 @@ instance's owner. The scheme:
   bare-`create` default. Per-instance commands (`ip`/`ssh`/`status`/`stop`/
   `up`/`destroy`/`provision`/`host`/`jj fetch`) derive the provider by parsing the
   name: the first `-`-delimited segment routes to that provider if it's a known
-  keyword (`ec2`, …), else libvirt.
+  keyword (`ec2`, `aws`, …), else libvirt.
 - The `<provider>-` prefix is **added automatically** — pass the bare name to
   `--name` (`binius-arm`, not `ec2-binius-arm`). devbox rejects a `--name` (or
   a project name, for the bare libvirt case) that already starts with a known
   provider prefix, so a name can't misparse.
-- Provider-side, the prefix is redundant, so the **AWS console `Name` tag drops
-  it**: `ec2-binius-arm` shows as `devbox-binius-arm` in EC2. devbox's own
-  addressing tag keeps the canonical `ec2-binius-arm`.
+- Provider-side, the prefix is redundant, so the **AWS-side name drops it**:
+  `ec2-binius-arm` shows as `devbox-binius-arm` in the EC2 console, and
+  `aws-binius-arm` is created as the Lightsail instance `binius-arm`. devbox's
+  own `devbox:name` addressing tag keeps the canonical prefixed name on both.
 
 Instance names are globally unique across providers (the prefix makes that fall
 out for free). Every config key is optional; an empty `config.toml` is a valid
@@ -310,6 +328,30 @@ cfleet's "instance templates" (`instance_type`/`architecture`/AMI/`spot`) fold
 into this `[ec2]` section; the same re-runnable provisioning (jj, dotfiles,
 Claude Code, `[repo]` bootstrap) runs on EC2 via cloud-init user-data, so a
 sandbox is identical whether it's a local libvirt VM or an EC2 instance.
+
+The **aws** provider is AWS **Lightsail**: the same cloud-init user-data and the
+same provisioning, but flat-rate *bundles* instead of an instance type plus an
+EBS volume. Trade-offs worth knowing:
+
+- **Bundles fix the machine.** A bundle sets CPU, RAM, and disk together, so
+  `disk_gb` is ignored on this provider. The default, `xlarge_3_0`, is 16 GB RAM
+  / 4 vCPU / 320 GB SSD (~$84/mo). Set `bundle` to pin any other tier. There is
+  no `architecture` knob: Lightsail's Linux bundles are **x86-only** (no
+  ARM/Graviton tier), unlike `[ec2]`.
+- **The OS trails a little.** `blueprint` defaults to `ubuntu_24_04`, the newest
+  Ubuntu LTS blueprint Lightsail offers — an older userland than the Ubuntu
+  26.04 cloud image the libvirt and ec2 providers boot. The mods provision the
+  same way on it; pin `blueprint` if you want something else.
+- **Dynamic public IPv4.** No static IP is allocated (so none is left behind to
+  pay for or release); `devbox ip`/`ssh` re-resolve the current address on every
+  command, which is what makes a post-`stop`/`up` address change a non-event.
+- **Port 22 is open by default** on a Lightsail instance, so there are no
+  security groups to configure — hence no global `[lightsail]` section.
+- **No spot market:** `--spot`/`--on-demand` are EC2-only and are ignored here.
+
+`devbox create --provider aws --name binius-box` needs nothing but `[aws]`
+creds; a project can select it with `provider = "aws"` and no `[lightsail]`
+section at all.
 
 `[repo]` drives how the sandbox gets your code, via devbox's common
 cloud-config template (see below) — no project needs to author this by hand:
@@ -537,8 +579,9 @@ The sandbox is a plain SSH-reachable git remote for the host, in both
 directions: the host **fetches** the agent's work to view/test it, and, for
 projects with no git server yet (`[repo] mode = "push"`), the host **pushes**
 to seed the sandbox with an initial commit. This is **identical whether the
-instance is libvirt or EC2** — the address is resolved through the provider
-(libvirt DHCP lease or EC2 public IP); everything above that is the same
+instance is libvirt, EC2, or Lightsail** — the address is resolved through the
+provider (libvirt DHCP lease, or the cloud instance's public IP); everything
+above that is the same
 jj-remote model. `[repo]` is project-level, so any instance in the project
 (`--name` to pick one) is fetched the same way.
 
@@ -552,7 +595,8 @@ and `devbox host` set up/refresh:
   instance's current IP (from the provider), SSH user, and
   `StrictHostKeyChecking accept-new` scoped to that dedicated known-hosts file
   — regenerated on every call since the address can change across `stop`/`up`
-  cycles (a libvirt DHCP lease, or a new EC2 public IP after stop/start).
+  cycles (a libvirt DHCP lease, or a new public IP after stop/start — Lightsail
+  boxes use a dynamic IPv4, so this is expected there rather than exceptional).
 - A one-time, idempotent `Include ~/.config/devbox/ssh/*.conf` line in
   `~/.ssh/config`.
 
@@ -621,6 +665,7 @@ The code is a `devbox/` package: `config` (global/project config), `provision`
 (modular mods — resolution, env context, payload/driver assembly), `cloudconfig`
 (cloud-config render + payload injection), `sync` (host→box rsync file sync),
 `cli` (subcommands + argparse), and a `providers/` package — a `Provider` seam
-(`providers/base.py`) with `libvirt` and `ec2` implementations. Data files
+(`providers/base.py`) with `libvirt`, `ec2`, and `lightsail` (the `aws`
+provider) implementations. Data files
 (`common-cloud-config.yaml`, `provision-driver.sh`, and the built-in
 `mods/*.sh`) live inside the package.

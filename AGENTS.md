@@ -22,14 +22,19 @@ the libvirt
 `<metadata>` stamp/parse + `list` formatting (monkeypatched `virsh`), and the
 **EC2 provider against a fake EC2 client** (`Ec2Provider` with an injected
 `client=`: list/state/address, run-instances request shape, spot, AMI lookup,
-subnet capacity fallback, lifecycle), and the jj-remote wiring for `devbox jj
+subnet capacity fallback, lifecycle), the **aws/Lightsail provider against a
+fake Lightsail client** (`LightsailProvider` with an injected `client=`:
+create-instances request shape incl. bundle/blueprint/AZ defaults, client-side
+tag discovery + paging, the bare-name collision guard, list/state/address,
+lifecycle), and the jj-remote wiring for `devbox jj
 fetch` (`_ensure_jj_remote` add/set-url/noop with a monkeypatched `subprocess`).
 It does not and cannot exercise `create`/`up`/`stop`/`destroy`/`host`/`provision`/
 `list`/`jj fetch` end-to-end against real infra (`jj fetch`'s actual `jj git
 fetch` needs a
 booted, provisioned instance), the actual behavior of the built-in mods or the
 driver on a real box (jj install, dotfiles, Claude Code, repo bootstrap), or a
-live EC2 launch — those need a real libvirt daemon + booted VM, or real AWS.
+live EC2/Lightsail launch — those need a real libvirt daemon + booted VM, or
+real AWS.
 Verify such changes by reading the `virsh`/`virt-install`/boto3 calls, the
 rendered cloud-config, and the mod/driver scripts (`bash -n`, shellcheck)
 carefully; with a real libvirt setup, exercise by hand (`devbox create` +
@@ -49,8 +54,8 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 `devbox/` is a package split by concern:
 
 - `config.py` — global (`GlobalConfig`, incl. `[aws]` shared AWS creds, `[ec2]`
-  EC2 globals, `[env]`) + per-project (`ProjectConfig`, incl. `[ec2]`, `mods`,
-  `sync`, `env`, `marker_dir`) config,
+  EC2 globals, `[env]`) + per-project (`ProjectConfig`, incl. `[ec2]`,
+  `[lightsail]`, `mods`, `sync`, `env`, `marker_dir`) config,
   marker resolution, `resolve_instance`/`parse_instance_name`.
 - `sync.py` — host→box file sync (`[[sync]]`/`[[repo.sync]]`) via `run_sync`
   (per-mirror-unit rsync jobs over the `devbox-<name>` alias), and `run_envvars`
@@ -66,10 +71,13 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 - `cloudconfig.py` — token substitution (`%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%`) +
   common+project merge only. The cloud-config carries just base setup
   (user/packages/BASH_ENV) — no provisioning payload; provisioning runs over SSH
-  after boot. One cloud-config, two providers (libvirt NoCloud seed / EC2 user-data).
+  after boot. One cloud-config, every provider (libvirt NoCloud seed / EC2
+  base64 user-data / Lightsail plain-text user-data).
 - `providers/` — the backend seam. `base.py` (`Provider` ABC, `InstanceSpec`,
-  `Instance`); `libvirt.py`; `ec2.py` (boto3, lazily imported + injectable client
-  for tests); `__init__.py` (`get_provider`, `all_providers` — ec2 gated on
+  `Instance`); `libvirt.py`; `ec2.py` and `lightsail.py` (the `aws` provider;
+  both boto3, lazily imported + injectable client
+  for tests); `__init__.py` (`get_provider`, `all_providers` — the AWS-backed
+  providers, `AWS_PROVIDERS = ("ec2", "aws")`, gated on
   `[aws]` creds being configured). Only `create`/`start`/`stop`/`destroy`/`state`/
   `address`/`list` are per-backend; everything above (config, render,
   provisioning, ssh/exec, target resolution, list aggregation) is shared, and
@@ -81,4 +89,4 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 `pyproject.toml` (hatchling) declares the `devbox.cli:main` entry point,
 force-includes the package data files (`common-cloud-config.yaml`,
 `provision-driver.sh`, `mods/`) into the wheel, and declares runtime deps
-`pyyaml` (cloud-config merge) + `boto3` (ec2 provider).
+`pyyaml` (cloud-config merge) + `boto3` (the ec2 + aws/Lightsail providers).

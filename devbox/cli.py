@@ -139,6 +139,7 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
     name = compose_instance_name(provider_name, bare)
     _check_name_unique(gc, name)
 
+    # --spot/--on-demand are EC2-only knobs; Lightsail has no spot market.
     ec2_cfg = project.ec2
     if ec2_cfg is not None and (args.spot or args.on_demand):
         ec2_cfg = dataclasses.replace(ec2_cfg, spot=bool(args.spot))
@@ -157,6 +158,7 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
         vcpus=project.vcpus,
         memory_mib=project.memory_mib,
         ec2=ec2_cfg,
+        lightsail=project.lightsail,
     )
     provider.create(spec)
 
