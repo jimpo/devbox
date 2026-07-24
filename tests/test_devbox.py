@@ -31,7 +31,7 @@ def test_global_config_defaults_when_missing(tmp_path):
     assert gc.disk_gb == devbox.DEFAULT_DISK_GB
     assert gc.jj_name is None
     assert gc.jj_email is None
-    assert gc.github_token is None
+    assert gc.env == {}
 
 
 def test_global_config_overrides(tmp_path):
@@ -56,8 +56,9 @@ pubkey_path = "~/.ssh/other.pub"
 name = "Alice Example"
 email = "alice@example.com"
 
-[github]
-token = "ghp_exampletoken"
+[env]
+GITHUB_TOKEN = "github_pat_example"
+SOME_API_KEY = "sk-123"
 """)
     gc = devbox.GlobalConfig.load(path)
     assert gc.libvirt_uri == "qemu:///session"
@@ -70,7 +71,7 @@ token = "ghp_exampletoken"
     assert gc.ssh_pubkey_path == devbox.Path("~/.ssh/other.pub").expanduser()
     assert gc.jj_name == "Alice Example"
     assert gc.jj_email == "alice@example.com"
-    assert gc.github_token == "ghp_exampletoken"
+    assert gc.env == {"GITHUB_TOKEN": "github_pat_example", "SOME_API_KEY": "sk-123"}
 
 
 def test_global_config_partial_override_keeps_other_defaults(tmp_path):
@@ -145,16 +146,21 @@ def test_resolve_project_overrides_defaults(tmp_path, global_config):
     assert project.user == "alice"
 
 
-def test_resolve_project_github_token(tmp_path, global_config):
-    _write_marker(tmp_path, '[github]\ntoken = "ghp_projecttoken"\n')
+def test_resolve_project_env(tmp_path, global_config):
+    _write_marker(tmp_path, '[env]\nGITHUB_TOKEN = "github_pat_proj"\n')
     project = devbox.resolve_project(tmp_path, global_config)
-    assert project.github_token == "ghp_projecttoken"
+    assert project.env == {"GITHUB_TOKEN": "github_pat_proj"}
 
 
-def test_resolve_project_github_token_defaults_none(tmp_path, global_config):
+def test_resolve_project_env_defaults_empty(tmp_path, global_config):
     _write_marker(tmp_path, 'project = "myproj"\n')
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.github_token is None
+    assert devbox.resolve_project(tmp_path, global_config).env == {}
+
+
+def test_resolve_project_env_non_string_dies(tmp_path, global_config):
+    _write_marker(tmp_path, '[env]\nPORT = 8080\n')  # values must be strings
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
 
 
 def test_resolve_project_legacy_name_field_dies(tmp_path, global_config):
@@ -284,7 +290,7 @@ def pubkey(tmp_path):
     return path
 
 
-def _project(cloud_config=None, mode="none", dir="", url=None, github_token=None,
+def _project(cloud_config=None, mode="none", dir="", url=None, env=None,
              marker_dir=None, mods=None, sync=None):
     return devbox.ProjectConfig(
         project="test-project", provider="libvirt", cloud_config=cloud_config, user="alice",
@@ -293,16 +299,17 @@ def _project(cloud_config=None, mode="none", dir="", url=None, github_token=None
         marker_dir=marker_dir or devbox.Path("/proj"),
         mods=mods if mods is not None else [],
         sync=sync if sync is not None else [],
-        github_token=github_token,
+        env=env if env is not None else {},
     )
 
 
 def _global_config(pubkey_path, jj_name="Alice Example", jj_email="alice@example.com",
-                    github_token="ghp_testtoken"):
+                    env=None):
     return devbox.GlobalConfig(
         libvirt_uri="qemu:///system", network="default", cache_dir=devbox.Path("/tmp"),
         base_image_url="http://example/x.img", vcpus=6, memory_mib=1024, disk_gb=10,
-        ssh_pubkey_path=pubkey_path, jj_name=jj_name, jj_email=jj_email, github_token=github_token,
+        ssh_pubkey_path=pubkey_path, jj_name=jj_name, jj_email=jj_email,
+        env=env if env is not None else {},
     )
 
 
@@ -371,29 +378,20 @@ def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubke
     assert "export DEVBOX_USER=alice" in ctx
     assert "export DEVBOX_JJ_NAME='Alice Example'" in ctx   # shell-quoted (space)
     assert "export DEVBOX_REPO_MODE=clone" in ctx
-    assert "DEVBOX_GITHUB_TOKEN" not in ctx                 # the PAT is not in context.env
+    # Creds ([env]) are NOT in the payload - they're delivered separately as the
+    # box's 0600 ~/.config/devbox/env (see run_envvars).
+    assert "secret.env" not in payload
+    assert "GITHUB_TOKEN" not in ctx
     for name in devbox.DEFAULT_BASE_MODS:
         assert f"mods/{name}.sh" in payload
 
 
-def test_build_payload_secret_env_is_0600_and_holds_token(isolated_mods, pubkey):
-    payload = _payload_map(_project(), _global_config(pubkey))
-    assert payload["secret.env"].mode == 0o600
-    assert payload["secret.env"].secret is True
-    assert "export DEVBOX_GITHUB_TOKEN=ghp_testtoken" in payload["secret.env"].content
-
-
-def test_build_payload_project_token_overrides_global(isolated_mods, pubkey):
-    gc = _global_config(pubkey, github_token="ghp_global")
-    payload = _payload_map(_project(github_token="ghp_project"), gc)
-    assert "ghp_project" in payload["secret.env"].content
-
-
-def test_build_payload_no_secret_when_token_unset(isolated_mods, pubkey, capsys):
-    gc = _global_config(pubkey, github_token=None)
-    payload = _payload_map(_project(github_token=None), gc)
+def test_build_payload_carries_no_creds(isolated_mods, pubkey):
+    # Even with a global [env] token set, build_payload never embeds it.
+    gc = _global_config(pubkey, env={"GITHUB_TOKEN": "github_pat_x"})
+    payload = _payload_map(_project(env={"SOME_KEY": "v"}), gc)
     assert "secret.env" not in payload
-    assert "no GitHub token found" in capsys.readouterr().out
+    assert not any("github_pat_x" in pf.content for pf in payload.values())
 
 
 def test_build_payload_appends_project_mods(isolated_mods, pubkey, tmp_path):
@@ -424,27 +422,21 @@ def test_build_payload_jj_identity_host_fallback(isolated_mods, pubkey, monkeypa
     assert "export DEVBOX_JJ_EMAIL=host@example.com" in ctx
 
 
-# ---- resolve_github_token ---------------------------------------------------
-def test_resolve_github_token_from_global_config():
-    gc = _global_config(devbox.Path("/nonexistent"), github_token="ghp_fromconfig")
-    assert devbox.resolve_github_token(_project(), gc) == "ghp_fromconfig"
+# ---- resolve_env (global + project [env], project overrides per-key) --------
+def test_resolve_env_merges_global_and_project():
+    gc = _global_config(devbox.Path("/nonexistent"),
+                        env={"GITHUB_TOKEN": "g_tok", "SHARED": "global"})
+    project = _project(env={"SHARED": "project", "PROJECT_ONLY": "p"})
+    assert devbox.resolve_env(project, gc) == {
+        "GITHUB_TOKEN": "g_tok",     # global-only key kept
+        "SHARED": "project",         # project overrides global per-key
+        "PROJECT_ONLY": "p",         # project-only key added
+    }
 
 
-def test_resolve_github_token_project_overrides_global():
-    gc = _global_config(devbox.Path("/nonexistent"), github_token="ghp_global")
-    assert devbox.resolve_github_token(_project(github_token="ghp_project"), gc) == "ghp_project"
-
-
-def test_resolve_github_token_falls_back_to_global_when_project_unset():
-    gc = _global_config(devbox.Path("/nonexistent"), github_token="ghp_global")
-    assert devbox.resolve_github_token(_project(github_token=None), gc) == "ghp_global"
-
-
-def test_resolve_github_token_none_when_unset_is_not_fatal():
-    # An unresolved GitHub token must NOT raise - it's best-effort (public
-    # repos / non-"clone" [repo] modes never need it).
-    gc = _global_config(devbox.Path("/nonexistent"), github_token=None)
-    assert devbox.resolve_github_token(_project(github_token=None), gc) is None
+def test_resolve_env_empty_when_neither_set():
+    gc = _global_config(devbox.Path("/nonexistent"))
+    assert devbox.resolve_env(_project(), gc) == {}
 
 
 # ---- provisioning: mods, env, payload ---------------------------------------
@@ -511,14 +503,14 @@ def test_build_tarball_roundtrips_payload():
     import tarfile
     payload = [
         devbox.PayloadFile("provision-driver.sh", "#!/bin/sh\n", 0o755),
-        devbox.PayloadFile("secret.env", "export DEVBOX_GITHUB_TOKEN=t\n", 0o600, secret=True),
+        devbox.PayloadFile("context.env", "export DEVBOX_USER=alice\n", 0o644),
         devbox.PayloadFile("mods/jj.sh", "echo jj\n", 0o755),
     ]
     tar_bytes = devbox.build_tarball(payload)
     with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
         members = {m.name: m for m in tar.getmembers()}
-        assert set(members) == {"provision-driver.sh", "secret.env", "mods/jj.sh"}
-        assert members["secret.env"].mode == 0o600
+        assert set(members) == {"provision-driver.sh", "context.env", "mods/jj.sh"}
+        assert members["context.env"].mode == 0o644
         assert members["provision-driver.sh"].mode == 0o755
         assert tar.extractfile("mods/jj.sh").read() == b"echo jj\n"
 
@@ -979,9 +971,35 @@ def test_run_sync_dies_on_rsync_failure(tmp_path, monkeypatch):
         devbox.run_sync(proj, "devbox-foo", host_home=str(tmp_path), guest_home="/home/alice")
 
 
-def _sync_args(files=False, mods=None):
+def test_run_envvars_writes_managed_file_and_wires_zshenv(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        captured["input"] = kw.get("input")
+        return _cp(argv, 0)
+
+    monkeypatch.setattr(devbox.subprocess, "run", fake_run)
+    devbox.run_envvars("devbox-foo", {"GITHUB_TOKEN": "github_pat_x", "K": "v w"})
+    assert captured["argv"][:4] == ["ssh", "devbox-foo", "bash", "-c"]
+    remote = captured["argv"][4]
+    # writes the managed 0600 file and ensures ~/.zshenv sources it
+    assert "$HOME/.config/devbox/env" in remote
+    assert "umask 077" in remote
+    assert "$HOME/.zshenv" in remote
+    # the creds are piped over stdin (never in the command / a log), shell-quoted
+    assert captured["input"] == b"export GITHUB_TOKEN=github_pat_x\nexport K='v w'\n"
+
+
+def test_run_envvars_dies_on_failure(monkeypatch):
+    monkeypatch.setattr(devbox.subprocess, "run", lambda argv, **k: _cp(argv, 1))
+    with pytest.raises(SystemExit):
+        devbox.run_envvars("devbox-foo", {"K": "v"})
+
+
+def _sync_args(envvars=False, files=False, mods=None):
     import argparse
-    return argparse.Namespace(name=None, project_dir=None, files=files, mods=mods)
+    return argparse.Namespace(name=None, project_dir=None, envvars=envvars, files=files, mods=mods)
 
 
 def test_split_mods_parsing():
@@ -992,7 +1010,7 @@ def test_split_mods_parsing():
 
 def test_cmd_sync_requires_a_flag():
     gc = _global_config(devbox.Path("/nonexistent"))
-    with pytest.raises(SystemExit):  # neither --files nor --mods
+    with pytest.raises(SystemExit):  # none of --envvars/--mods/--files
         devbox.cli.cmd_sync(_sync_args(), gc, _project())
 
 

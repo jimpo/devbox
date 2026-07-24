@@ -18,11 +18,39 @@ from __future__ import annotations
 
 import dataclasses
 import posixpath
+import shlex
 import subprocess
 from pathlib import Path
 
 from .config import ProjectConfig
+from .provision import render_env_file
 from .util import die
+
+# The box-side, devbox-managed 0600 env file (in the dev user's home). Holds the
+# effective [env] map as `export KEY=val` lines; sourced from ~/.bash_env (the
+# driver's BASH_ENV target, what non-interactive bash reads) and ~/.zshenv
+# (interactive zsh) so the creds reach both the agent's Bash tool and a human.
+GUEST_ENV_REL = ".config/devbox/env"
+_ENV_SOURCE_LINE = '[ -f "$HOME/.config/devbox/env" ] && . "$HOME/.config/devbox/env"'
+
+
+def run_envvars(alias: str, env: dict) -> None:
+    """Write the box's devbox-managed [env] file (0600) from `env` and ensure the
+    user's ~/.zshenv sources it (~/.bash_env is wired by the provisioning driver).
+    Full rewrite each run - a key dropped from config is dropped from the box.
+    Content is piped over stdin (never echoed to a log)."""
+    content = render_env_file(env)
+    remote = (
+        'set -e; mkdir -p "$HOME/.config/devbox"; '
+        'umask 077 && cat > "$HOME/.config/devbox/env"; '
+        'touch "$HOME/.zshenv"; '
+        f'grep -qxF {shlex.quote(_ENV_SOURCE_LINE)} "$HOME/.zshenv" || '
+        f'printf "%s\\n" {shlex.quote(_ENV_SOURCE_LINE)} >> "$HOME/.zshenv"'
+    )
+    result = subprocess.run(
+        ["ssh", alias, "bash", "-c", shlex.quote(remote)], input=content.encode())
+    if result.returncode != 0:
+        die(f"writing the box's [env] file failed (exit {result.returncode})")
 
 
 @dataclasses.dataclass

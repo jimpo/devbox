@@ -60,8 +60,7 @@ class PayloadFile:
     root (the per-run temp dir the tarball is extracted into on the box)."""
     path: str          # relative path, e.g. "provision-driver.sh" or "mods/jj.sh"
     content: str
-    mode: int          # unix permission bits (e.g. 0o755, 0o600)
-    secret: bool = False
+    mode: int          # unix permission bits (e.g. 0o755, 0o644)
 
 
 # ---- host identity resolution (jj / GitHub) ---------------------------------
@@ -87,12 +86,12 @@ def resolve_jj_identity(gc: GlobalConfig) -> tuple:
     return name, email
 
 
-def resolve_github_token(project: ProjectConfig, gc: GlobalConfig) -> Optional[str]:
-    """[github] token, project overriding global: project's .devbox/config.toml
-    -> global config -> none. Best-effort, not required: cloning a public repo
-    or [repo] mode "push"/"none" never need GitHub HTTPS auth in the sandbox at
-    all."""
-    return project.github_token or gc.github_token
+def resolve_env(project: ProjectConfig, gc: GlobalConfig) -> dict:
+    """The effective `[env]` map for a box: the global creds/vars, with the
+    project's `[env]` overriding per-key. Injected into the box's shell env (see
+    sync.run_envvars) and exported into the provisioning run so mods that need a
+    cred at provision time (e.g. repo-bootstrap's private `jj git clone`) see it."""
+    return {**gc.env, **project.env}
 
 
 # ---- mod resolution ---------------------------------------------------------
@@ -123,18 +122,12 @@ def resolve_mod(name: str, marker_dir: Path,
 
 
 # ---- environment context (not %TOKEN% substitution) -------------------------
-def _provision_env(project: ProjectConfig, gc: GlobalConfig) -> tuple:
-    """(context, secret) env dicts the driver exposes to every mod. Context is
-    non-secret (safe to trace); secret holds only the GitHub PAT, kept out of
-    any log."""
+def _provision_context(project: ProjectConfig, gc: GlobalConfig) -> dict:
+    """The DEVBOX_* provisioning context the driver exposes to every mod
+    (non-secret, safe to trace). User credentials/vars are delivered separately
+    as the box's [env] file (see sync.run_envvars), not in the payload."""
     jj_name, jj_email = resolve_jj_identity(gc)
-    github_token = resolve_github_token(project, gc)
-    if github_token is None:
-        print("note: no GitHub token found ([github].token in the project's "
-              ".devbox/config.toml or the global config) - the sandbox will have "
-              "no GitHub HTTPS auth. Fine for cloning public repos; set one up if "
-              "the project needs a private repo or gh/git pushes to GitHub.")
-    context = {
+    return {
         "DEVBOX_USER": project.user,
         "DEVBOX_JJ_NAME": jj_name,
         "DEVBOX_JJ_EMAIL": jj_email,
@@ -142,8 +135,6 @@ def _provision_env(project: ProjectConfig, gc: GlobalConfig) -> tuple:
         "DEVBOX_REPO_DIR": project.repo.dir,
         "DEVBOX_REPO_URL": project.repo.url or "",
     }
-    secret = {"DEVBOX_GITHUB_TOKEN": github_token} if github_token else {}
-    return context, secret
 
 
 def render_env_file(env: dict) -> str:
@@ -163,15 +154,13 @@ def build_payload(project: ProjectConfig, gc: GlobalConfig) -> list:
             f"{DRIVER_PATH} (broken install?)")
 
     names = effective_mods(project)
-    context, secret = _provision_env(project, gc)
+    context = _provision_context(project, gc)
 
     payload = [
         PayloadFile("provision-driver.sh", DRIVER_PATH.read_text(), 0o755),
         PayloadFile("manifest", "".join(f"{n}\n" for n in names), 0o644),
         PayloadFile("context.env", render_env_file(context), 0o644),
     ]
-    if secret:
-        payload.append(PayloadFile("secret.env", render_env_file(secret), 0o600, secret=True))
     for name in names:
         script = resolve_mod(name, project.marker_dir)
         payload.append(PayloadFile(f"mods/{name}.sh", script.read_text(), 0o755))

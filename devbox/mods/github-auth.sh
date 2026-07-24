@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 #
-# mod: github-auth - wire up `gh` and git/jj HTTPS auth for github.com from a
-# fine-grained PAT. No-op when the token is unset (cloning a public repo works
-# unauthenticated). Ordered before repo-bootstrap so a private `jj git clone`
-# can authenticate.
+# mod: github-auth - wire git/jj HTTPS auth for github.com to a fine-grained PAT.
+# `gh` reads GITHUB_TOKEN/GH_TOKEN from the environment natively (no `gh auth
+# login`, so nothing lands in ~/.config/gh/hosts.yml); this just points git's
+# credential helper at gh, so `git`/`jj git` HTTPS - including repo-bootstrap's
+# private `jj git clone` - authenticate transparently. No-op when GITHUB_TOKEN
+# is unset (public clones work unauthenticated).
 #
-# Context (from the environment): DEVBOX_GITHUB_TOKEN (secret; sourced by the
-# driver from a mode-0600 file). The token is only ever fed to `gh` on stdin -
-# never echoed, never written to disk - and the auth step runs in a `set +x`
-# subshell so even a traced run can't leak it.
+# Context (from the environment): GITHUB_TOKEN, from the box's [env] file
+# (~/.config/devbox/env), which the driver sources before running the mods.
 set -euo pipefail
 
-if [ -n "${DEVBOX_GITHUB_TOKEN:-}" ]; then
-  ( set +x; printf '%s\n' "$DEVBOX_GITHUB_TOKEN" | gh auth login --with-token )
+if [ -n "${GITHUB_TOKEN:-}" ]; then
   gh auth setup-git
 fi

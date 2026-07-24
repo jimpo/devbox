@@ -79,14 +79,16 @@ setup](#per-project-setup) for the `[aws]` config.
 | `devbox ip` | Print the domain's IPv4. |
 | `devbox ssh [-- args...]` | `ssh` into the domain. |
 | `devbox status` | SSH in and show `cloud-init status --long` plus the tail of `~/provision.log`. |
+| `devbox sync --envvars` | (Re-)write the box's devbox-managed 0600 `[env]` file — scoped creds/vars (`GITHUB_TOKEN`, API keys) into its shell env. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
 | `devbox sync --mods[=a,b,c]` | (Re-)run the provisioning **mods** over SSH against a running box — reconverge (bump jj, add a plugin, re-apply a project's rust mod) without destroy+create. Covers base **and** project mods. Idempotent; tees to `~/provision.log` (per-mod logs in `~/provision/`). No list runs the whole playbook; a comma-separated list runs just those (fast iteration). |
 | `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync — agent skills, git-excluded project files. Re-runnable + incremental. See "Host→box file sync" below. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or AWS), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
 | `devbox host` | Refresh the SSH alias used for `jj fetch` (below); prints the alias name. |
 
-`devbox sync` requires at least one of `--mods`/`--files` (both may be combined —
-mods run first, since file dsts can depend on the repo being cloned). It's the
-same two steps `devbox create` runs on a fresh box.
+`devbox sync` requires at least one of `--envvars`/`--mods`/`--files` (any
+combination). They run in that order — env before mods (a mod may need a cred,
+e.g. a private clone), files last (dsts can depend on the repo being cloned).
+It's the same three steps `devbox create` runs on a fresh box.
 
 Every subcommand accepts `-C/--project-dir PATH` and `--name NAME` (both
 before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
@@ -178,8 +180,8 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    name = "Jim Posen"
    email = "jim.posen@gmail.com"
 
-   [github]
-   token = "ghp_..."
+   [env]                                # creds/vars injected into every box (see below)
+   GITHUB_TOKEN = "github_pat_..."
 
    [aws]                                # optional — only needed for --provider aws
    region = "us-east-1"                 # required if [aws] is present
@@ -204,25 +206,14 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    `jj config set --user user.name/user.email` in the sandbox, using
    whichever source resolved.
 
-   `[github]` is also optional, but **has no host fallback** (unlike
-   `[jj]`) — deliberately: use a
+   `[env]` is a flat map of environment variables — scoped credentials, API
+   keys — injected into every box (see [Credentials](#credentials-env) below).
+   A project's `[env]` overrides it per-key. **`GITHUB_TOKEN` is the way to give
+   the sandbox GitHub auth**: `gh`/`git`/`jj git` pick it up so private clones
+   and pushes work. Use a
    [fine-grained personal access token](https://github.com/settings/personal-access-tokens)
-   scoped to just the repos the sandbox needs, not whatever broad-scoped
-   session `gh auth login` happens to have cached on the host. A project's
-   `.devbox/config.toml` can set its own `[github].token`, which **overrides**
-   this global one (project → global → none) — the natural home for a PAT
-   scoped to a single repo, since `.devbox/` is git-excluded/local-only. An
-   unresolved GitHub token is never fatal: it's only used to wire up `gh auth login` +
-   `gh auth setup-git` in the sandbox (so `git`/`jj git`/`gh` against
-   `github.com` authenticate transparently), which is only needed for
-   private repos or pushing back to GitHub from inside the sandbox. Cloning
-   a public repo works fine with no token at all — `devbox create` just
-   prints a note and moves on if it's unset. The token is embedded directly
-   in the rendered cloud-config (same mechanism as the SSH pubkey/jj
-   identity) and ends up in plaintext inside the sandbox's `gh` config — an
-   accepted trade-off for a personal, single-user VM (mitigated by scoping
-   the PAT narrowly in the first place), same as this project's Docker
-   sandbox counterpart already does with `GITHUB_PERSONAL_ACCESS_TOKEN`.
+   scoped to just the repos the sandbox needs. Optional — a box with no
+   `GITHUB_TOKEN` just has no GitHub HTTPS auth (fine for public repos).
 
    There's no `sha256` field: `devbox create` fetches `SHA256SUMS` +
    `SHA256SUMS.gpg` from alongside the image URL, verifies the signature
@@ -256,9 +247,9 @@ mode = "clone"               # "clone" | "push"
 dir = "my-project"           # created at ~/<dir> in the sandbox
 url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
 
-# [github]                  # optional; overrides the global [github].token
-# token = "ghp_..."         #   for this project — set a PAT scoped to just
-#                           #   this repo. Unset here falls back to global.
+# [env]                     # creds/vars injected into the box's shell env;
+# GITHUB_TOKEN = "github_pat_..."   #   overrides the global [env] per-key. A
+#                           #   repo-scoped PAT belongs here (.devbox is git-excluded).
 
 # Host->box file sync (rsync). [[sync]] = $HOME/~/absolute-anchored (resolved
 # per side); [[repo.sync]] = repo-relative (host: marker dir; guest: ~/<repo.dir>).
@@ -366,20 +357,20 @@ devbox/mods/*.sh              # built-in, shipped in the package
 
 **Static files, env for context.** Mods are static (lintable, shellcheck-able,
 diffable) and receive context via the **environment** (`DEVBOX_USER`,
-`DEVBOX_JJ_NAME`, `DEVBOX_REPO_URL`, …), not `%TOKEN%` substitution. The GitHub
-PAT goes in a mode-0600 `secret.env` the driver sources without tracing, so it
-never lands in a script on disk or a log.
+`DEVBOX_JJ_NAME`, `DEVBOX_REPO_URL`, …), not `%TOKEN%` substitution. The driver
+also sources the box's `[env]` creds file (see [Credentials](#credentials-env)),
+so a mod that needs a secret — e.g. `repo-bootstrap` cloning a private repo with
+`GITHUB_TOKEN` — has it, and it never lands in a script on disk or a log.
 
 **Self-contained.** A mod `sudo apt-get install -y`s what it needs (the dev user
 has NOPASSWD sudo; apt-install is idempotent) rather than relying on
 cloud-config's `packages:` — which is why most projects no longer need a
 `.devbox/cloud-config.yaml` at all.
 
-**Delivered over SSH** (one path). devbox tars the resolved driver + mods + env
-+ manifest, pipes it to the box over the `devbox-<name>` SSH alias, extracts it
-into a per-run temp dir (owned by the SSH user, so the 0600 `secret.env` needs no
-chown), and runs the driver. This is the **only** delivery path — the same for a
-fresh box and a reconverge:
+**Delivered over SSH** (one path). devbox tars the resolved driver + mods +
+context + manifest, pipes it to the box over the `devbox-<name>` SSH alias,
+extracts it into a per-run temp dir (owned by the SSH user), and runs the driver.
+This is the **only** delivery path — the same for a fresh box and a reconverge:
 
 - **`devbox create`** — after boot (once base cloud-init has created the user and
   installed packages), runs the mods, then pushes `[[sync]]` files. `create`
@@ -438,6 +429,44 @@ project's optional `.devbox/cloud-config.yaml`:
 - The merged result gets a fresh `#cloud-config` header prepended (YAML parsing
   drops comments, so the original magic first line doesn't survive a
   parse→merge→dump round trip on its own).
+
+## Credentials (`[env]`)
+
+`[env]` is a flat map of environment variables — scoped credentials, API keys —
+hardcoded in `config.toml` and injected into a box. Global `[env]`
+(`~/.config/devbox`) applies to every box; project `[env]` (`.devbox`, which is
+git-excluded) adds project-specific keys and **overrides the global map
+per-key**.
+
+```toml
+[env]
+GITHUB_TOKEN = "github_pat_..."
+SOME_API_KEY = "..."
+```
+
+**In the guest**, devbox writes a single managed 0600 file — `~/.config/devbox/env`
+(`export KEY=val` lines) — and sources it from **both** `~/.zshenv` (interactive
+zsh) **and** `~/.bash_env` (the `BASH_ENV` target). The second one matters: Claude
+Code's Bash tool runs *non-interactive bash*, which doesn't read `.zshenv` — so
+creds only in `.zshenv` would be invisible to the agent and anything it runs. The
+values are also exported into the provisioning run, so a mod that needs a cred
+(e.g. `repo-bootstrap`'s private `jj git clone`) sees it.
+
+**GitHub auth** is just `GITHUB_TOKEN` in `[env]`: `gh` reads it natively (no
+`gh auth login`, so nothing lands in `~/.config/gh/hosts.yml`), and the
+`github-auth` mod runs `gh auth setup-git` so `git`/`jj git` HTTPS use gh's
+credential helper — private clones and pushes work.
+
+**Delivery & idempotency:** `devbox sync --envvars` ships the map over SSH (piped,
+never echoed to a log), rewriting the managed file in full each run — so removing
+a key from config removes it from the box. Auto-run first on `devbox create`.
+
+**Security:** plaintext in `config.toml` (host) and the 0600 file (guest) — an
+accepted trade-off for scoped creds on a personal VM. The real change from a
+credential-helper store is that values now live in the **process environment** of
+everything the agent runs (the point), so they're visible via `/proc/<pid>/environ`
+to the dev user. Keep them out of provision logs (devbox delivers them piped, not
+substituted).
 
 ## Host→box file sync
 

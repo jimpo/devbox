@@ -9,6 +9,7 @@ Provider seam.
     devbox status              # cloud-init progress + tail provision.log
     devbox list                # list devbox-managed instances on this host
     devbox jj fetch            # jj git fetch the instance's work into the host repo
+    devbox sync --envvars      # inject [env] creds into the box's shell env
     devbox sync --mods[=a,b]   # (re)run provisioning mods over SSH (reconverge)
     devbox sync --files        # rsync host-local files ([[sync]]) onto the box
     devbox host                # refresh the SSH alias used for jj fetch
@@ -34,8 +35,8 @@ from .config import (DEFAULT_PROVIDER, GlobalConfig, KNOWN_HOSTS_PATH, PROVIDERS
                      ProjectConfig, SSH_DIR, SSH_USER_CONFIG, compose_instance_name,
                      find_project_dir, parse_instance_name, resolve_instance,
                      resolve_project)
-from .provision import PROVISION_LOG, build_payload, build_tarball
-from .sync import run_sync
+from .provision import PROVISION_LOG, build_payload, build_tarball, resolve_env
+from .sync import run_envvars, run_sync
 from .providers import InstanceSpec, all_providers, get_provider
 from .util import die
 
@@ -164,9 +165,13 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
     target = f"devbox -C {d}" + (f" --name {name}" if provider_name != "libvirt" else "")
 
     # Provisioning is driven over SSH (single path shared with `devbox sync`):
-    # wait for the box's base cloud-init (user + packages) to be ready, run the
-    # mods, then push host-local files. `create` blocks through all of it.
+    # wait for the box's base cloud-init (user + packages) to be ready, then run
+    # the same three steps `devbox sync` does. Env first (mods may need a cred,
+    # e.g. repo-bootstrap's private clone); files last (dsts need the repo clone).
+    # `create` blocks through all of it.
     alias = _wait_ready(provider, name, project.user)
+    print("==> injecting [env] credentials ...")
+    run_envvars(alias, resolve_env(project, gc))
     print("==> provisioning (running mods over SSH; several minutes) ...")
     _run_mods(alias, tarball, [])
     if project.sync:
@@ -220,8 +225,8 @@ def _wait_ready(provider, name: str, user: str) -> str:
 
 def _run_mods(alias: str, tarball: bytes, mods: list) -> None:
     """Deliver the provisioning payload over SSH and run the driver: pipe the
-    tarball into a per-run temp dir (extracted as the SSH user, so the 0600
-    secret.env is user-owned), run the driver, tee to ~/provision.log (the log
+    tarball into a per-run temp dir (extracted as the SSH user), run the driver
+    (which sources the box's ~/.config/devbox/env creds), tee to ~/provision.log (the log
     `devbox status` tails). `mods` selects a subset; empty = the whole playbook."""
     selected = " ".join(shlex.quote(m) for m in mods)
     remote = (
@@ -411,14 +416,16 @@ def _split_mods(value: str) -> list:
 
 
 def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    # Reconverge a live box: run provisioning mods (--mods) and/or push
-    # host-local files (--files), both over the provider-resolved SSH alias.
-    # `devbox create` runs the same two steps on a fresh box (see cmd_create).
+    # Reconverge a live box: inject [env] creds (--envvars), run provisioning
+    # mods (--mods), and/or push host-local files (--files), over the
+    # provider-resolved SSH alias. `devbox create` runs the same steps on a
+    # fresh box (see cmd_create).
+    do_envvars = args.envvars
     do_mods = args.mods is not None      # --mods present (with or without a value)
     do_files = args.files
-    if not (do_mods or do_files):
-        die("nothing to do: pass --mods (run provisioning mods) and/or --files "
-            "(push host-local [[sync]] files)")
+    if not (do_envvars or do_mods or do_files):
+        die("nothing to do: pass --envvars (inject [env] creds), --mods (run "
+            "provisioning mods), and/or --files (push host-local [[sync]] files)")
     if do_files and not project.sync:
         die("this project has no [[sync]]/[[repo.sync]] entries; drop --files")
 
@@ -428,8 +435,11 @@ def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
         die(f"no address for '{name}' yet (still booting?).")
     alias = _refresh_ssh_alias(name, ip, project.user)
 
-    # Mods before files: file dsts (e.g. ~/<repo>/.claude/skills) depend on the
-    # repo/provisioning being in place.
+    # Order: env -> mods -> files. Mods may need a cred (e.g. repo-bootstrap's
+    # private clone); file dsts (e.g. ~/<repo>/.claude/skills) need the repo clone.
+    if do_envvars:
+        print(f"==> injecting [env] credentials into '{name}' ...")
+        run_envvars(alias, resolve_env(project, gc))
     if do_mods:
         mods = _split_mods(args.mods)
         scope = f" (mods: {', '.join(mods)})" if mods else ""
@@ -474,12 +484,14 @@ def main() -> None:
     jj = sub.add_parser("jj", help="jj operations against the instance")
     jj_sub = jj.add_subparsers(dest="jj_cmd", required=True)
     jj_sub.add_parser("fetch", help="jj git fetch the instance's bookmarked work into the host repo").set_defaults(func=cmd_jj_fetch)
-    # `sync` reconverges a live box: provisioning mods and/or host-local files.
-    sy = sub.add_parser("sync", help="reconverge a running box: --mods and/or --files")
-    sy.add_argument("--files", action="store_true",
-                    help="push host-local files ([[sync]]/[[repo.sync]]) to the box via rsync")
+    # `sync` reconverges a live box: [env] creds, provisioning mods, host-local files.
+    sy = sub.add_parser("sync", help="reconverge a running box: --envvars / --mods / --files")
+    sy.add_argument("--envvars", action="store_true",
+                    help="inject the [env] creds/vars into the box's shell env")
     sy.add_argument("--mods", nargs="?", const="", default=None, metavar="a,b,c",
                     help="run provisioning mods over SSH (all if no list; else comma-separated)")
+    sy.add_argument("--files", action="store_true",
+                    help="push host-local files ([[sync]]/[[repo.sync]]) to the box via rsync")
     sy.set_defaults(func=cmd_sync)
     sub.add_parser("host", help="refresh the SSH alias used for jj-fetch, print the alias name").set_defaults(func=cmd_host)
 

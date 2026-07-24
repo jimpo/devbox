@@ -85,7 +85,9 @@ class GlobalConfig:
     ssh_pubkey_path: Path
     jj_name: Optional[str]
     jj_email: Optional[str]
-    github_token: Optional[str] = None
+    # [env]: credentials/vars injected into every box's shell env (see sync.py).
+    # A project's [env] overrides per-key.
+    env: dict = dataclasses.field(default_factory=dict)
     aws: Optional[AwsConfig] = None
 
     @classmethod
@@ -98,7 +100,6 @@ class GlobalConfig:
         defaults = data.get("defaults", {})
         ssh = data.get("ssh", {})
         jj = data.get("jj", {})
-        github = data.get("github", {})
         return cls(
             libvirt_uri=data.get("libvirt_uri", DEFAULT_LIBVIRT_URI),
             network=data.get("network", DEFAULT_NETWORK),
@@ -108,9 +109,7 @@ class GlobalConfig:
             memory_mib=defaults.get("memory_mib", DEFAULT_MEMORY_MIB),
             disk_gb=defaults.get("disk_gb", DEFAULT_DISK_GB),
             ssh_pubkey_path=Path(ssh.get("pubkey_path", DEFAULT_SSH_PUBKEY_PATH)).expanduser(),
-            # A fine-grained PAT the user scopes themselves. Left unset, the
-            # sandbox just gets no GitHub HTTPS auth (fine for public repos).
-            github_token=github.get("token"),
+            env=_resolve_env(data, path),
             # No built-in default, unlike every other field above - there's no
             # sensible guess for a person's identity. Validated lazily inside
             # render_cloud_config, not here, so subcommands that never render
@@ -119,6 +118,16 @@ class GlobalConfig:
             jj_email=jj.get("email"),
             aws=_load_aws_config(data.get("aws"), path),
         )
+
+
+def _resolve_env(data: dict, config_path: Path) -> dict:
+    """Parse `[env]` - a flat table of KEY = "value" credentials/vars injected
+    into a box's shell environment (see sync.py). All values must be strings."""
+    env = data.get("env", {})
+    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
+        die(f"{config_path}: [env] must be a table of string values "
+            f"(e.g. GITHUB_TOKEN = \"github_pat_...\")")
+    return env
 
 
 def _load_aws_config(aws_data: Optional[dict], path: Path) -> Optional[AwsConfig]:
@@ -185,10 +194,10 @@ class ProjectConfig:
     mods: list = dataclasses.field(default_factory=list)
     # Host->box file-sync rules from [[sync]] / [[repo.sync]] (see sync.py).
     sync: list = dataclasses.field(default_factory=list)
-    # Project-level [github].token, overriding the global one when set. Lives in
-    # git-excluded .devbox/config.toml, so a per-project fine-grained PAT belongs
-    # here. Unset falls back to the global token (see resolve_github_token).
-    github_token: Optional[str] = None
+    # Project-level [env]: shell-env creds/vars injected into the box, overriding
+    # the global [env] per-key (see sync.py). .devbox/config.toml is git-excluded,
+    # so hardcoding scoped creds here is acceptable.
+    env: dict = dataclasses.field(default_factory=dict)
     aws: Optional[AwsProjectConfig] = None
 
 
@@ -310,7 +319,6 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         die(f"{config_path}: provider must be one of {PROVIDERS} (got {provider!r})")
 
     cloud_config_path = devbox_dir / PROJECT_CLOUD_CONFIG_FILE
-    github = data.get("github", {})
     repo = _resolve_repo_config(data, config_path)
     return ProjectConfig(
         project=data.get("project", marker_dir.name),
@@ -324,7 +332,7 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         marker_dir=marker_dir,
         mods=_resolve_mods(data, config_path),
         sync=_resolve_sync(data, config_path, repo),
-        github_token=github.get("token"),
+        env=_resolve_env(data, config_path),
         aws=_resolve_aws_project_config(data, config_path),
     )
 

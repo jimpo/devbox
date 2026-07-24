@@ -24,6 +24,7 @@ via `.devbox/config.toml`. Full reference: `README.md` in this repo.
 | `devbox up` / `stop` / `destroy` | Start / graceful-shutdown / tear down (destroy also deletes the disk). |
 | `devbox ip` / `ssh [-- args]` / `status` | Print IP / SSH in / show cloud-init progress + `~/provision.log`. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo (refreshes the SSH alias + `devbox-<name>` jj remote, runs `jj git fetch`). |
+| `devbox sync --envvars` | (Re-)write the box's 0600 `[env]` file — scoped creds/vars (`GITHUB_TOKEN`, API keys) into its shell env. Full rewrite each run. |
 | `devbox sync --mods[=a,b]` | Run provisioning mods over SSH on a live box (reconverge, no rebuild). No list = whole playbook; else just those. |
 | `devbox sync --files` | Push host-local non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync (agent skills, git-excluded files). |
 | `devbox host` | Refresh/print the `devbox-<name>` SSH alias used for `jj fetch`. |
@@ -40,9 +41,10 @@ provider is derived from the name).
 - `[jj] name`/`email` — sandbox identity. Falls back to the host's own `jj
   config get user.name`/`user.email`, so usually no setup. If `devbox create`
   dies for lack of it, ask the user rather than guessing.
-- `[github] token` — a fine-grained PAT, only for private repos or pushing to
-  GitHub. A project's `[github].token` overrides it. Unset is fine for public
-  repos (devbox just prints a note).
+- `[env]` — a flat map of env vars (creds/API keys) injected into every box's
+  shell env. **`GITHUB_TOKEN` here is how the box gets GitHub auth** (private
+  clones/pushes); `gh`/`git`/`jj git` read it. A project's `[env]` overrides
+  per-key. Unset is fine for public repos.
 - `[aws] region` (+ optional `profile`, `default_security_groups`,
   `default_subnets`, `spot`) — enables the AWS provider. Omit for a
   libvirt-only host.
@@ -56,6 +58,9 @@ provider is derived from the name).
 # provider = "libvirt"  # default provider for a bare `create`
 # user, vcpus, memory_mib, disk_gb  # override the global [defaults]
 mods = ["rust"]          # project mods, appended after the base playbook
+
+[env]                    # creds/vars into the box's shell env; overrides global per-key
+GITHUB_TOKEN = "github_pat_..."   # how the box gets GitHub auth (repo-scoped PAT)
 
 [repo]                   # how the sandbox gets code; omit entirely for none
 mode = "clone"            # clone | push | none
@@ -80,6 +85,11 @@ architecture = "arm64"    # x86_64 | arm64
 - **Repo modes:** `clone` (existing remote; needs `dir` + `url`), `push`
   (brand-new project, no remote yet; `dir` only — seed it after create, below),
   `none` (scratch VM; omit `[repo]`).
+- **`[env]` creds:** injected into the box as a 0600 `~/.config/devbox/env`
+  sourced by the shells (and exported into provisioning, so a private clone sees
+  `GITHUB_TOKEN`). Written by `devbox sync --envvars` (auto-run on `create`).
+  Values are plaintext in git-excluded `.devbox/config.toml` — accepted for
+  scoped creds; don't put them in a committed file.
 - **File sync:** `devbox sync --files` rsyncs host-local, non-VCS files onto the
   box (auto-run at the end of `create`). Use it for host-only files a mod can't
   reach (a mod runs box-side); skills in the repo arrive via `[repo]`, and

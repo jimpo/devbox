@@ -6,7 +6,8 @@
 # SSH user), and runs this driver there - on `devbox create` (after boot) and on
 # `devbox sync --mods` alike.
 #
-# Layout next to this script:  mods/<name>.sh  manifest  context.env  [secret.env]
+# Layout next to this script:  mods/<name>.sh  manifest  context.env
+# ([env] creds are delivered separately as ~/.config/devbox/env, sourced below.)
 #
 # Usage: provision-driver.sh [<mod-name> ...]
 #   no args   - run the whole playbook (manifest order)
@@ -23,11 +24,13 @@ MODS_DIR="$HERE/mods"
 LOG_DIR="$HOME/provision"
 mkdir -p "$LOG_DIR" "$HOME/.local/bin"
 
-# devbox-owned shell plumbing: make ~/.local/bin (where jj etc. install) and any
-# ~/.cargo/env available to non-interactive shells via BASH_ENV. Must exist
-# before the mods run. Overwritten unconditionally (idempotent).
+# devbox-owned shell plumbing: make ~/.local/bin (where jj etc. install), any
+# ~/.cargo/env, and the devbox-managed [env] creds file available to
+# non-interactive shells via BASH_ENV (what Claude Code's Bash tool reads). Must
+# exist before the mods run. Overwritten unconditionally (idempotent).
 cat > "$HOME/.bash_env" <<'BENV'
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+[ -f "$HOME/.config/devbox/env" ] && . "$HOME/.config/devbox/env"
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) export PATH="$HOME/.local/bin:$PATH" ;;
@@ -35,13 +38,15 @@ esac
 BENV
 export PATH="$HOME/.local/bin:$PATH"
 
-# Context for the mods via the environment (not %TOKEN% substitution). The
-# non-secret file is safe to trace; the secret file (the GitHub PAT) is sourced
-# with no tracing enabled here, so it never reaches a log.
+# Credentials/vars from [env] (written 0600 by `devbox sync --envvars`, which
+# runs before the mods on create). Sourced here with no tracing enabled, so a
+# mod that needs a cred at provision time - e.g. repo-bootstrap's private
+# `jj git clone` needing GITHUB_TOKEN - sees it, and it never reaches a log.
+# shellcheck source=/dev/null
+[ -f "$HOME/.config/devbox/env" ] && . "$HOME/.config/devbox/env"
+# Provisioning context for the mods (DEVBOX_*), safe to trace.
 # shellcheck source=/dev/null
 [ -f "$HERE/context.env" ] && . "$HERE/context.env"
-# shellcheck source=/dev/null
-[ -f "$HERE/secret.env" ] && . "$HERE/secret.env"
 
 mapfile -t PLAYBOOK < "$HERE/manifest"
 
