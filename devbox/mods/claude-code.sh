@@ -12,5 +12,4 @@ set -euo pipefail
 curl -fsSL https://claude.ai/install.sh | bash
 
 claude plugin marketplace add anthropics/claude-plugins-official || true
-claude plugin install github || true
-claude plugin install linear || true
+
