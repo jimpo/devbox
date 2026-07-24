@@ -4,6 +4,8 @@
 # vim-go / rust.vim). Depends on the dotfiles mod having written ~/.vimrc, so it
 # is ordered after it in the base playbook.
 #
+# requires: dotfiles
+#
 # Idempotency: plug.vim is fetched unconditionally; PlugInstall is a no-op for
 # already-installed plugins.
 set -euo pipefail

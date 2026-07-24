@@ -520,6 +520,87 @@ def test_resolve_mod_missing_dies(tmp_path):
         devbox.resolve_mod("nope", tmp_path / "proj", tmp_path / "g", tmp_path / "b")
 
 
+# ---- parse_requires (`# requires:` header, static parse) --------------------
+def test_parse_requires_single_line_single_dep():
+    assert devbox.parse_requires("#!/bin/bash\n# requires: jj\nset -e\n") == ["jj"]
+
+
+def test_parse_requires_space_separated():
+    assert devbox.parse_requires("# requires: jj github-auth\n") == ["jj", "github-auth"]
+
+
+def test_parse_requires_comma_separated():
+    assert devbox.parse_requires("# requires: jj, github-auth\n") == ["jj", "github-auth"]
+
+
+def test_parse_requires_multiple_lines_unioned():
+    text = "# requires: jj\n# mod: x\n# requires: github-auth, dotfiles\n"
+    assert devbox.parse_requires(text) == ["jj", "github-auth", "dotfiles"]
+
+
+def test_parse_requires_dedupes_preserving_order():
+    assert devbox.parse_requires("# requires: jj github-auth\n# requires: jj\n") == \
+        ["jj", "github-auth"]
+
+
+def test_parse_requires_none_present_is_empty():
+    assert devbox.parse_requires("#!/bin/bash\n# mod: x\nset -e\n") == []
+
+
+def test_parse_requires_trailing_comment_caveat():
+    # Documents the names-only rule: the capture runs to end of line, so a trailing
+    # inline comment is (wrongly) parsed as a dep name. Authors must not add one.
+    assert devbox.parse_requires("# requires: jj  # needs jj first\n") == \
+        ["jj", "#", "needs", "first"]
+
+
+# ---- validate_mods (`# requires:` ordering over the effective playbook) ------
+def _write_project_mod(marker_dir, name, text):
+    d = marker_dir / ".devbox" / "mods"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.sh").write_text(text)
+
+
+def test_validate_mods_base_playbook_passes(isolated_mods):
+    # The shipped base playbook (with its backfilled `# requires:` headers) is
+    # correctly ordered - no dep is missing or listed after its dependent.
+    devbox.validate_mods(_project())
+
+
+def test_validate_mods_project_mod_requiring_base_mod_passes(isolated_mods, tmp_path):
+    _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# requires: jj\nset -e\n")
+    devbox.validate_mods(_project(marker_dir=tmp_path, mods=["rust"]))
+
+
+def test_validate_mods_missing_dep_dies(isolated_mods, tmp_path):
+    _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# requires: nonexistent\nset -e\n")
+    with pytest.raises(SystemExit):
+        devbox.validate_mods(_project(marker_dir=tmp_path, mods=["rust"]))
+
+
+def test_validate_mods_dep_listed_after_dies(isolated_mods, tmp_path):
+    # `a` requires `b`, but `b` is appended after `a` -> misordered -> die.
+    _write_project_mod(tmp_path, "a", "#!/bin/bash\n# requires: b\nset -e\n")
+    _write_project_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
+    with pytest.raises(SystemExit):
+        devbox.validate_mods(_project(marker_dir=tmp_path, mods=["a", "b"]))
+
+
+def test_validate_mods_dep_listed_before_passes(isolated_mods, tmp_path):
+    # Same two mods, `b` ahead of `a` -> ordering satisfied.
+    _write_project_mod(tmp_path, "a", "#!/bin/bash\n# requires: b\nset -e\n")
+    _write_project_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
+    devbox.validate_mods(_project(marker_dir=tmp_path, mods=["b", "a"]))
+
+
+def test_build_payload_validates_mods(isolated_mods, pubkey, tmp_path):
+    # build_payload is the choke point: a bad `# requires:` fails there (so a
+    # selective `devbox sync <subset>` still validates the full playbook).
+    _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# requires: nonexistent\nset -e\n")
+    with pytest.raises(SystemExit):
+        devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
+
+
 def test_render_env_file_shell_quotes_values():
     out = devbox.render_env_file({"A": "plain", "B": "has space", "C": "a'b"})
     assert out == "export A=plain\nexport B='has space'\nexport C='a'\"'\"'b'\n"

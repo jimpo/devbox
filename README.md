@@ -390,6 +390,17 @@ combined `~/provision.log` that `devbox status` tails.
 on "already done", so `create` and every reconverge are safe. Each built-in
 mod's header documents which pattern it uses.
 
+**Declaring dependencies (`# requires:`):** a mod that depends on another running
+first declares it with a header comment — `# requires: jj github-auth` (names
+space/comma-separated; repeat the line to add more, they're unioned). devbox
+parses this statically and, at playbook-resolution time (before any boot/SSH),
+hard-errors if a required mod is missing from the effective playbook or listed
+*after* the mod that needs it. It is **not** a resolver — it never reorders or
+auto-inserts; it just validates order (so a future reorder can't silently break
+things). The `# requires:` line holds **only** dep names — no trailing inline
+comment (the parse runs to end of line). Built-in examples: `repo-bootstrap`
+`# requires: jj github-auth`, `vim` `# requires: dotfiles`.
+
 ### Example: a rust project
 
 `.devbox/config.toml` gains one line, and the rust setup is a project-local mod

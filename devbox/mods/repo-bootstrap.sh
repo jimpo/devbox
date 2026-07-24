@@ -6,6 +6,8 @@
 # "none" is a no-op. Ordered last in the base playbook (after jj + github-auth,
 # so a private clone can authenticate).
 #
+# requires: jj github-auth
+#
 # Idempotency: guarded on the target directory, so a reconverge is a no-op once
 # the repo exists.
 #

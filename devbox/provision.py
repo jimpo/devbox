@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import re
 import shlex
 import shutil
 import subprocess
@@ -121,6 +122,53 @@ def resolve_mod(name: str, marker_dir: Path,
         f"{marker_dir / PROJECT_MARKER_DIR / 'config.toml'}.")
 
 
+# ---- mod dependencies (`# requires:` header) --------------------------------
+# A mod declares the other mods it depends on with a header comment line:
+#   # requires: jj github-auth
+# Names are space/comma-separated; multiple `# requires:` lines are unioned. The
+# line holds ONLY dep names (the capture runs to end of line - no trailing inline
+# comment). Parsed statically from the script text; a mod is never executed to
+# read its metadata.
+_REQUIRES_RE = re.compile(r"^#\s*requires:\s*(.*)$", re.MULTILINE)
+
+
+def parse_requires(script_text: str) -> list:
+    """The mods declared in a script's `# requires:` header line(s), in first-seen
+    order (deduped). No such line -> []. Static parse only - never runs the mod."""
+    seen = {}
+    for match in _REQUIRES_RE.finditer(script_text):
+        for name in match.group(1).replace(",", " ").split():
+            seen.setdefault(name, None)
+    return list(seen)
+
+
+def validate_mods(project: ProjectConfig) -> None:
+    """Fail fast if a mod is in the effective playbook without its declared
+    dependencies (`# requires:`) ordered ahead of it. Deliberately NOT a resolver:
+    no topo-sort, no auto-insert - just parse each mod's header and check order.
+    Runs at playbook-resolution time (static, instant, before any boot/SSH).
+
+    Validates the FULL configured `effective_mods(project)` - callers must pass the
+    configured project even for selective runs (`devbox sync <subset>`), since deps
+    are about the box's cumulative state, not the selected subset."""
+    names = effective_mods(project)
+    # First index wins on a duplicate; base always precedes project mods, so this
+    # doesn't affect the ordering guarantee.
+    index = {}
+    for i, name in enumerate(names):
+        index.setdefault(name, i)
+    for i, name in enumerate(names):
+        script = resolve_mod(name, project.marker_dir)
+        for dep in parse_requires(script.read_text()):
+            if dep not in index:
+                die(f"mod '{name}' requires '{dep}', which isn't in the playbook: "
+                    f"add '{dep}' to `mods` in "
+                    f"{project.marker_dir / PROJECT_MARKER_DIR / 'config.toml'}.")
+            if index[dep] > i:
+                die(f"mod '{name}' requires '{dep}', but '{dep}' is listed after it "
+                    f"in the playbook: move '{dep}' earlier in `mods`.")
+
+
 # ---- environment context (not %TOKEN% substitution) -------------------------
 def _provision_context(project: ProjectConfig, gc: GlobalConfig) -> dict:
     """The DEVBOX_* provisioning context the driver exposes to every mod
@@ -152,6 +200,13 @@ def build_payload(project: ProjectConfig, gc: GlobalConfig) -> list:
     if not DRIVER_PATH.is_file():
         die(f"devbox internal error: provisioning driver not found at "
             f"{DRIVER_PATH} (broken install?)")
+
+    # Validate mod `# requires:` ordering over the FULL configured playbook. This
+    # is the single choke point: build_payload always builds the whole manifest
+    # (even for a selective `devbox sync <subset>`, which validates the full
+    # playbook here and then runs only the selected subset), so deps are checked
+    # against the box's cumulative state, not the subset.
+    validate_mods(project)
 
     names = effective_mods(project)
     context = _provision_context(project, gc)

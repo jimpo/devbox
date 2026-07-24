@@ -124,6 +124,12 @@ Every mod must be idempotent (it runs on `create` *and* every `devbox sync
 cloud-config.yaml` is now rarely needed (only genuine cloud-init concerns);
 prefer a mod.
 
+A mod that needs another mod to run first declares it in a header comment:
+`# requires: jj github-auth` (names space/comma-separated; **only** dep names —
+no trailing inline comment). devbox validates this statically at playbook
+resolution (before boot) and hard-errors if a required mod is missing or ordered
+after the mod needing it — it doesn't reorder, just enforces order.
+
 **What takes effect how:** provisioning runs entirely over SSH. A mod change (or
 the `mods` list) reconverges a live box via `devbox sync --mods` — no rebuild. A
 cloud-config-layer change (`packages`/`users`/the common template) needs `devbox
