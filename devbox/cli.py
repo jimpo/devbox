@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .cloudconfig import render_cloud_config
+from .initscript import render_init_script
 from .config import (DEFAULT_PROVIDER, GlobalConfig, KNOWN_HOSTS_PATH, PROVIDERS,
                      ProjectConfig, SSH_DIR, SSH_USER_CONFIG, compose_instance_name,
                      find_project_dir, parse_instance_name, resolve_instance,
@@ -153,7 +153,7 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
         project=project.project,
         provider=provider_name,
         disk_gb=project.disk_gb,
-        user_data=render_cloud_config(project, gc, instance_name=name),
+        user_data=render_init_script(project, gc, instance_name=name),
         created_at=datetime.now(timezone.utc).isoformat(),
         vcpus=project.vcpus,
         memory_mib=project.memory_mib,

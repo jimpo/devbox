@@ -1,6 +1,6 @@
 """devbox: a global, multi-project dev-sandbox manager (libvirt + AWS).
 
-The package is split by concern - `config`, `cloudconfig`, `cli`, and the
+The package is split by concern - `config`, `initscript`, `cli`, and the
 `providers` package (a `Provider` seam with `libvirt`, `ec2`, and `aws`
 /Lightsail impls). This module re-exports the public API as a flat `devbox.X`
 surface for convenience.
@@ -15,15 +15,15 @@ import subprocess  # noqa: F401
 import urllib.request  # noqa: F401
 from pathlib import Path  # noqa: F401
 
-# Submodules, imported so `devbox.config`, `devbox.cloudconfig`,
+# Submodules, imported so `devbox.config`, `devbox.initscript`,
 # `devbox.providers.libvirt`, ... are reachable as attributes (some tests
 # monkeypatch module-local names there).
-from . import cli, cloudconfig, config, provision, sync, util  # noqa: F401
+from . import cli, config, initscript, provision, sync, util  # noqa: F401
 from .providers import base, ec2, libvirt, lightsail  # noqa: F401
 
 from .cli import main  # noqa: F401
-from .cloudconfig import (COMMON_CLOUD_CONFIG_PATH, merge_cloud_config,  # noqa: F401
-                          render_cloud_config, substitute_tokens)
+from .initscript import (INIT_SCRIPT_PATH, render_init_script,  # noqa: F401
+                         substitute_tokens)
 from .provision import (BUILTIN_MODS_DIR, DEFAULT_BASE_MODS, DRIVER_PATH,  # noqa: F401
                         GLOBAL_MODS_DIR, PROVISION_LOG, PayloadFile,
                         build_payload, build_tarball, effective_mods,
@@ -35,7 +35,7 @@ from .config import (AwsConfig, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
                      DEFAULT_MEMORY_MIB, DEFAULT_NETWORK, DEFAULT_PROVIDER,
                      DEFAULT_VCPUS, Ec2Config, Ec2ProjectConfig,
                      GlobalConfig, LightsailProjectConfig, PREFIXED_PROVIDERS,
-                     PROJECT_CLOUD_CONFIG_FILE, PROJECT_CONFIG_FILE, PROJECT_MARKER_DIR,
+                     PROJECT_CONFIG_FILE, PROJECT_MARKER_DIR,
                      PROVIDERS, ProjectConfig, RepoConfig, SyncEntry, compose_instance_name,
                      find_project_dir, parse_instance_name, resolve_instance,
                      resolve_project)

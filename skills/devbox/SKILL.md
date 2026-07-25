@@ -140,9 +140,10 @@ repo-bootstrap`) is built in. Add a project mod only for extra tooling
 
 Resolution is **project > global (`~/.config/devbox/mods`) > built-in** by name.
 Every mod must be idempotent (it runs on `create` *and* every `devbox sync
---mods`): overwrite unconditionally or guard on "already done". A `.devbox/
-cloud-config.yaml` is now rarely needed (only genuine cloud-init concerns);
-prefer a mod.
+--mods`): overwrite unconditionally or guard on "already done". A mod is the
+*only* project-level extension point: devbox's first-boot layer is one fixed
+init script it ships, and the old `.devbox/cloud-config.yaml` fragment no longer
+exists.
 
 A mod that needs another mod to run first declares it in a header comment:
 `# requires: jj github-auth` (names space/comma-separated; **only** dep names —
@@ -152,8 +153,8 @@ after the mod needing it — it doesn't reorder, just enforces order.
 
 **What takes effect how:** provisioning runs entirely over SSH. A mod change (or
 the `mods` list) reconverges a live box via `devbox sync --mods` — no rebuild. A
-cloud-config-layer change (`packages`/`users`/the common template) needs `devbox
-destroy` + `create`, since the cloud-init seed is read only on first boot.
+first-boot change (devbox's `init-script.sh`: base packages, the login user)
+needs `devbox destroy` + `create`, since user-data runs only on first boot.
 
 ## Setting up & syncing
 

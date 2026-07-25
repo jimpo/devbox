@@ -1,6 +1,6 @@
 """The provider seam. Everything a machine's *location* dictates - launch,
 lifecycle, address discovery, enumeration - lives behind Provider. Everything
-above it (config, cloud-config render, provisioning, ssh/exec, target/config
+above it (config, init-script render, provisioning, ssh/exec, target/config
 resolution, list aggregation) is shared.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ class InstanceSpec:
     project: str
     provider: str
     disk_gb: int
-    user_data: str        # rendered cloud-config (first-boot provisioning)
+    user_data: str        # rendered init script (first-boot base setup)
     created_at: str       # ISO-8601, stamped onto the instance
     vcpus: Optional[int] = None
     memory_mib: Optional[int] = None

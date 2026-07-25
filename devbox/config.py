@@ -17,7 +17,6 @@ from .util import die, warn
 
 PROJECT_MARKER_DIR = ".devbox"
 PROJECT_CONFIG_FILE = "config.toml"                # .devbox/config.toml
-PROJECT_CLOUD_CONFIG_FILE = "cloud-config.yaml"    # .devbox/cloud-config.yaml (optional)
 REPO_MODES = ("none", "clone", "push")
 
 # Providers a project can launch instances on. Validated against `provider` in a
@@ -172,9 +171,10 @@ class GlobalConfig:
             ssh_pubkey_path=Path(ssh.get("pubkey_path", DEFAULT_SSH_PUBKEY_PATH)).expanduser(),
             env=_resolve_env(data, path),
             # No built-in default, unlike every other field above - there's no
-            # sensible guess for a person's identity. Validated lazily inside
-            # render_cloud_config, not here, so subcommands that never render
-            # cloud-config (ip/ssh/status/...) don't need [jj] set at all.
+            # sensible guess for a person's identity. Validated lazily when the
+            # provisioning payload is built (provision.resolve_jj_identity), not
+            # here, so subcommands that never provision (ip/ssh/status/...)
+            # don't need [jj] set at all.
             jj_name=jj.get("name"),
             jj_email=jj.get("email"),
             aws=_load_aws_config(data.get("aws"), path),
@@ -268,7 +268,6 @@ class LightsailProjectConfig:
 class ProjectConfig:
     project: str                  # label/tag on instances (default: marker dir basename)
     provider: str                 # default provider for a bare `create` ("libvirt")
-    cloud_config: Optional[Path]  # .devbox/cloud-config.yaml, if present (optional)
     user: str
     vcpus: int
     memory_mib: int
@@ -433,12 +432,10 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
     if provider not in PROVIDERS:
         die(f"{config_path}: provider must be one of {PROVIDERS} (got {provider!r})")
 
-    cloud_config_path = devbox_dir / PROJECT_CLOUD_CONFIG_FILE
     repo = _resolve_repo_config(data, config_path)
     return ProjectConfig(
         project=data.get("project", marker_dir.name),
         provider=provider,
-        cloud_config=cloud_config_path if cloud_config_path.is_file() else None,
         user=data.get("user", os.environ.get("USER", "")),
         vcpus=data.get("vcpus", global_config.vcpus),
         memory_mib=data.get("memory_mib", global_config.memory_mib),

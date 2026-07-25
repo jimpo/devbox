@@ -120,7 +120,6 @@ def test_resolve_project_basic(tmp_path, global_config):
     project = devbox.resolve_project(tmp_path, global_config)
     assert project.project == "myproj"
     assert project.provider == "libvirt"
-    assert project.cloud_config is None  # no .devbox/cloud-config.yaml written
     assert project.vcpus == global_config.vcpus
     assert project.memory_mib == global_config.memory_mib
     assert project.disk_gb == global_config.disk_gb
@@ -249,14 +248,6 @@ def test_resolve_project_invalid_provider_dies(tmp_path, global_config):
         devbox.resolve_project(tmp_path, global_config)
 
 
-def test_resolve_project_cloud_config_present(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "myproj"\n')
-    cloud_config = tmp_path / devbox.PROJECT_MARKER_DIR / devbox.PROJECT_CLOUD_CONFIG_FILE
-    cloud_config.write_text("packages: []\n")
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.cloud_config == cloud_config
-
-
 # ---- [repo] validation -----------------------------------------------------
 def test_resolve_project_repo_defaults_to_none(tmp_path, global_config):
     _write_marker(tmp_path, 'project = "myproj"\n')
@@ -306,56 +297,7 @@ def test_resolve_project_repo_push_with_url_dies(tmp_path, global_config):
         devbox.resolve_project(tmp_path, global_config)
 
 
-# ---- merge_cloud_config -----------------------------------------------------
-def test_merge_cloud_config_concatenates_list_keys_common_first():
-    common = {"packages": ["zsh", "vim"], "runcmd": ["common-step"]}
-    project = {"packages": ["clang"], "runcmd": ["project-step"]}
-    merged = devbox.merge_cloud_config(common, project)
-    assert merged["packages"] == ["zsh", "vim", "clang"]
-    assert merged["runcmd"] == ["common-step", "project-step"]
-
-
-def test_merge_cloud_config_scalar_key_project_overrides():
-    common = {"package_update": True, "hostname": "common-host"}
-    project = {"hostname": "project-host"}
-    merged = devbox.merge_cloud_config(common, project)
-    assert merged["hostname"] == "project-host"
-    assert merged["package_update"] is True
-
-
-def test_merge_cloud_config_keeps_common_only_keys():
-    common = {"packages": ["zsh"]}
-    merged = devbox.merge_cloud_config(common, {})
-    assert merged["packages"] == ["zsh"]
-
-
-def test_merge_cloud_config_type_mismatch_dies():
-    common = {"packages": ["zsh"]}
-    project = {"packages": "vim"}  # should be a list, not a string
-    with pytest.raises(SystemExit):
-        devbox.merge_cloud_config(common, project)
-
-
-# ---- render_cloud_config ----------------------------------------------------
-@pytest.fixture
-def common_template(tmp_path, monkeypatch):
-    # Minimal common template. Only %DEVBOX_USER%/%DEVBOX_SSH_PUBKEY% tokens
-    # remain in the YAML; provisioning (the mods) is delivered over SSH, not
-    # injected here, so render no longer touches the payload/driver/mods.
-    path = tmp_path / "common-cloud-config.yaml"
-    path.write_text(
-        "packages:\n  - zsh\n"
-        "users:\n  - name: \"%DEVBOX_USER%\"\n    ssh_authorized_keys:\n      - \"%DEVBOX_SSH_PUBKEY%\"\n"
-        "write_files:\n"
-        "  - path: /etc/environment\n"
-        "    append: true\n"
-        "    content: |\n"
-        "      BASH_ENV=/home/%DEVBOX_USER%/.bash_env\n"
-    )
-    monkeypatch.setattr(devbox.cloudconfig, "COMMON_CLOUD_CONFIG_PATH", path)
-    return path
-
-
+# ---- render_init_script -----------------------------------------------------
 @pytest.fixture
 def pubkey(tmp_path):
     path = tmp_path / "id_ed25519.pub"
@@ -363,10 +305,10 @@ def pubkey(tmp_path):
     return path
 
 
-def _project(cloud_config=None, mode="none", dir="", url=None, env=None,
+def _project(mode="none", dir="", url=None, env=None,
              marker_dir=None, mods=None, sync=None):
     return devbox.ProjectConfig(
-        project="test-project", provider="libvirt", cloud_config=cloud_config, user="alice",
+        project="test-project", provider="libvirt", user="alice",
         vcpus=6, memory_mib=1024, disk_gb=10,
         repo=devbox.RepoConfig(mode=mode, dir=dir, url=url),
         marker_dir=marker_dir or devbox.Path("/proj"),
@@ -386,49 +328,113 @@ def _global_config(pubkey_path, jj_name="Alice Example", jj_email="alice@example
     )
 
 
-def test_render_cloud_config_substitutes_user_and_pubkey(common_template, pubkey):
+def test_substitute_tokens_replaces_every_occurrence():
+    text = "%A% and %A% and %B%"
+    assert devbox.substitute_tokens(text, {"A": "x", "B": "y"}) == "x and x and y"
+
+
+def test_render_init_script_is_a_bash_script(pubkey):
+    # The user-data every provider gets is a shell script (Lightsail runs
+    # user-data natively; cloud-init runs a `#!` script on libvirt/ec2), so the
+    # shebang and the abort-on-failure flags are load-bearing.
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    assert rendered.startswith("#!/bin/bash\n")
+    assert "set -euo pipefail" in rendered
+    assert not rendered.startswith("#cloud-config")
+
+
+def test_render_init_script_substitutes_user_and_pubkey(pubkey):
     gc = _global_config(pubkey)
-    rendered = devbox.render_cloud_config(_project(mode="clone", dir="myrepo", url="https://example.com/x"), gc)
-    assert "%DEVBOX_" not in rendered  # only USER/SSH_PUBKEY tokens, both filled
-    assert "name: alice" in rendered
-    assert "ssh-ed25519 AAAAtest user@host" in rendered
-    assert "BASH_ENV=/home/alice/.bash_env" in rendered
+    rendered = devbox.render_init_script(
+        _project(mode="clone", dir="myrepo", url="https://example.com/x"), gc)
+    assert "%DEVBOX_" not in rendered  # every token filled
+    assert "DEVBOX_USER='alice'" in rendered
+    assert "DEVBOX_HOME='/home/alice'" in rendered
+    assert "DEVBOX_SSH_PUBKEY='ssh-ed25519 AAAAtest user@host'" in rendered
 
 
-def test_render_cloud_config_carries_no_provisioning_payload(common_template, pubkey):
-    # Provisioning is over SSH now: the cloud-config only does base setup - no
-    # driver/mods/env in write_files, no runcmd.
-    import yaml
-    parsed = yaml.safe_load(devbox.render_cloud_config(_project(), _global_config(pubkey)))
-    assert [w["path"] for w in parsed["write_files"]] == ["/etc/environment"]
-    assert "runcmd" not in parsed
+def test_render_init_script_creates_the_user_with_key_and_sudo(pubkey):
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    assert "useradd" in rendered
+    assert '"$DEVBOX_HOME/.ssh/authorized_keys"' in rendered
+    assert "NOPASSWD:ALL" in rendered
+    assert "passwd --lock" in rendered
+    assert "usermod --shell /usr/bin/zsh" in rendered
 
 
-def test_render_cloud_config_has_cloud_config_header(common_template, pubkey):
-    rendered = devbox.render_cloud_config(_project(), _global_config(pubkey))
-    assert rendered.startswith("#cloud-config\n")
+def test_render_init_script_creates_the_user_before_installing_packages(pubkey):
+    # SSH access must not be gated on the (slow, network-dependent) package
+    # step: a failure there still leaves a reachable, debuggable box.
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    assert rendered.index("useradd") < rendered.index("apt-get")
+    assert rendered.index("authorized_keys") < rendered.index("apt-get")
 
 
-def test_render_cloud_config_hostname_defaults_from_project_name(common_template, pubkey):
-    rendered = devbox.render_cloud_config(_project(), _global_config(pubkey))
-    import yaml
-    assert yaml.safe_load(rendered)["hostname"] == "test-project"
+def test_render_init_script_installs_the_base_packages(pubkey):
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    for pkg in ("zsh", "vim", "python3", "curl", "git", "git-lfs",
+                "ca-certificates", "gh", "rsync"):
+        assert f"\n  {pkg} " in rendered or f"\n  {pkg}\n" in rendered
+    assert 'apt-get -o DPkg::Lock::Timeout=600 install -y "${DEVBOX_PACKAGES[@]}"' in rendered
+    assert "apt-get upgrade" not in rendered  # matched the old package_upgrade: false
 
 
-def test_render_cloud_config_merges_project_fragment(common_template, pubkey, tmp_path):
-    cloud_config = tmp_path / "cloud-config.yaml"
-    cloud_config.write_text("packages:\n  - build-essential\nhostname: project-hostname\n")
-    rendered = devbox.render_cloud_config(_project(cloud_config=cloud_config), _global_config(pubkey))
-    import yaml
-    parsed = yaml.safe_load(rendered)
-    assert parsed["packages"] == ["zsh", "build-essential"]
-    assert parsed["hostname"] == "project-hostname"  # project overrides the setdefault
+def test_render_init_script_adds_the_github_cli_repo_before_installing(pubkey):
+    # `gh` is not in the 24.04 archive (the Lightsail blueprint) and a missing
+    # package would abort first boot under `set -e`.
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    assert "https://cli.github.com/packages" in rendered
+    assert rendered.index("cli.github.com") < rendered.index("install -y")
 
 
-def test_render_cloud_config_missing_pubkey_dies(common_template, tmp_path):
+def test_render_init_script_wires_bash_env(pubkey):
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    assert "BASH_ENV_LINE='BASH_ENV=/home/alice/.bash_env'" in rendered
+    assert "/etc/environment" in rendered
+
+
+def test_render_init_script_hostname_defaults_from_project_name(pubkey):
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    assert "DEVBOX_HOSTNAME='test-project'" in rendered
+
+
+def test_render_init_script_hostname_uses_the_instance_name(pubkey):
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey),
+                                         instance_name="aws-mybox")
+    assert "DEVBOX_HOSTNAME='aws-mybox'" in rendered
+
+
+def test_render_init_script_carries_no_provisioning_payload(pubkey):
+    # Provisioning is over SSH: the init script only does base setup - no
+    # driver, no mods, no [env] creds.
+    gc = _global_config(pubkey, env={"GITHUB_TOKEN": "github_pat_x"})
+    rendered = devbox.render_init_script(_project(mods=["wasm-tools"]), gc)
+    assert "provision-driver.sh" not in rendered
+    assert "github_pat_x" not in rendered
+    assert "wasm-tools" not in rendered
+
+
+def test_render_init_script_missing_pubkey_dies(tmp_path):
     gc = _global_config(tmp_path / "missing.pub")
     with pytest.raises(SystemExit):
-        devbox.render_cloud_config(_project(), gc)
+        devbox.render_init_script(_project(), gc)
+
+
+def test_render_init_script_quote_in_a_token_dies(tmp_path):
+    # Tokens land inside single-quoted shell assignments; a value with a quote
+    # would break out of the assignment and mangle first boot.
+    path = tmp_path / "id_ed25519.pub"
+    path.write_text("ssh-ed25519 AAAAtest o'brien@host\n")
+    with pytest.raises(SystemExit):
+        devbox.render_init_script(_project(), _global_config(path))
+
+
+def test_render_init_script_parses_as_bash(pubkey, tmp_path):
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey),
+                                         instance_name="aws-mybox")
+    script = tmp_path / "init.sh"
+    script.write_text(rendered)
+    assert devbox.subprocess.run(["bash", "-n", str(script)]).returncode == 0
 
 
 # ---- build_payload (the provisioning payload, delivered over SSH) -----------
@@ -775,8 +781,7 @@ def test_cmd_create_rejects_aws_name_with_provider_prefix():
         devbox.cli.cmd_create(_create_args(provider="aws", name="aws-foo"), gc, _project())
 
 
-def test_cmd_create_passes_lightsail_config_into_spec(monkeypatch, tmp_path, pubkey,
-                                                      common_template):
+def test_cmd_create_passes_lightsail_config_into_spec(monkeypatch, tmp_path, pubkey):
     # The [lightsail] section has to reach the provider: without this, dropping
     # `lightsail=project.lightsail` from the InstanceSpec would stay green,
     # because every Lightsail field has a default.
@@ -810,6 +815,10 @@ def test_cmd_create_passes_lightsail_config_into_spec(monkeypatch, tmp_path, pub
     spec = seen["spec"]
     assert spec.name == "aws-foo-gpu" and spec.provider == "aws"
     assert spec.lightsail is project.lightsail
+    # Lightsail runs user-data as a shell script, so create must hand it one
+    # (hostname = the instance's canonical name).
+    assert spec.user_data.startswith("#!/bin/bash\n")
+    assert "DEVBOX_HOSTNAME='aws-foo-gpu'" in spec.user_data
 
 
 # ---- libvirt <metadata> stamp -----------------------------------------------

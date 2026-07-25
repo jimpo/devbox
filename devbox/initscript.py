@@ -1,0 +1,59 @@
+"""First-boot init-script rendering: token substitution into `init-script.sh`.
+
+Provider-agnostic - libvirt (NoCloud seed), ec2 (UserData) and aws/Lightsail
+(userData) all hand the very same rendered bash script to the instance as
+user-data. A shell script is the only format all three accept: cloud-init runs a
+`#!` user-data script on libvirt/ec2, and Lightsail executes user-data as a
+script natively (it does not understand `#cloud-config`) - hence there is no
+cloud-config layer.
+
+The init script covers only genuine first-boot concerns (the login user + its
+SSH key, baseline packages, BASH_ENV wiring, hostname); provisioning (the mods)
+is driven entirely over SSH after boot (see cli.py / provision.py), not injected
+here, and so is a project's own setup (a project mod, not a first-boot hook).
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from .config import GlobalConfig, ProjectConfig
+from .util import die
+
+INIT_SCRIPT_PATH = Path(__file__).parent / "init-script.sh"
+
+
+def substitute_tokens(text: str, tokens: dict) -> str:
+    """Literal token substitution (not {{...}}, which collides with cloud-init's
+    own jinja syntax). Only %DEVBOX_USER%, %DEVBOX_SSH_PUBKEY% and
+    %DEVBOX_HOSTNAME% appear in the init script - the mods get their context via
+    the environment (see provision.py), not %TOKEN%s."""
+    for key, value in tokens.items():
+        text = text.replace(f"%{key}%", value)
+    return text
+
+
+def render_init_script(project: ProjectConfig, gc: GlobalConfig,
+                       instance_name: str = None) -> str:
+    """The rendered first-boot user-data script for `project`. `instance_name`
+    is the instance's canonical name (= its hostname); defaults to the project
+    name (the libvirt default instance)."""
+    if not gc.ssh_pubkey_path.is_file():
+        die(f"SSH public key not found: {gc.ssh_pubkey_path}")
+    if not INIT_SCRIPT_PATH.is_file():
+        die(f"devbox internal error: init script not found at {INIT_SCRIPT_PATH} "
+            f"(broken install?)")
+
+    tokens = {
+        "DEVBOX_USER": project.user,
+        "DEVBOX_SSH_PUBKEY": gc.ssh_pubkey_path.read_text().strip(),
+        "DEVBOX_HOSTNAME": instance_name or project.project,
+    }
+    # The tokens land inside single-quoted shell assignments, so a value
+    # carrying a quote or a newline would break out of (or corrupt) the script.
+    # Refuse rather than ship a mangled first boot.
+    for key, value in tokens.items():
+        if "'" in value or "\n" in value:
+            die(f"invalid value for %{key}%: must not contain a single quote or "
+                f"a newline (got {value!r})")
+
+    return substitute_tokens(INIT_SCRIPT_PATH.read_text(), tokens)

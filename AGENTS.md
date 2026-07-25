@@ -13,8 +13,9 @@ uv tool install --editable .     # point the live `devbox` command at this check
 
 `tests/` exercises pure logic and provider paths reachable without real infra:
 global/project config loading + merging (`GlobalConfig.load`, `resolve_project`,
-`resolve_instance`, `parse_instance_name`), marker walk-up, cloud-config token
-substitution + YAML merging, the modular-provisioning logic (mod resolution
+`resolve_instance`, `parse_instance_name`), marker walk-up, the first-boot
+init-script render (token substitution into the shipped `init-script.sh`), the
+modular-provisioning logic (mod resolution
 precedence, env-file quoting, payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the host→box sync planning (per-side `$HOME`
 expansion, repo-relative anchoring, `include` mirror-unit expansion, rsync argv),
@@ -36,7 +37,7 @@ driver on a real box (jj install, dotfiles, Claude Code, repo bootstrap), or a
 live EC2/Lightsail launch — those need a real libvirt daemon + booted VM, or
 real AWS.
 Verify such changes by reading the `virsh`/`virt-install`/boto3 calls, the
-rendered cloud-config, and the mod/driver scripts (`bash -n`, shellcheck)
+rendered init script, and the init/mod/driver scripts (`bash -n`, shellcheck)
 carefully; with a real libvirt setup, exercise by hand (`devbox create` +
 `devbox status` through to a fully provisioned box (create blocks through it),
 then `devbox ssh`; for provisioning edits, `devbox sync --mods` and re-check)
@@ -45,7 +46,7 @@ before calling it done.
 `tests/conftest.py` just puts the repo root on `sys.path` so `import devbox`
 resolves the package (works with or without an editable install). Tests
 monkeypatch module-local names where they live (e.g.
-`devbox.providers.libvirt.virsh`, `devbox.cloudconfig.COMMON_CLOUD_CONFIG_PATH`),
+`devbox.providers.libvirt.virsh`, `devbox.provision.GLOBAL_MODS_DIR`),
 while shared stdlib patches go through the re-exported `devbox.shutil`/
 `devbox.subprocess`/`devbox.urllib` (same module singletons everywhere).
 
@@ -68,11 +69,16 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   + `mods/*.sh`. Delivered over SSH (tar → extract → run driver) by `create` and
   `devbox sync --mods`. Creds are NOT in the payload — the driver sources the
   box's `~/.config/devbox/env` (written by `run_envvars`).
-- `cloudconfig.py` — token substitution (`%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%`) +
-  common+project merge only. The cloud-config carries just base setup
-  (user/packages/BASH_ENV) — no provisioning payload; provisioning runs over SSH
-  after boot. One cloud-config, every provider (libvirt NoCloud seed / EC2
-  base64 user-data / Lightsail plain-text user-data).
+- `initscript.py` — renders the shipped `init-script.sh` (literal
+  `%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%`/`%DEVBOX_HOSTNAME%` substitution) into
+  the user-data every provider gets. The script carries just base setup (login
+  user + SSH key first, then hostname/BASH_ENV/packages) — no provisioning
+  payload; provisioning runs over SSH after boot, and a project extends the box
+  with a mod (there is no project first-boot fragment). **One init script,
+  three providers:** cloud-init runs a `#!` user-data script on libvirt (NoCloud
+  seed) and ec2 (`UserData`), and Lightsail runs it natively — a shell script is
+  the only user-data all three accept, since Lightsail does not understand
+  `#cloud-config`.
 - `providers/` — the backend seam. `base.py` (`Provider` ABC, `InstanceSpec`,
   `Instance`); `libvirt.py`; `ec2.py` and `lightsail.py` (the `aws` provider;
   both boto3, lazily imported + injectable client
@@ -87,6 +93,6 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 - `__init__.py` — re-exports a flat `devbox.X` API for convenience/tests.
 
 `pyproject.toml` (hatchling) declares the `devbox.cli:main` entry point,
-force-includes the package data files (`common-cloud-config.yaml`,
-`provision-driver.sh`, `mods/`) into the wheel, and declares runtime deps
-`pyyaml` (cloud-config merge) + `boto3` (the ec2 + aws/Lightsail providers).
+force-includes the package data files (`devbox/init-script.sh`,
+`devbox/provision-driver.sh`) into the wheel, and declares the one runtime dep, `boto3` (the ec2 +
+aws/Lightsail providers).

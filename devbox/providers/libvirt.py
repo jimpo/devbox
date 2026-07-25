@@ -231,7 +231,7 @@ class LibvirtProvider(Provider):
                 f"&& sudo virsh -c {self.uri} net-autostart {self.gc.network}")
 
         img = self._ensure_base_image()
-        fd, tmp_path = tempfile.mkstemp(prefix="devbox-cloud-init-", suffix=".yaml")
+        fd, tmp_path = tempfile.mkstemp(prefix="devbox-cloud-init-", suffix=".sh")
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(spec.user_data)

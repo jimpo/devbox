@@ -186,7 +186,7 @@ class LightsailProvider(Provider):
             bundleId=bundle,
             # Lightsail takes userData as PLAIN TEXT (EC2's run_instances is the
             # one that base64-encodes). No keyPairName: the SSH user and pubkey
-            # come from the cloud-config user-data, exactly as on EC2.
+            # come from the init-script user-data, exactly as on EC2.
             userData=spec.user_data,
             ipAddressType="ipv4",
             tags=[

@@ -18,8 +18,8 @@ One driver (`provision-driver.sh`) runs the resolved set in order. Provisioning
 is delivered entirely over SSH (single path): devbox tars the payload
 (`build_tarball`), pipes it to the box, extracts into a per-run temp dir owned by
 the SSH user, and runs the driver - on `devbox create` (after boot) and on
-`devbox sync --mods` alike (see cli.py). The cloud-config layer only does base
-setup (user/packages/BASH_ENV); it carries no provisioning payload.
+`devbox sync --mods` alike (see cli.py). The init script only does base setup
+(user/hostname/BASH_ENV/packages); it carries no provisioning payload.
 """
 from __future__ import annotations
 

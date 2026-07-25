@@ -13,9 +13,9 @@ It currently supports three VM providers: **libvirt** (local VMs), **ec2**
 ## Basics & Architecture
 
 Every devbox starts from the latest Ubuntu LTS as its base image — currently
-Ubuntu 26.04 "Resolute Raccoon" — brought to life on first boot with
-[cloud-init](https://cloud-init.io/) (just the login user, baseline packages,
-and `BASH_ENV` wiring). Everything else — jj, dotfiles, Claude Code, the repo,
+Ubuntu 26.04 "Resolute Raccoon" — brought to life on first boot by a single
+bash **init script** handed to the instance as user-data (just the login user,
+baseline packages, `BASH_ENV` wiring, and the hostname). Everything else — jj, dotfiles, Claude Code, the repo,
 a project's toolchain — is provisioned by composable, idempotent **mods** run
 **over SSH** after boot, so a box can be reconverged in place (`devbox sync
 --mods`) instead of rebuilt.
@@ -72,7 +72,7 @@ Lightsail) — see [Per-project setup](#per-project-setup) for the `[ec2]` /
 
 | Command | Behavior |
 |---|---|
-| `devbox create` | Launch the project's default libvirt VM (bare-named = the project), or a named cloud instance with `--provider ec2\|aws --name <n>`. Renders + merges the cloud-config, first-boots via cloud-init (libvirt NoCloud seed / EC2 + Lightsail user-data), and stamps the instance (libvirt `<metadata>` / AWS tags). Errors if the name already exists anywhere (global-uniqueness). |
+| `devbox create` | Launch the project's default libvirt VM (bare-named = the project), or a named cloud instance with `--provider ec2\|aws --name <n>`. Renders the init script and first-boots the instance with it as user-data (libvirt NoCloud seed / EC2 `UserData` / Lightsail `userData`), and stamps the instance (libvirt `<metadata>` / AWS tags). Errors if the name already exists anywhere (global-uniqueness). |
 | `devbox list` | List devbox-managed instances — name, provider, project, state, resources, uptime (cloud rows show the EC2 instance type / Lightsail bundle and a `($)` cost flag while running). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + EC2 + Lightsail (account-wide, by `devbox:managed` tag). |
 | `devbox up` | Start an already-defined, shut-off domain. Errors if undefined — run `create` first. |
 | `devbox stop` | Gracefully shut down (ACPI) a running domain. |
@@ -96,10 +96,11 @@ before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
 resolves a project other than the current directory; `--name` targets a
 specific instance instead of the project's libvirt default.
 
-**Changing the cloud-config layer (the `packages`/`users`/`BASH_ENV` in the
-common template or a project's `.devbox/cloud-config.yaml`) only takes effect
-via `destroy` + `create`, never `up`** — cloud-init's NoCloud seed ISO is only
-attached on first boot, so an already-defined domain never re-reads it. The
+**Changing the first-boot init script (the packages/login user/`BASH_ENV` in
+devbox's `init-script.sh`) only takes effect via `destroy` + `create`, never
+`up`** — user-data runs once, on first boot (on libvirt, cloud-init's NoCloud
+seed ISO is only attached then), so an already-created instance never re-runs
+it. The
 provisioning **mods**, by contrast, reconverge in place: `devbox sync --mods`
 re-delivers the driver + mods + env over SSH and re-runs them on a live box, so
 edits to a mod (or to the context it consumes — jj identity, GitHub token,
@@ -136,8 +137,7 @@ otherwise the project's libvirt default (bare-named = the project). Daily use
   ships as a devbox dependency; the `[aws]` global-config section (the shared
   AWS account creds) enables both providers.
 - [`uv`](https://docs.astral.sh/uv/) — manages devbox's install and runtime
-  environment (its dependencies: `pyyaml` for the cloud-config merge, `boto3`
-  for the AWS providers).
+  environment (its one dependency: `boto3`, for the AWS providers).
 - `jj` (jujutsu) and `rsync` on the host — for `devbox jj fetch` and `devbox
   sync` respectively (both also shipped in the box's base packages). Skip if you
   use neither.
@@ -209,7 +209,7 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    already have set, if you use jj). It's only truly required if that
    fallback also fails (no `jj` on the host, or no identity configured
    there either), in which case `devbox create` dies with a clear message.
-   devbox's common cloud-config template always runs
+   devbox's provisioning (the built-in `jj` mod) always runs
    `jj config set --user user.name/user.email` in the sandbox, using
    whichever source resolved.
 
@@ -326,11 +326,11 @@ the migration.
 
 cfleet's "instance templates" (`instance_type`/`architecture`/AMI/`spot`) fold
 into this `[ec2]` section; the same re-runnable provisioning (jj, dotfiles,
-Claude Code, `[repo]` bootstrap) runs on EC2 via cloud-init user-data, so a
+Claude Code, `[repo]` bootstrap) runs on EC2 over SSH after boot, so a
 sandbox is identical whether it's a local libvirt VM or an EC2 instance.
 
-The **aws** provider is AWS **Lightsail**: the same cloud-init user-data and the
-same provisioning, but flat-rate *bundles* instead of an instance type plus an
+The **aws** provider is AWS **Lightsail**: the same init script as user-data and
+the same provisioning, but flat-rate *bundles* instead of an instance type plus an
 EBS volume. Trade-offs worth knowing:
 
 - **Bundles fix the machine.** A bundle sets CPU, RAM, and disk together, so
@@ -353,11 +353,11 @@ EBS volume. Trade-offs worth knowing:
 creds; a project can select it with `provider = "aws"` and no `[lightsail]`
 section at all.
 
-`[repo]` drives how the sandbox gets your code, via devbox's common
-cloud-config template (see below) — no project needs to author this by hand:
+`[repo]` drives how the sandbox gets your code, via the built-in
+`repo-bootstrap` mod (see below) — no project needs to author this by hand:
 
 - **`mode = "clone"`** — the project already has a git remote. The sandbox
-  runs `jj git clone <url> ~/<dir>` on first boot.
+  runs `jj git clone <url> ~/<dir>` while provisioning.
 - **`mode = "push"`** — brand-new project with nothing pushed anywhere yet.
   The sandbox creates an empty colocated jj+git repo at `~/<dir>`, ready to
   receive a push from the host — see "Exchanging commits" below. `url` is not used
@@ -365,14 +365,13 @@ cloud-config template (see below) — no project needs to author this by hand:
 - **Omit `[repo]` entirely** (or `mode = "none"`) — no repo bootstrap at all,
   e.g. a scratch/experiment VM.
 
-Most projects add what they need as a **mod** (see below), not a
-`.devbox/cloud-config.yaml`. The optional cloud-config fragment is now for
-genuine cloud-init concerns only (extra `packages`, `write_files`, ...) and
-supports the `%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%` placeholders, filled in by
-literal text substitution before parsing (not `{{...}}`, which collides with
-cloud-init's own jinja syntax and with valid YAML flow-mapping syntax).
-Provisioning context (jj identity, `[repo]`, the GitHub token) no longer flows
-through `%TOKEN%`s — mods receive it via the environment.
+A project adds everything it needs as a **mod** (see below). There is no
+per-project first-boot hook: devbox's first-boot layer is one fixed init script
+(see [First boot](#first-boot-the-init-script)), and the older
+`.devbox/cloud-config.yaml` fragment is **gone** — port anything you had there
+to a project mod, which reconverges in place instead of forcing a rebuild.
+Provisioning context (jj identity, `[repo]`, the GitHub token) flows to mods via
+the environment, not `%TOKEN%`s.
 
 ## Provisioning: mods
 
@@ -395,7 +394,7 @@ so a private `jj git clone` can authenticate). The 95% case is "just add rust":
 **project > global > built-in**, so a project can shadow a built-in by name:
 
 ```
-devbox/mods/*.sh              # built-in, shipped in the package
+mods/*.sh                     # built-in, at the repo root
 ~/.config/devbox/mods/*.sh    # global user (shared across projects)
 .devbox/mods/*.sh             # project-local
 ```
@@ -408,22 +407,22 @@ so a mod that needs a secret — e.g. `repo-bootstrap` cloning a private repo wi
 `GITHUB_TOKEN` — has it, and it never lands in a script on disk or a log.
 
 **Self-contained.** A mod `sudo apt-get install -y`s what it needs (the dev user
-has NOPASSWD sudo; apt-install is idempotent) rather than relying on
-cloud-config's `packages:` — which is why most projects no longer need a
-`.devbox/cloud-config.yaml` at all.
+has NOPASSWD sudo; apt-install is idempotent) rather than relying on the init
+script's package list — which is why a project never has to touch the first-boot
+layer at all.
 
 **Delivered over SSH** (one path). devbox tars the resolved driver + mods +
 context + manifest, pipes it to the box over the `devbox-<name>` SSH alias,
 extracts it into a per-run temp dir (owned by the SSH user), and runs the driver.
 This is the **only** delivery path — the same for a fresh box and a reconverge:
 
-- **`devbox create`** — after boot (once base cloud-init has created the user and
+- **`devbox create`** — after boot (once the init script has created the user and
   installed packages), runs the mods, then pushes `[[sync]]` files. `create`
   blocks through all of it, so when it returns the box is fully provisioned.
 - **`devbox sync --mods[=a,b,c]`** — reconverge a live box; no list runs the
   whole playbook, a list runs just those (fast iteration while writing a mod).
 
-The cloud-config carries **no** provisioning payload — it only does base setup.
+The init script carries **no** provisioning payload — it only does base setup.
 (Trade-off: the host must stay attached during `create`; if it disconnects
 mid-provision, re-run `devbox sync --mods`.)
 
@@ -449,7 +448,7 @@ comment (the parse runs to end of line). Built-in examples: `repo-bootstrap`
 ### Example: a rust project
 
 `.devbox/config.toml` gains one line, and the rust setup is a project-local mod
-— no `.devbox/cloud-config.yaml` needed:
+— nothing else to configure:
 
 ```toml
 # .devbox/config.toml
@@ -468,23 +467,41 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
 `devbox sync --mods=rust` re-applies just that mod on a live box.
 
-### How the cloud-config layer merges
+### First boot: the init script
 
-devbox ships `common-cloud-config.yaml` (baseline `packages`, the dev user, the
-`BASH_ENV` wiring — no provisioning payload). `devbox create` substitutes its
-`%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%` tokens and merges the template with the
-project's optional `.devbox/cloud-config.yaml`:
+devbox ships one static bash script, `devbox/init-script.sh`, and hands it to
+**every** provider as user-data — libvirt (NoCloud seed), ec2 (`UserData`) and
+aws/Lightsail (`userData`). cloud-init executes a `#!` user-data script on
+libvirt and EC2 (its scripts-user stage); Lightsail executes user-data as a
+shell script natively — it does **not** understand `#cloud-config`, which is
+why devbox has no cloud-config layer at all.
 
-- Cloud-config keys that are lists — `packages`, `write_files`, `runcmd`,
-  `bootcmd`, `users`, `groups` — are **concatenated common-then-project**.
-  Don't redeclare `users:` in a project fragment — that's owned by the common
-  template.
-- Every other top-level key is a **whole-value override** — a project fragment's
-  value replaces the common one entirely (no recursive dict merging).
-- `hostname` defaults to the instance name unless a fragment sets it.
-- The merged result gets a fresh `#cloud-config` header prepended (YAML parsing
-  drops comments, so the original magic first line doesn't survive a
-  parse→merge→dump round trip on its own).
+`devbox create` renders it by literal `%TOKEN%` substitution (not `{{...}}`,
+which collides with cloud-init's jinja): `%DEVBOX_USER%`, `%DEVBOX_SSH_PUBKEY%`
+and `%DEVBOX_HOSTNAME%` (the instance's canonical name). What it does, as root,
+under `set -euo pipefail`:
+
+1. Creates the login user — `sudo` group, a `/etc/sudoers.d` NOPASSWD drop-in,
+   locked password, and `~/.ssh/authorized_keys` holding your public key. This
+   is **first**, before the package install, so SSH access is never gated on
+   (or lost to) a slow or failing apt step.
+2. Sets the hostname to the instance name. It also drops a `preserve_hostname`
+   cloud-init snippet, so cloud-init doesn't revert the name to the
+   datasource's on the next reboot.
+3. Appends `BASH_ENV=/home/<user>/.bash_env` to `/etc/environment`, so
+   non-interactive bash (e.g. Claude Code's Bash tool) picks up what the mods
+   install.
+4. Adds the official GitHub CLI apt repo, then installs the baseline the mods
+   lean on: `zsh vim python3 curl git git-lfs ca-certificates gh rsync`. (The
+   repo is needed because `gh` isn't in every Ubuntu release's archive —
+   notably 24.04, the newest LTS blueprint Lightsail offers — and under
+   `set -e` a missing package would abort first boot.) No distro upgrade.
+5. Switches the login shell to `zsh` now that it exists.
+
+Every step is idempotent, and the whole thing carries no provisioning payload —
+mods run over SSH afterwards. A project cannot extend this layer (the
+`.devbox/cloud-config.yaml` fragment is gone); project-specific setup is a mod,
+which has the advantage of reconverging on a live box.
 
 ## Credentials (`[env]`)
 
@@ -662,10 +679,10 @@ uv run pytest        # run the test suite
 ```
 
 The code is a `devbox/` package: `config` (global/project config), `provision`
-(modular mods — resolution, env context, payload/driver assembly), `cloudconfig`
-(cloud-config render + payload injection), `sync` (host→box rsync file sync),
+(modular mods — resolution, env context, payload/driver assembly), `initscript`
+(first-boot user-data script render), `sync` (host→box rsync file sync),
 `cli` (subcommands + argparse), and a `providers/` package — a `Provider` seam
 (`providers/base.py`) with `libvirt`, `ec2`, and `lightsail` (the `aws`
 provider) implementations. Data files
-(`common-cloud-config.yaml`, `provision-driver.sh`, and the built-in
-`mods/*.sh`) live inside the package.
+(`init-script.sh`, `provision-driver.sh`) live inside the package; the built-in
+`mods/*.sh` live at the repo root.
