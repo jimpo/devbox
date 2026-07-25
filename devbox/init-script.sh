@@ -28,6 +28,11 @@
 # to the network is retried, and the login user + its SSH key are created FIRST
 # - before the package install - so the box stays reachable (and debuggable)
 # even if a later step fails.
+# Lightsail runs instance user-data under /bin/sh (dash), ignoring the shebang;
+# re-exec under bash so the bashisms below work. Harmless on EC2/libvirt (bash
+# already). MUST stay the first executable line - everything after it, starting
+# with `set -o pipefail`, is a bashism dash chokes on.
+if [ -z "${BASH_VERSION:-}" ]; then exec /bin/bash "$0" "$@"; fi
 set -euo pipefail
 
 # ---- rendered tokens --------------------------------------------------------

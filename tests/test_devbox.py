@@ -437,6 +437,32 @@ def test_render_init_script_parses_as_bash(pubkey, tmp_path):
     assert devbox.subprocess.run(["bash", "-n", str(script)]).returncode == 0
 
 
+GUARD = 'if [ -z "${BASH_VERSION:-}" ]; then exec /bin/bash "$0" "$@"; fi'
+
+
+def test_render_init_script_re_execs_under_bash_before_any_bashism(pubkey):
+    # Lightsail runs user-data under /bin/sh (dash) and ignores the shebang, so
+    # the script re-execs itself under bash. The guard is only load-bearing if
+    # it precedes EVERY bashism - `set -o pipefail` and the packages array both
+    # abort dash on the spot ("set: Illegal option -o pipefail").
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    assert GUARD in rendered
+    assert 0 < rendered.index(GUARD) < rendered.index("set -euo pipefail")
+    assert rendered.index(GUARD) < rendered.index("DEVBOX_PACKAGES=(")
+
+
+def test_render_init_script_prefix_up_to_the_guard_is_posix_sh(pubkey, tmp_path):
+    # Everything dash executes before the re-exec must be POSIX sh: slice the
+    # script from the top through the guard line and hand it to `sh -n`.
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    prefix = rendered[:rendered.index(GUARD) + len(GUARD)] + "\n"
+    script = tmp_path / "prefix.sh"
+    script.write_text(prefix)
+    proc = devbox.subprocess.run(["/bin/sh", "-n", str(script)],
+                                 capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
 # ---- build_payload (the provisioning payload, delivered over SSH) -----------
 @pytest.fixture
 def isolated_mods(monkeypatch):
