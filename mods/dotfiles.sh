@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
 #
-# mod: dotfiles - gitconfig + vimrc + oh-my-zsh (the `jimpo` theme only; NOT the
-# other custom zsh settings) from github.com/jimpo/configenv.
+# mod: dotfiles - full shell/editor/tool setup from github.com/jimpo/configenv,
+# delegating to its own install.sh (apt packages) and setup.sh (oh-my-zsh +
+# jimpo theme/plugins, editor configs, dotfiles) so the box stays DRY with the
+# host environment.
 #
-# Idempotency: the copied dotfiles are overwritten unconditionally; the oh-my-zsh
-# install is guarded on its directory; the ~/.zshrc "devbox common env" block is
-# appended only once.
+# Idempotency: apt install and oh-my-zsh are no-ops when already present; the
+# devbox zsh env block is appended once. (setup.sh's own steps must be
+# re-run-safe - a configenv concern.)
 set -euo pipefail
 
 CFG="$(mktemp -d)"
 git clone --depth 1 https://github.com/jimpo/configenv "$CFG"
-cp "$CFG/gitconfig" "$HOME/.gitconfig"
-cp "$CFG/vimrc" "$HOME/.vimrc"
+cd "$CFG"
 
-if [ ! -d "$HOME/.oh-my-zsh" ]; then
-  RUNZSH=no CHSH=no KEEP_ZSHRC=no \
-    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-fi
-mkdir -p "$HOME/.oh-my-zsh/custom/themes"
-cp "$CFG/oh-my-zsh/custom/themes/jimpo.zsh-theme" "$HOME/.oh-my-zsh/custom/themes/"
-sed -i 's/^ZSH_THEME=.*/ZSH_THEME="jimpo"/' "$HOME/.zshrc"
-# The jimpo theme's RPS1 renders a vi INS/CMD indicator that needs the vi-mode
-# plugin's KEYMAP - enable it (but not the other custom plugins).
-sed -i 's/^plugins=.*/plugins=(git vi-mode)/' "$HOME/.zshrc"
+# install.sh apt-installs the package set (incl. unzip, which setup.sh's vim
+# CSApprox step needs). Run under sudo (the dev user has NOPASSWD), per
+# configenv's README; DEBIAN_FRONTEND keeps any debconf prompt from blocking.
+sudo apt-get update -qq
+sudo env DEBIAN_FRONTEND=noninteractive sh install.sh
 
-if ! grep -q 'devbox common env' "$HOME/.zshrc"; then
+# setup.sh (as the dev user): oh-my-zsh + theme/plugins, editor configs,
+# dotfiles. -f = force-overwrite (non-interactive; no cp clobber prompts).
+sh setup.sh -f
+
+# devbox-specific interactive-zsh env (configenv doesn't set this): put jj /
+# claude (~/.local/bin) and cargo on PATH for login shells. Appended once.
+if ! grep -q 'devbox common env' "$HOME/.zshrc" 2>/dev/null; then
   cat >> "$HOME/.zshrc" <<'ZRC'
 
 # --- devbox common env ---
@@ -32,4 +34,5 @@ if ! grep -q 'devbox common env' "$HOME/.zshrc"; then
 export PATH="$HOME/.local/bin:$PATH"
 ZRC
 fi
+
 rm -rf "$CFG"
