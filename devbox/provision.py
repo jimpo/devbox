@@ -68,7 +68,7 @@ PROJECT_MODS_SUBDIR = "mods"
 # must precede dotfiles (the per-user half). A project's `mods` are appended
 # after this.
 DEFAULT_BASE_MODS = ("jj", "github-auth", "dotfiles-packages", "dotfiles", "vim",
-                     "claude-code", "repo-bootstrap")
+                     "neovim", "claude-code", "repo-bootstrap")
 
 # Provisioning output log, under the dev user's $HOME - written (tee'd) when the
 # driver runs over SSH, and tailed by `devbox status`. The driver additionally

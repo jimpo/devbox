@@ -131,7 +131,7 @@ architecture = "arm64"    # x86_64 | arm64
 ### Mods (provisioning)
 
 The base playbook (`jj → github-auth → dotfiles-packages → dotfiles → vim →
-claude-code → repo-bootstrap`) is built in. Add a project mod only for extra
+neovim → claude-code → repo-bootstrap`) is built in. Add a project mod only for extra
 tooling (`Cargo.toml` → a rust mod, `package.json` → a node mod):
 
 1. List it: `mods = ["rust"]` in `.devbox/config.toml`.

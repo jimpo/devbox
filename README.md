@@ -457,7 +457,7 @@ appended:
 
 ```
 base (built-in, fixed order):  jj → github-auth → dotfiles-packages → dotfiles →
-                               vim → claude-code → repo-bootstrap
+                               vim → neovim → claude-code → repo-bootstrap
 project mods (config.toml):    + rust + wasm-tools + …
 ```
 
