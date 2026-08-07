@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
 #
-# mod: dotfiles - full shell/editor/tool setup from github.com/jimpo/configenv,
-# delegating to its own install.sh (apt packages) and setup.sh (oh-my-zsh +
-# jimpo theme/plugins, editor configs, dotfiles) so the box stays DRY with the
-# host environment.
+# mod: dotfiles - the per-user half of the configenv setup from
+# github.com/jimpo/configenv: its setup.sh (oh-my-zsh + jimpo theme/plugins,
+# editor configs, dotfiles), so the box stays DRY with the host environment.
 #
-# Idempotency: apt install and oh-my-zsh are no-ops when already present; the
-# devbox zsh env block is appended once. (setup.sh's own steps must be
-# re-run-safe - a configenv concern.)
+# requires: dotfiles-packages
+# runas: admin agent
+#
+# Runs for BOTH accounts on purpose: the agent needs the environment to work in,
+# and the privileged user needs a usable shell for `devbox ssh --admin`, which
+# is the debugging entry point. That means a second clone and a second oh-my-zsh
+# install - a few minutes of provisioning, accepted deliberately. The apt half
+# lives in the `dotfiles-packages` mod, which runs once, as root.
+#
+# Idempotency: oh-my-zsh is a no-op when already present; the devbox zsh env
+# block is appended once. (setup.sh's own steps must be re-run-safe - a configenv
+# concern.)
 set -euo pipefail
 
 CFG="$(mktemp -d)"
 git clone --depth 1 https://github.com/jimpo/configenv "$CFG"
 cd "$CFG"
 
-# install.sh apt-installs the package set (incl. unzip, which setup.sh's vim
-# CSApprox step needs). Run under sudo (the dev user has NOPASSWD), per
-# configenv's README; DEBIAN_FRONTEND keeps any debconf prompt from blocking.
-sudo apt-get update -qq
-sudo env DEBIAN_FRONTEND=noninteractive sh install.sh
-
-# setup.sh (as the dev user): oh-my-zsh + theme/plugins, editor configs,
+# setup.sh as the invoking user: oh-my-zsh + theme/plugins, editor configs,
 # dotfiles. -f = force-overwrite (non-interactive; no cp clobber prompts).
 sh setup.sh -f
 

@@ -15,13 +15,20 @@
 # executes user-data as a script and does not understand `#cloud-config`, which
 # is why devbox has no cloud-config layer at all.
 #
-# This covers only genuine first-boot concerns: the login user (+ its SSH key),
-# a baseline of packages the base mods lean on, the BASH_ENV wiring, and the
-# hostname. The actual provisioning is modular "mods" (jj, dotfiles, Claude
+# This covers only genuine first-boot concerns: the privileged user (+ its SSH
+# key), a baseline of packages the base mods lean on, the BASH_ENV wiring, and
+# the hostname. The actual provisioning is modular "mods" (jj, dotfiles, Claude
 # Code, repo bootstrap, and a project's own), driven entirely over SSH after
 # boot by `devbox create` / `devbox sync --mods` (see cli.py / provision.py) -
 # nothing of it is injected here, and a project's own first-boot needs are
 # served by a project mod, not by this file.
+#
+# A box has TWO accounts: the privileged one created here, and the unprivileged
+# `agent_user` that AI agents and the repo checkout live under. The agent user
+# is deliberately NOT created here - this script runs once, at first boot, so an
+# account born here could never appear on an existing box and changing
+# `agent_user` would need a rebuild. It is created by the provisioning driver
+# instead, which reconverges.
 #
 # Runs as root. `set -e` means a failed step aborts the rest of first boot (and
 # surfaces as a non-zero `cloud-init status --wait`), so every step that talks
@@ -45,9 +52,18 @@ DEVBOX_SSH_PUBKEY='%DEVBOX_SSH_PUBKEY%'
 DEVBOX_HOSTNAME='%DEVBOX_HOSTNAME%'
 # Makes provisioned tools (jj / claude / a project's own rustup, ...) available
 # to NON-interactive bash (e.g. Claude Code's Bash tool): PAM exports BASH_ENV
-# from /etc/environment into the user's shells. The referenced file is written
-# by the provisioning driver, which runs later, over SSH.
-BASH_ENV_LINE='BASH_ENV=/home/%DEVBOX_USER%/.bash_env'
+# from /etc/environment into the user's shells.
+#
+# It points at a SHARED STUB, not at a user's own file: /etc/environment is one
+# system-wide table and the box has two accounts, so a per-user path here would
+# make one user source the other's file. `BASH_ENV=$HOME/.bash_env` is not an
+# option either - pam_env reads /etc/environment as plain KEY=VALUE pairs, and
+# expansion there is not something to rely on (HOME is not necessarily even set
+# at pam_env time). The stub defers the expansion to bash, where it works. Each
+# user's own ~/.bash_env is written by the provisioning driver, which runs
+# later, over SSH.
+BASH_ENV_STUB='/etc/devbox/bash_env'
+BASH_ENV_LINE="BASH_ENV=$BASH_ENV_STUB"
 
 DEVBOX_PACKAGES=(
   zsh              # the login shell $DEVBOX_USER is switched to below
@@ -59,6 +75,13 @@ DEVBOX_PACKAGES=(
   ca-certificates
   gh               # GitHub CLI; also git's HTTPS credential helper
   rsync            # receiver for `devbox sync` (host->box file push)
+  # The agent account has no sudo, so it cannot apt-install its way out of a
+  # missing build dependency mid-task the way the old single sudo-capable user
+  # could - it takes a `# packages:` line on a mod and a `devbox sync --mods`.
+  # Carry the two that virtually every native build wants. Anything beyond this
+  # belongs in a mod: first boot is slow enough, and it is slow for every box.
+  build-essential
+  pkg-config
 )
 
 export DEBIAN_FRONTEND=noninteractive
@@ -81,13 +104,16 @@ retry() {
   done
 }
 
-# ---- 1. login user, SSH key, sudo (FIRST: never gated on the package step) ---
+# ---- 1. privileged user, SSH key, sudo (FIRST: never gated on packages) ------
 log "creating user '$DEVBOX_USER'"
 if ! id -u "$DEVBOX_USER" >/dev/null 2>&1; then
   # Created with /bin/bash - zsh isn't installed yet, and a login shell that
   # doesn't exist locks the account out. Switched to zsh after the install.
+  # HOME_MODE 0750, not the distro default 0755: the unprivileged agent account
+  # (created later by the driver) must not be able to read this user's home,
+  # which is the side of the box that holds privilege.
   useradd --create-home --home-dir "$DEVBOX_HOME" --user-group \
-          --groups sudo --shell /bin/bash "$DEVBOX_USER"
+          --key HOME_MODE=0750 --groups sudo --shell /bin/bash "$DEVBOX_USER"
 fi
 # No password login, ever (key-only), matching the cloud image's own users.
 passwd --lock "$DEVBOX_USER" >/dev/null
@@ -131,6 +157,20 @@ if [ -d /etc/cloud/cloud.cfg.d ]; then
 fi
 
 # ---- 3. BASH_ENV ------------------------------------------------------------
+# The stub every user's non-interactive bash runs, which then sources that
+# user's own ~/.bash_env (written per-user by the provisioning driver). Ends in
+# `:` so a user without the file yet still leaves bash a zero status.
+log "installing the $BASH_ENV_STUB shim"
+install -d -m 0755 "$(dirname "$BASH_ENV_STUB")"
+cat > "$BASH_ENV_STUB" <<'STUB'
+# devbox: per-user BASH_ENV shim. /etc/environment is system-wide and the box
+# has more than one account, so it points here and the per-user file is
+# resolved by bash, which can actually expand $HOME.
+if [ -r "$HOME/.bash_env" ]; then . "$HOME/.bash_env"; fi
+:
+STUB
+chmod 0644 "$BASH_ENV_STUB"
+
 log "wiring $BASH_ENV_LINE into /etc/environment"
 touch /etc/environment
 if ! grep -qxF "$BASH_ENV_LINE" /etc/environment; then

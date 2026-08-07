@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Optional
@@ -30,6 +31,27 @@ PROVIDERS = ("libvirt", "ec2", "aws")
 # per-instance command derive the provider from the name alone (offline string
 # routing), instead of an API call per `ssh`/`ip`/... to find the owner.
 PREFIXED_PROVIDERS = tuple(p for p in PROVIDERS if p != DEFAULT_PROVIDER)
+
+# A box has two accounts (see provision.py): the privileged `user` (the SSH
+# target devbox provisions through, sudo-enabled) and the unprivileged
+# `agent_user` that AI agents and the repo checkout live under. `agent_user`
+# defaults to the project name, which is a directory basename by default - so it
+# is validated here rather than trusted, since plenty of legal project names
+# ('MyProject', 'foo.bar', '2fa-lib') are not legal Linux usernames. Failing at
+# config-resolve time costs a second; failing in `useradd` costs a boot.
+USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+# Usernames the agent account must never take: standard Debian/Ubuntu system
+# accounts, plus the default login user of the cloud images the providers boot
+# (`ubuntu` on Ubuntu cloud images and Lightsail blueprints, `ec2-user` on
+# Amazon Linux). Taking one of these would either collide with an existing
+# sudo-capable account or fight the distro over a system uid.
+RESERVED_USERNAMES = frozenset({
+    "root", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail",
+    "news", "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats",
+    "nobody", "systemd-network", "systemd-resolve", "messagebus", "sshd",
+    "ubuntu", "admin", "ec2-user",
+})
 
 GLOBAL_CONFIG_PATH = Path.home() / ".config" / "devbox" / "config.toml"
 SSH_DIR = Path.home() / ".config" / "devbox" / "ssh"
@@ -181,6 +203,16 @@ class GlobalConfig:
             ec2=_load_ec2_config(data.get("ec2"), path),
         )
 
+    def read_ssh_pubkey(self) -> str:
+        """The host's SSH public key, as a single line. Installed twice on a box:
+        into the privileged user's authorized_keys at first boot (initscript.py)
+        and into the agent user's by the provisioning driver (provision.py puts
+        it in the payload's context). Read through one place so both paths fail
+        the same way when it's missing."""
+        if not self.ssh_pubkey_path.is_file():
+            die(f"SSH public key not found: {self.ssh_pubkey_path}")
+        return self.ssh_pubkey_path.read_text().strip()
+
 
 def _resolve_env(data: dict, config_path: Path) -> dict:
     """Parse `[env]` - a flat table of KEY = "value" credentials/vars injected
@@ -268,7 +300,12 @@ class LightsailProjectConfig:
 class ProjectConfig:
     project: str                  # label/tag on instances (default: marker dir basename)
     provider: str                 # default provider for a bare `create` ("libvirt")
+    # The box's two accounts. `user` is the PRIVILEGED one (sudo, created by the
+    # init script, the SSH target provisioning runs through); `agent_user` is the
+    # unprivileged one AI agents and the repo checkout live under, created by the
+    # provisioning driver. See the module constants above.
     user: str
+    agent_user: str
     vcpus: int
     memory_mib: int
     disk_gb: int
@@ -416,7 +453,8 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
 
     _warn_unknown_keys(
         data,
-        known_top={"project", "provider", "user", "vcpus", "memory_mib", "disk_gb", "mods"},
+        known_top={"project", "provider", "user", "agent_user", "vcpus", "memory_mib",
+                   "disk_gb", "mods"},
         known_sections={
             "repo": {"mode", "dir", "url", "sync"},
             "sync": _ANY_KEYS,  # array-of-tables, validated by _parse_sync_entry
@@ -433,10 +471,13 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         die(f"{config_path}: provider must be one of {PROVIDERS} (got {provider!r})")
 
     repo = _resolve_repo_config(data, config_path)
+    project_name = data.get("project", marker_dir.name)
+    user, agent_user = _resolve_users(data, project_name, config_path)
     return ProjectConfig(
-        project=data.get("project", marker_dir.name),
+        project=project_name,
         provider=provider,
-        user=data.get("user", os.environ.get("USER", "")),
+        user=user,
+        agent_user=agent_user,
         vcpus=data.get("vcpus", global_config.vcpus),
         memory_mib=data.get("memory_mib", global_config.memory_mib),
         disk_gb=data.get("disk_gb", global_config.disk_gb),
@@ -448,6 +489,36 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         ec2=_resolve_ec2_project_config(data, config_path),
         lightsail=_resolve_lightsail_project_config(data, config_path),
     )
+
+
+def _resolve_users(data: dict, project_name: str, config_path: Path) -> tuple:
+    """The box's (privileged, unprivileged) usernames. `user` defaults to the
+    host's own $USER; `agent_user` defaults to the project name. Both are
+    validated here so an illegal name fails in a second rather than at
+    `useradd` time, a boot later."""
+    user = data.get("user", os.environ.get("USER", ""))
+    agent_user = data.get("agent_user", project_name)
+
+    if not USERNAME_RE.match(user):
+        die(f"{config_path}: user {user!r} is not a valid Linux username "
+            f"(lowercase letters/digits/'-'/'_', not starting with a digit, "
+            f"32 chars max); set `user = \"...\"`")
+    if not USERNAME_RE.match(agent_user):
+        # The overwhelmingly common cause is the default: a project name (i.e. a
+        # directory basename) that is not a legal username. Say so.
+        origin = ("agent_user" if "agent_user" in data else
+                  f"the project name {project_name!r}, which agent_user defaults to")
+        die(f"{config_path}: agent_user {agent_user!r} is not a valid Linux username "
+            f"(lowercase letters/digits/'-'/'_', not starting with a digit, "
+            f"32 chars max) - it comes from {origin}; set `agent_user = \"...\"`")
+    if agent_user == user:
+        die(f"{config_path}: agent_user and user must differ (both are {user!r}) - "
+            f"the whole point is that agents run as an account without sudo; "
+            f"set `agent_user = \"...\"`")
+    if agent_user in RESERVED_USERNAMES:
+        die(f"{config_path}: agent_user {agent_user!r} is a reserved system or "
+            f"cloud-image account; set `agent_user = \"...\"` to something else")
+    return user, agent_user
 
 
 def _resolve_mods(data: dict, config_path: Path) -> list:

@@ -26,26 +26,41 @@ from .config import ProjectConfig
 from .provision import render_env_file
 from .util import die
 
-# The box-side, devbox-managed 0600 env file (in the dev user's home). Holds the
-# effective [env] map as `export KEY=val` lines; sourced from ~/.bash_env (the
-# driver's BASH_ENV target, what non-interactive bash reads) and ~/.zshenv
+# The box-side, devbox-managed 0600 env file, in the AGENT user's home. Holds
+# the effective [env] map as `export KEY=val` lines; sourced from ~/.bash_env
+# (the BASH_ENV target, what non-interactive bash reads) and ~/.zshenv
 # (interactive zsh) so the creds reach both the agent's Bash tool and a human.
+#
+# The agent's home is the only copy. The privileged user can still read it via
+# sudo - it is the trusted side of the box - but nothing writes it a second
+# copy, so a mod running as `admin` or `root` sees no credentials. A mod that
+# needs one should be an agent mod.
 GUEST_ENV_REL = ".config/devbox/env"
 _ENV_SOURCE_LINE = '[ -f "$HOME/.config/devbox/env" ] && . "$HOME/.config/devbox/env"'
 
 
-def run_envvars(alias: str, env: dict) -> None:
-    """Write the box's devbox-managed [env] file (0600) from `env` and ensure the
-    user's ~/.zshenv sources it (~/.bash_env is wired by the provisioning driver).
-    Full rewrite each run - a key dropped from config is dropped from the box.
-    Content is piped over stdin (never echoed to a log)."""
+def run_envvars(alias: str, env: dict, agent_user: str) -> None:
+    """Write the box's devbox-managed [env] file (0600, agent-owned) from `env`
+    and ensure the agent's ~/.zshenv sources it (~/.bash_env is wired by the
+    provisioning driver). Full rewrite each run - a key dropped from config is
+    dropped from the box. Content is piped over stdin (never echoed to a log,
+    never in argv).
+
+    `alias` is the PRIVILEGED user's alias: this writes into another user's home,
+    so it needs sudo. The agent's home must already exist - `devbox create` and
+    `devbox sync` run the driver's `--ensure-users` preamble first."""
     content = render_env_file(env)
+    user = shlex.quote(agent_user)
+    home = shlex.quote(f"/home/{agent_user}")
+    line = shlex.quote(_ENV_SOURCE_LINE)
     remote = (
-        'set -e; mkdir -p "$HOME/.config/devbox"; '
-        'umask 077 && cat > "$HOME/.config/devbox/env"; '
-        'touch "$HOME/.zshenv"; '
-        f'grep -qxF {shlex.quote(_ENV_SOURCE_LINE)} "$HOME/.zshenv" || '
-        f'printf "%s\\n" {shlex.quote(_ENV_SOURCE_LINE)} >> "$HOME/.zshenv"'
+        'set -e; '
+        f'sudo install -d -o {user} -g {user} -m 0700 {home}/.config/devbox; '
+        # /dev/stdin is the piped content: the creds never touch a command line.
+        f'sudo install -o {user} -g {user} -m 0600 /dev/stdin {home}/.config/devbox/env; '
+        f'sudo touch {home}/.zshenv; sudo chown {user}:{user} {home}/.zshenv; '
+        f'sudo grep -qxF {line} {home}/.zshenv || '
+        f'printf "%s\\n" {line} | sudo tee -a {home}/.zshenv >/dev/null'
     )
     result = subprocess.run(
         ["ssh", alias, "bash", "-c", shlex.quote(remote)], input=content.encode())
@@ -88,9 +103,11 @@ def _job(host_src: str, guest_dst: str) -> RsyncJob:
 def plan_sync(project: ProjectConfig, host_home: str = None, guest_home: str = None) -> list:
     """Resolve the project's sync entries into concrete rsync jobs (one per
     mirror unit). `host_home`/`guest_home` are injectable for tests; they default
-    to the host's real home and the box's `/home/<user>`."""
+    to the host's real home and the box's `/home/<agent_user>` - synced files are
+    agent skills, project config and the like, which belong to the account that
+    does the work, not the privileged one."""
     host_home = host_home if host_home is not None else str(Path.home())
-    guest_home = guest_home if guest_home is not None else f"/home/{project.user}"
+    guest_home = guest_home if guest_home is not None else f"/home/{project.agent_user}"
     jobs = []
     for entry in project.sync:
         if entry.repo_relative:

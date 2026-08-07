@@ -37,15 +37,16 @@ def render_init_script(project: ProjectConfig, gc: GlobalConfig,
     """The rendered first-boot user-data script for `project`. `instance_name`
     is the instance's canonical name (= its hostname); defaults to the project
     name (the libvirt default instance)."""
-    if not gc.ssh_pubkey_path.is_file():
-        die(f"SSH public key not found: {gc.ssh_pubkey_path}")
+    pubkey = gc.read_ssh_pubkey()
     if not INIT_SCRIPT_PATH.is_file():
         die(f"devbox internal error: init script not found at {INIT_SCRIPT_PATH} "
             f"(broken install?)")
 
     tokens = {
+        # The PRIVILEGED user only - the unprivileged agent account is created by
+        # the provisioning driver, not at first boot (see init-script.sh).
         "DEVBOX_USER": project.user,
-        "DEVBOX_SSH_PUBKEY": gc.ssh_pubkey_path.read_text().strip(),
+        "DEVBOX_SSH_PUBKEY": pubkey,
         "DEVBOX_HOSTNAME": instance_name or project.project,
     }
     # The tokens land inside single-quoted shell assignments, so a value

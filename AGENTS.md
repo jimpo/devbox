@@ -13,12 +13,17 @@ uv tool install --editable .     # point the live `devbox` command at this check
 
 `tests/` exercises pure logic and provider paths reachable without real infra:
 global/project config loading + merging (`GlobalConfig.load`, `resolve_project`,
-`resolve_instance`, `parse_instance_name`), marker walk-up, the first-boot
+`resolve_instance`, `parse_instance_name`), the two-account config
+(`agent_user` defaulting + username/collision/reserved-name validation), marker
+walk-up, the first-boot
 init-script render (token substitution into the shipped `init-script.sh`), the
 modular-provisioning logic (mod resolution
-precedence, env-file quoting, payload/tarball assembly, `[env]` merge +
-`run_envvars` remote command), the host→box sync planning (per-side `$HOME`
-expansion, repo-relative anchoring, `include` mirror-unit expansion, rsync argv),
+precedence, mod metadata headers — `# requires:`/`# runas:`/`# packages:` — and
+manifest rendering, env-file quoting, payload/tarball assembly, `[env]` merge +
+`run_envvars` remote command), the dual SSH aliases (`_refresh_ssh_aliases`),
+the host→box sync planning (per-side `$HOME`
+expansion, agent-anchored guest home, repo-relative anchoring, `include`
+mirror-unit expansion, rsync argv),
 the libvirt
 `<metadata>` stamp/parse + `list` formatting (monkeypatched `virsh`), and the
 **EC2 provider against a fake EC2 client** (`Ec2Provider` with an injected
@@ -34,11 +39,22 @@ duck-typing, the up-front `credential_problem` check against a fake session, the
 `aws sso login` command derived from a temp `~/.aws/config`, the TTY/non-TTY/
 declined prompt paths, and `cli._run`'s one-line errors) — the exception fakes
 carry botocore's real class names, since that naming is what the matcher keys on.
+`tests/test_driver.py` is the exception to "the driver can't be tested": it runs
+the real `provision-driver.sh` with fake `sudo`/`useradd`/`id`/`getent`/`apt-get`
+on PATH, which covers manifest parsing, `# runas:` dispatch (including the
+privilege drop's target account and `$HOME`), `# packages:` ordering, selective
+runs, failure propagation, and the isolation assertions. The fake `sudo` executes
+the command for real, so the control flow is genuine; only the privilege is
+simulated. It builds the manifest with the real `render_manifest`, so it also
+pins the Python→bash format agreement.
+
 It does not and cannot exercise `create`/`up`/`stop`/`destroy`/`host`/`provision`/
 `list`/`jj fetch` end-to-end against real infra (`jj fetch`'s actual `jj git
 fetch` needs a
-booted, provisioned instance), the actual behavior of the built-in mods or the
-driver on a real box (jj install, dotfiles, Claude Code, repo bootstrap), or a
+booted, provisioned instance), the actual behavior of the built-in mods on a real
+box (jj install, dotfiles, Claude Code, repo bootstrap), the parts of the driver
+that a fake `sudo` can only simulate (real `useradd` flags, sudoers, apt, whether
+the agent genuinely lacks privilege), or a
 live EC2/Lightsail launch — those need a real libvirt daemon + booted VM, or
 real AWS.
 Verify such changes by reading the `virsh`/`virt-install`/boto3 calls, the
@@ -62,24 +78,42 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 - `config.py` — global (`GlobalConfig`, incl. `[aws]` shared AWS creds, `[ec2]`
   EC2 globals, `[env]`) + per-project (`ProjectConfig`, incl. `[ec2]`,
   `[lightsail]`, `mods`, `sync`, `env`, `marker_dir`) config,
-  marker resolution, `resolve_instance`/`parse_instance_name`.
+  marker resolution, `resolve_instance`/`parse_instance_name`. Owns the box's
+  **two accounts**: `user` (privileged) and `agent_user` (unprivileged, defaults
+  to the project name), validated at resolve time against `USERNAME_RE` /
+  `RESERVED_USERNAMES` / each other — a directory basename is often not a legal
+  username, and failing here costs a second instead of a boot.
 - `sync.py` — host→box file sync (`[[sync]]`/`[[repo.sync]]`) via `run_sync`
-  (per-mirror-unit rsync jobs over the `devbox-<name>` alias), and `run_envvars`
-  (writes the box's 0600 `[env]` file over SSH, wires ~/.zshenv). Used by
+  (per-mirror-unit rsync jobs over the agent's `devbox-<name>` alias, anchored at
+  the agent's home), and `run_envvars` (writes the 0600 `[env]` file into the
+  AGENT's home over the privileged `-admin` alias, wires its ~/.zshenv). Used by
   `devbox sync --files`/`--envvars`; both auto-run on `create`.
 - `provision.py` — modular provisioning: mod resolution (project > global >
-  built-in), the base playbook, `_provision_context` (DEVBOX_* jj/repo context)
-  + `resolve_env` (the effective `[env]` map), and payload assembly (driver +
-  resolved `mods/*.sh` + `context.env` + manifest). Ships `provision-driver.sh`
-  + `mods/*.sh`. Delivered over SSH (tar → extract → run driver) by `create` and
-  `devbox sync --mods`. Creds are NOT in the payload — the driver sources the
-  box's `~/.config/devbox/env` (written by `run_envvars`).
+  built-in), the base playbook, mod metadata (`parse_header` and the
+  `# requires:`/`# runas:`/`# packages:` wrappers, `ModSpec`, `load_mod_specs`,
+  `render_manifest`), `_provision_context` (DEVBOX_* accounts/pubkey/jj/repo
+  context) + `resolve_env` (the effective `[env]` map), and payload assembly
+  (driver + resolved `mods/*.sh` + `context.env` + manifest). Ships
+  `provision-driver.sh` + `mods/*.sh`. Delivered over SSH (tar → extract → run
+  driver) by `create` and `devbox sync --mods`. Creds are NOT in the payload —
+  each mod sources its own target user's `~/.config/devbox/env` (written by
+  `run_envvars`), which is what keeps the payload safe to make agent-readable.
+- `provision-driver.sh` — runs as the privileged user. A preamble creates the
+  agent account (idempotent, also reachable as `--ensure-users`, and refusing to
+  continue if the agent has acquired sudo), then each mod's `# packages:` are
+  apt-installed as the privileged user and its body run via `sudo -u` per
+  `# runas:` target (default: the agent). Context and creds are re-sourced inside
+  the target shell, never passed through `sudo`'s argv.
 - `initscript.py` — renders the shipped `init-script.sh` (literal
   `%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%`/`%DEVBOX_HOSTNAME%` substitution) into
-  the user-data every provider gets. The script carries just base setup (login
-  user + SSH key first, then hostname/BASH_ENV/packages) — no provisioning
-  payload; provisioning runs over SSH after boot, and a project extends the box
-  with a mod (there is no project first-boot fragment). **One init script,
+  the user-data every provider gets. The script carries just base setup
+  (privileged user + SSH key first, then hostname/BASH_ENV/packages) — no
+  provisioning payload; provisioning runs over SSH after boot, and a project
+  extends the box with a mod (there is no project first-boot fragment). It does
+  **not** create the agent user: user-data runs once, so that account would never
+  reach an existing box; the driver owns it. `BASH_ENV` points at the shared
+  `/etc/devbox/bash_env` stub rather than a per-user path, since
+  `/etc/environment` is system-wide and unexpanded. **One init script,
   three providers:** cloud-init runs a `#!` user-data script on libvirt (NoCloud
   seed) and ec2 (`UserData`), and Lightsail runs it natively — a shell script is
   the only user-data all three accept, since Lightsail does not understand

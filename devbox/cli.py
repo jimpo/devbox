@@ -5,7 +5,8 @@ Provider seam.
     devbox create              # download image, define + first-boot the VM
     devbox up / stop           # start / gracefully shut down a defined VM
     devbox ip                  # print the VM's IPv4
-    devbox ssh [args...]       # ssh into the VM
+    devbox ssh [args...]       # ssh into the VM as the unprivileged agent user
+    devbox ssh --admin         # ssh in as the privileged user (the only sudo shell)
     devbox status              # cloud-init progress + tail provision.log
     devbox list                # list devbox-managed instances on this host
     devbox jj fetch            # jj git fetch the instance's work into the host repo
@@ -169,18 +170,25 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
     target = f"devbox -C {d}" + (f" --name {name}" if provider_name != "libvirt" else "")
 
     # Provisioning is driven over SSH (single path shared with `devbox sync`):
-    # wait for the box's base cloud-init (user + packages) to be ready, then run
-    # the same three steps `devbox sync` does. Env first (mods may need a cred,
-    # e.g. repo-bootstrap's private clone); files last (dsts need the repo clone).
-    # `create` blocks through all of it.
-    alias = _wait_ready(provider, name, project.user)
+    # wait for the box's base cloud-init (privileged user + packages) to be
+    # ready, then run the same steps `devbox sync` does, over the PRIVILEGED
+    # alias (mods need sudo; the agent account doesn't exist yet).
+    #
+    # Order: users -> env -> mods -> files. The agent account has to exist before
+    # its [env] file can be written into its home; env precedes the mods because
+    # a mod may need a cred (repo-bootstrap's private clone); files come last
+    # because their destinations need the repo checkout. `create` blocks
+    # through all of it.
+    agent_alias, admin_alias = _wait_ready(provider, name, project)
+    print("==> creating the box's users ...")
+    _ensure_box_users(admin_alias, tarball)
     print("==> injecting [env] credentials ...")
-    run_envvars(alias, resolve_env(project, gc))
+    run_envvars(admin_alias, resolve_env(project, gc), project.agent_user)
     print("==> provisioning (running mods over SSH; several minutes) ...")
-    _run_mods(alias, tarball, [])
+    _run_mods(admin_alias, tarball, [])
     if project.sync:
         print("==> syncing host-local files onto the box ...")
-        run_sync(project, alias)
+        run_sync(project, agent_alias)
     print(f"\n==> '{name}' is ready.\n\n  SSH:  {target} ssh\n")
 
 
@@ -203,45 +211,75 @@ def _ssh_ok(alias: str) -> bool:
     return r.returncode == 0
 
 
-def _wait_ready(provider, name: str, user: str) -> str:
-    """Block until a freshly-created box has an address, accepts SSH, and its base
-    cloud-init (user + packages the mods lean on) has finished; return the
-    refreshed `devbox-<name>` SSH alias. Times out pointing at `devbox status`."""
+def _wait_ready(provider, name: str, project: ProjectConfig) -> tuple:
+    """Block until a freshly-created box has an address, accepts SSH as the
+    privileged user, and its base cloud-init (that user + packages the mods lean
+    on) has finished; return the refreshed (agent, admin) SSH aliases. Times out
+    pointing at `devbox status`.
+
+    Readiness is checked over the PRIVILEGED alias: the agent account is created
+    later, by the provisioning driver, so its alias cannot connect yet."""
     print("==> waiting for the instance to get an address ...")
     ip = _poll(lambda: provider.address(name), timeout=300)
     if not ip:
         die(f"timed out waiting for '{name}' to get an address; check `devbox status`")
-    alias = _refresh_ssh_alias(name, ip, user)
+    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, project)
 
     print("==> waiting for SSH ...")
-    if not _poll(lambda: _ssh_ok(alias), timeout=300):
+    if not _poll(lambda: _ssh_ok(admin_alias), timeout=300):
         die(f"timed out waiting for SSH to '{name}'; check `devbox status`")
 
     print("==> waiting for base cloud-init (user + packages) to finish ...")
     # `cloud-init status --wait` blocks until done: exit 0 = done, 2 = done with
     # recoverable warnings (degraded); anything else is a real failure.
-    r = subprocess.run(["ssh", alias, "cloud-init status --wait"])
+    r = subprocess.run(["ssh", admin_alias, "cloud-init status --wait"])
     if r.returncode not in (0, 2):
         die(f"base cloud-init did not finish cleanly on '{name}' "
             f"(exit {r.returncode}); check `devbox status`")
-    return alias
+    return agent_alias, admin_alias
+
+
+def _run_driver(alias: str, tarball: bytes, driver_args: list, log: bool) -> int:
+    """Deliver the provisioning payload over SSH and run the driver with
+    `driver_args`: pipe the tarball into a per-run temp dir (extracted as the SSH
+    user, then made world-readable so the driver can drop into the unprivileged
+    agent to run a mod - the payload carries no secrets), optionally teeing to
+    ~/provision.log (the log `devbox status` tails). Returns the driver's status.
+
+    `alias` is always the PRIVILEGED user's: the driver needs sudo to create the
+    agent account, install `# packages:` and drop privilege per mod."""
+    selected = " ".join(shlex.quote(a) for a in driver_args)
+    tee = f' 2>&1 | tee "$HOME/{PROVISION_LOG}"' if log else ""
+    # `umask 022` before extracting: tar applies the extracting user's umask to
+    # the modes it creates (including the `mods/` directory, which the archive
+    # only implies), so a restrictive umask on the box would leave the payload
+    # unreadable to the agent and fail every mod with a confusing EACCES.
+    # `mktemp -d` ignores umask and is always 0700, hence the explicit chmod.
+    remote = (
+        'set -e; umask 022; d="$(mktemp -d)"; chmod 0755 "$d"; tar -xzf - -C "$d"; '
+        f'bash "$d/provision-driver.sh" {selected}{tee}; '
+        'rc=${PIPESTATUS[0]}; rm -rf "$d"; exit "$rc"'
+    )
+    return subprocess.run(
+        ["ssh", alias, "bash", "-c", shlex.quote(remote)], input=tarball).returncode
+
+
+def _ensure_box_users(alias: str, tarball: bytes) -> None:
+    """Run only the driver's user preamble (create the unprivileged agent
+    account, wire per-user shells). Split out of the full run because the
+    agent's home has to exist before `run_envvars` can write the [env] file into
+    it, and that happens before the mods."""
+    rc = _run_driver(alias, tarball, ["--ensure-users"], log=False)
+    if rc != 0:
+        die(f"could not create the box's users (exit {rc}); see the output above")
 
 
 def _run_mods(alias: str, tarball: bytes, mods: list) -> None:
-    """Deliver the provisioning payload over SSH and run the driver: pipe the
-    tarball into a per-run temp dir (extracted as the SSH user), run the driver
-    (which sources the box's ~/.config/devbox/env creds), tee to ~/provision.log (the log
-    `devbox status` tails). `mods` selects a subset; empty = the whole playbook."""
-    selected = " ".join(shlex.quote(m) for m in mods)
-    remote = (
-        'set -e; d="$(mktemp -d)"; tar -xzf - -C "$d"; '
-        f'bash "$d/provision-driver.sh" {selected} 2>&1 | tee "$HOME/{PROVISION_LOG}"; '
-        'rc=${PIPESTATUS[0]}; rm -rf "$d"; exit "$rc"'
-    )
-    result = subprocess.run(
-        ["ssh", alias, "bash", "-c", shlex.quote(remote)], input=tarball)
-    if result.returncode != 0:
-        die(f"provisioning failed (exit {result.returncode}); see the output above "
+    """Run the provisioning playbook over SSH (the driver re-runs its user
+    preamble first). `mods` selects a subset; empty = the whole playbook."""
+    rc = _run_driver(alias, tarball, mods, log=True)
+    if rc != 0:
+        die(f"provisioning failed (exit {rc}); see the output above "
             f"or ~/{PROVISION_LOG} on the box")
 
 
@@ -314,7 +352,11 @@ def cmd_ssh(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) 
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    os.execvp("ssh", ["ssh", f"{project.user}@{ip}", *args.ssh_args])
+    # The unprivileged agent by default - that's where the repo checkout and the
+    # tooling live. --admin is the privileged account, and the only shell on the
+    # box with sudo; it exists for debugging the machine itself.
+    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, project)
+    os.execvp("ssh", ["ssh", admin_alias if args.admin else agent_alias, *args.ssh_args])
 
 
 def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
@@ -322,9 +364,12 @@ def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
+    # Over the privileged alias: provision.log lives in that user's home, since
+    # the driver runs there.
+    _, admin_alias = _refresh_ssh_aliases(name, ip, project)
     subprocess.run([
-        "ssh", f"{project.user}@{ip}",
-        "cloud-init status --long; echo ---; tail -n 80 ~/provision.log 2>/dev/null",
+        "ssh", admin_alias,
+        f"cloud-init status --long; echo ---; tail -n 80 ~/{PROVISION_LOG} 2>/dev/null",
     ], check=False)
 
 
@@ -347,25 +392,37 @@ def cmd_list(args: argparse.Namespace, gc: GlobalConfig, project: Optional[Proje
     _print_table(rows)
 
 
-def _refresh_ssh_alias(name: str, ip: str, user: str) -> str:
-    """Write/refresh the `devbox-<name>` SSH alias (host, user, dedicated
-    known-hosts) that `devbox jj fetch` addresses the instance through, and return it.
-    Provider-agnostic - `ip` is whatever the provider resolved (libvirt DHCP
-    lease or EC2 public IP)."""
-    alias = f"devbox-{name}"
+def _alias_names(name: str) -> tuple:
+    """The two SSH aliases for an instance: (agent, admin).
+
+    `devbox-<name>` stays pointed at the UNPRIVILEGED agent user - it is the
+    alias muscle memory and every existing jj remote already names, and the
+    agent's home is where the repo checkout lives. The privileged user gets the
+    `-admin` suffix; it is what provisioning and `devbox ssh --admin` use."""
+    return f"devbox-{name}", f"devbox-{name}-admin"
+
+
+def _refresh_ssh_aliases(name: str, ip: str, project: ProjectConfig) -> tuple:
+    """Write/refresh both SSH aliases for an instance (host, user, dedicated
+    known-hosts) and return them as (agent_alias, admin_alias). Provider-agnostic
+    - `ip` is whatever the provider resolved (libvirt DHCP lease or EC2 public
+    IP)."""
+    agent_alias, admin_alias = _alias_names(name)
     SSH_DIR.mkdir(parents=True, exist_ok=True)
     if not KNOWN_HOSTS_PATH.is_file():
         KNOWN_HOSTS_PATH.write_text("")
         KNOWN_HOSTS_PATH.chmod(0o600)
 
     host_conf = SSH_DIR / f"{name}.conf"
-    host_conf.write_text(
+    host_conf.write_text("".join(
         f"Host {alias}\n"
         f"    HostName {ip}\n"
         f"    User {user}\n"
         f"    UserKnownHostsFile {KNOWN_HOSTS_PATH}\n"
         f"    StrictHostKeyChecking accept-new\n"
-    )
+        for alias, user in ((agent_alias, project.agent_user),
+                            (admin_alias, project.user))
+    ))
 
     include_line = f"Include {SSH_DIR}/*.conf"
     if SSH_USER_CONFIG.is_file():
@@ -380,7 +437,7 @@ def _refresh_ssh_alias(name: str, ip: str, user: str) -> str:
         SSH_USER_CONFIG.write_text(f"{include_line}\n")
         SSH_USER_CONFIG.chmod(0o600)
 
-    return alias
+    return agent_alias, admin_alias
 
 
 def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
@@ -388,7 +445,11 @@ def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    print(_refresh_ssh_alias(name, ip, project.user))
+    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, project)
+    # The agent alias is the one `jj fetch` uses and the one worth printing; the
+    # admin alias is refreshed alongside it and named for completeness.
+    print(agent_alias)
+    print(f"(privileged: {admin_alias})")
 
 
 def _ensure_jj_remote(repo_dir: Path, remote: str, url: str) -> None:
@@ -425,8 +486,12 @@ def cmd_jj_fetch(args: argparse.Namespace, gc: GlobalConfig, project: ProjectCon
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
 
-    alias = _refresh_ssh_alias(name, ip, project.user)
-    remote_url = f"ssh://{alias}/home/{project.user}/{project.repo.dir}"
+    # The agent alias: the checkout is in the agent's home, and `jj git fetch`
+    # runs git-upload-pack as the login user - there is no sudo-ing through that.
+    # An existing remote from before the two-user split points at the privileged
+    # user's home; _ensure_jj_remote re-points it, so old checkouts self-heal.
+    alias, _ = _refresh_ssh_aliases(name, ip, project)
+    remote_url = f"ssh://{alias}/home/{project.agent_user}/{project.repo.dir}"
     repo_dir = find_project_dir(args.project_dir or Path.cwd())
     _ensure_jj_remote(repo_dir, alias, remote_url)
 
@@ -461,21 +526,27 @@ def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    alias = _refresh_ssh_alias(name, ip, project.user)
+    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, project)
 
     # Order: env -> mods -> files. Mods may need a cred (e.g. repo-bootstrap's
     # private clone); file dsts (e.g. ~/<repo>/.claude/skills) need the repo clone.
+    # env and mods go over the privileged alias (writing another user's home /
+    # running the driver both need sudo); files go over the agent's.
+    tarball = build_tarball(build_payload(project, gc)) if (do_envvars or do_mods) else None
     if do_envvars:
+        # The agent's home has to exist before its [env] file can land in it -
+        # true on a box that predates this account, not just a brand-new one.
+        _ensure_box_users(admin_alias, tarball)
         print(f"==> injecting [env] credentials into '{name}' ...")
-        run_envvars(alias, resolve_env(project, gc))
+        run_envvars(admin_alias, resolve_env(project, gc), project.agent_user)
     if do_mods:
         mods = _split_mods(args.mods)
         scope = f" (mods: {', '.join(mods)})" if mods else ""
         print(f"==> provisioning '{name}' over SSH{scope} ...")
-        _run_mods(alias, build_tarball(build_payload(project, gc)), mods)
+        _run_mods(admin_alias, tarball, mods)
     if do_files:
         print(f"==> syncing host-local files to '{name}' ...")
-        run_sync(project, alias)
+        run_sync(project, agent_alias)
     print("done.")
 
 
@@ -505,7 +576,9 @@ def main() -> None:
                    help="skip the confirmation prompt (for scripts)")
     d.set_defaults(func=cmd_destroy)
     sub.add_parser("ip", help="print the VM's IPv4").set_defaults(func=cmd_ip)
-    s = sub.add_parser("ssh", help="ssh into the VM")
+    s = sub.add_parser("ssh", help="ssh into the VM (as the unprivileged agent user)")
+    s.add_argument("--admin", action="store_true",
+                   help="log in as the privileged user instead (the box's only sudo shell)")
     s.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
     s.set_defaults(func=cmd_ssh)
     sub.add_parser("status", help="show cloud-init progress + provision log").set_defaults(func=cmd_status)

@@ -3,6 +3,11 @@
 # mod: claude-code - Claude Code (native installer -> ~/.local/bin/claude) plus
 # the github/linear plugins common to every project.
 #
+# packages: jq
+#
+# Runs as the agent (the default target): this is the account agents work in,
+# and the only one that needs Claude Code at all.
+#
 # Idempotency: the installer overwrites in place; `marketplace add` /
 # `plugin install` abort under `set -e` when the marketplace or a plugin is
 # already present (every reconverge), so `|| true` tolerates that. A genuine
@@ -13,11 +18,11 @@ curl -fsSL https://claude.ai/install.sh | bash
 
 claude plugin marketplace add anthropics/claude-plugins-official || true
 
-# Auto-approve every tool call in the sandbox: it's a disposable, isolated VM,
-# so the interactive permission prompt is pure friction. `bypassPermissions` is
-# the permission mode that skips all approval prompts. Merged into any existing
-# settings.json (never clobbering other keys) with jq so it's reconverge-safe.
-sudo apt-get install -y jq
+# Auto-approve every tool call in the sandbox: it's a disposable, isolated VM
+# and the agent runs as an account with no sudo, so the interactive permission
+# prompt is pure friction. `bypassPermissions` is the permission mode that skips
+# all approval prompts. Merged into any existing settings.json (never clobbering
+# other keys) with jq (see `# packages:` above) so it's reconverge-safe.
 settings="$HOME/.claude/settings.json"
 mkdir -p "$HOME/.claude"
 [ -f "$settings" ] || echo '{}' >"$settings"

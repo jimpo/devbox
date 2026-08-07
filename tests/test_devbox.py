@@ -145,6 +145,64 @@ def test_resolve_project_overrides_defaults(tmp_path, global_config):
     assert project.user == "alice"
 
 
+# ---- agent_user (the unprivileged account) ----------------------------------
+def test_resolve_project_agent_user_defaults_to_the_project_name(tmp_path, global_config):
+    _write_marker(tmp_path, 'project = "myproj"\nuser = "alice"\n')
+    project = devbox.resolve_project(tmp_path, global_config)
+    assert project.user == "alice"          # the privileged account
+    assert project.agent_user == "myproj"   # the unprivileged one
+
+
+def test_resolve_project_agent_user_explicit_wins(tmp_path, global_config):
+    _write_marker(tmp_path, 'project = "myproj"\nuser = "alice"\nagent_user = "botty"\n')
+    assert devbox.resolve_project(tmp_path, global_config).agent_user == "botty"
+
+
+@pytest.mark.parametrize("name", [
+    "MyProject",    # uppercase
+    "foo.bar",      # dots
+    "2fa-lib",      # leading digit
+    "-dashed",      # leading dash
+    "a" * 33,       # too long for a Linux username
+    "has space",
+])
+def test_resolve_project_agent_user_invalid_username_dies(tmp_path, global_config, name):
+    # Project names are directory basenames, so plenty of legal project names are
+    # illegal usernames. Catching it here costs a second; catching it at useradd
+    # time costs a boot.
+    _write_marker(tmp_path, f'project = "p"\nuser = "alice"\nagent_user = "{name}"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_agent_user_from_an_invalid_project_name_dies(tmp_path, global_config):
+    # Same check, reached via the default rather than an explicit key.
+    _write_marker(tmp_path, 'project = "My.Project"\nuser = "alice"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_agent_user_equal_to_user_dies(tmp_path, global_config):
+    # One account for both roles is exactly the arrangement this replaces.
+    _write_marker(tmp_path, 'project = "p"\nuser = "alice"\nagent_user = "alice"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+@pytest.mark.parametrize("name", ["root", "ubuntu", "ec2-user", "nobody"])
+def test_resolve_project_agent_user_reserved_dies(tmp_path, global_config, name):
+    # `ubuntu` is the cloud images' own sudo-capable default user.
+    _write_marker(tmp_path, f'project = "p"\nuser = "alice"\nagent_user = "{name}"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_agent_user_known_key_no_warning(tmp_path, global_config, capsys):
+    _write_marker(tmp_path, 'project = "p"\nuser = "alice"\nagent_user = "botty"\n')
+    devbox.resolve_project(tmp_path, global_config)
+    assert capsys.readouterr().err == ""
+
+
 def test_resolve_project_env(tmp_path, global_config):
     _write_marker(tmp_path, '[env]\nGITHUB_TOKEN = "github_pat_proj"\n')
     project = devbox.resolve_project(tmp_path, global_config)
@@ -306,9 +364,10 @@ def pubkey(tmp_path):
 
 
 def _project(mode="none", dir="", url=None, env=None,
-             marker_dir=None, mods=None, sync=None):
+             marker_dir=None, mods=None, sync=None, agent_user="agentbot"):
     return devbox.ProjectConfig(
         project="test-project", provider="libvirt", user="alice",
+        agent_user=agent_user,
         vcpus=6, memory_mib=1024, disk_gb=10,
         repo=devbox.RepoConfig(mode=mode, dir=dir, url=url),
         marker_dir=marker_dir or devbox.Path("/proj"),
@@ -373,7 +432,7 @@ def test_render_init_script_creates_the_user_before_installing_packages(pubkey):
 def test_render_init_script_installs_the_base_packages(pubkey):
     rendered = devbox.render_init_script(_project(), _global_config(pubkey))
     for pkg in ("zsh", "vim", "python3", "curl", "git", "git-lfs",
-                "ca-certificates", "gh", "rsync"):
+                "ca-certificates", "gh", "rsync", "build-essential", "pkg-config"):
         assert f"\n  {pkg} " in rendered or f"\n  {pkg}\n" in rendered
     assert 'apt-get -o DPkg::Lock::Timeout=600 install -y "${DEVBOX_PACKAGES[@]}"' in rendered
     assert "apt-get upgrade" not in rendered  # matched the old package_upgrade: false
@@ -387,10 +446,34 @@ def test_render_init_script_adds_the_github_cli_repo_before_installing(pubkey):
     assert rendered.index("cli.github.com") < rendered.index("install -y")
 
 
-def test_render_init_script_wires_bash_env(pubkey):
+def test_render_init_script_wires_bash_env_through_a_shared_stub(pubkey):
+    # /etc/environment is ONE system-wide table and the box has two accounts, so
+    # it must not name a per-user path there (one user would source the other's
+    # file). It points at a stub that resolves $HOME in bash, where expansion
+    # actually works - pam_env's /etc/environment parsing is plain KEY=VALUE.
     rendered = devbox.render_init_script(_project(), _global_config(pubkey))
-    assert "BASH_ENV_LINE='BASH_ENV=/home/alice/.bash_env'" in rendered
+    assert "BASH_ENV_STUB='/etc/devbox/bash_env'" in rendered
+    assert "/home/alice/.bash_env" not in rendered
+    assert "/home/agentbot/.bash_env" not in rendered
+    assert 'if [ -r "$HOME/.bash_env" ]; then . "$HOME/.bash_env"; fi' in rendered
     assert "/etc/environment" in rendered
+
+
+def test_render_init_script_creates_only_the_privileged_user(pubkey):
+    # The agent account is deliberately NOT a first-boot concern: user-data runs
+    # once, so an account born here could never reach an existing box and
+    # changing agent_user would need a rebuild. The driver creates it instead.
+    rendered = devbox.render_init_script(_project(agent_user="agentbot"),
+                                         _global_config(pubkey))
+    assert "agentbot" not in rendered
+    assert rendered.count("useradd") == 1
+
+
+def test_render_init_script_locks_down_the_home_directory(pubkey):
+    # Ubuntu's default HOME_MODE is 0755, which would let the unprivileged agent
+    # read the privileged user's entire home.
+    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    assert "--key HOME_MODE=0750" in rendered
 
 
 def test_render_init_script_hostname_defaults_from_project_name(pubkey):
@@ -478,9 +561,17 @@ def _payload_map(project, gc):
 def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubkey):
     payload = _payload_map(_project(mode="clone", dir="r", url="https://x/y"), _global_config(pubkey))
     assert payload["provision-driver.sh"].content == devbox.DRIVER_PATH.read_text()
-    assert payload["manifest"].content == "".join(f"{m}\n" for m in devbox.DEFAULT_BASE_MODS)
+    manifest_names = [line.split("\t")[0]
+                      for line in payload["manifest"].content.splitlines()]
+    assert manifest_names == list(devbox.DEFAULT_BASE_MODS)
     ctx = payload["context.env"].content
-    assert "export DEVBOX_USER=alice" in ctx
+    # Both accounts, named explicitly - a bare DEVBOX_USER would be ambiguous now.
+    assert "export DEVBOX_ADMIN_USER=alice" in ctx
+    assert "export DEVBOX_AGENT_USER=agentbot" in ctx
+    assert "export DEVBOX_USER=" not in ctx
+    # The host's public key, so the driver can authorize it for the agent account
+    # it creates. Public by definition, so it belongs in the payload.
+    assert "export DEVBOX_SSH_PUBKEY='ssh-ed25519 AAAAtest user@host'" in ctx
     assert "export DEVBOX_JJ_NAME='Alice Example'" in ctx   # shell-quoted (space)
     assert "export DEVBOX_REPO_MODE=clone" in ctx
     # Creds ([env]) are NOT in the payload - they're delivered separately as the
@@ -503,7 +594,9 @@ def test_build_payload_appends_project_mods(isolated_mods, pubkey, tmp_path):
     (tmp_path / ".devbox" / "mods").mkdir(parents=True)
     (tmp_path / ".devbox" / "mods" / "rust.sh").write_text("#!/usr/bin/env bash\necho rust\n")
     payload = _payload_map(_project(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
-    assert payload["manifest"].content == "".join(f"{m}\n" for m in [*devbox.DEFAULT_BASE_MODS, "rust"])
+    manifest_names = [line.split("\t")[0]
+                      for line in payload["manifest"].content.splitlines()]
+    assert manifest_names == [*devbox.DEFAULT_BASE_MODS, "rust"]
     assert payload["mods/rust.sh"].content == "#!/usr/bin/env bash\necho rust\n"
 
 
@@ -659,6 +752,94 @@ def test_build_payload_validates_mods(isolated_mods, pubkey, tmp_path):
     _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# requires: nonexistent\nset -e\n")
     with pytest.raises(SystemExit):
         devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
+
+
+# ---- `# runas:` / `# packages:` headers -------------------------------------
+def test_parse_runas_defaults_to_the_agent():
+    # The default target is the unprivileged account, because that is what a mod
+    # almost always configures: a user's home directory.
+    assert devbox.parse_runas("#!/bin/bash\nset -e\n") == ["agent"]
+
+
+def test_parse_runas_explicit_single_and_list():
+    assert devbox.parse_runas("# runas: root\n") == ["root"]
+    assert devbox.parse_runas("# runas: admin agent\n") == ["admin", "agent"]
+    assert devbox.parse_runas("# runas: admin, agent\n") == ["admin", "agent"]
+
+
+def test_parse_packages():
+    assert devbox.parse_packages("# packages: jq unzip\n") == ["jq", "unzip"]
+    assert devbox.parse_packages("#!/bin/bash\n") == []
+
+
+def test_parse_header_is_shared_by_every_key():
+    text = "# requires: jj\n# runas: agent\n# packages: jq, unzip\n# packages: ripgrep\n"
+    assert devbox.parse_header(text, "requires") == ["jj"]
+    assert devbox.parse_header(text, "runas") == ["agent"]
+    # multiple lines of one key are unioned, in first-seen order
+    assert devbox.parse_header(text, "packages") == ["jq", "unzip", "ripgrep"]
+
+
+def test_load_mod_specs_rejects_an_unknown_runas_target(isolated_mods, tmp_path):
+    _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# runas: nobody-special\n")
+    with pytest.raises(SystemExit):
+        devbox.load_mod_specs(_project(marker_dir=tmp_path, mods=["rust"]))
+
+
+def test_build_payload_validates_runas(isolated_mods, pubkey, tmp_path):
+    # Same choke point as `# requires:`: a bad target fails before any boot/SSH.
+    _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# runas: wheel\n")
+    with pytest.raises(SystemExit):
+        devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
+
+
+def test_render_manifest_is_tab_separated_with_comma_joined_lists():
+    # The driver parses this with plain IFS splitting - it has no YAML/JSON
+    # parser and should not grow one.
+    specs = [
+        devbox.ModSpec(name="jj", path=devbox.Path("/x/jj.sh"), requires=[],
+                       runas=["agent"], packages=[]),
+        devbox.ModSpec(name="dotfiles", path=devbox.Path("/x/dotfiles.sh"),
+                       requires=["dotfiles-packages"], runas=["admin", "agent"],
+                       packages=["jq", "unzip"]),
+    ]
+    assert devbox.render_manifest(specs) == (
+        "jj\tagent\t\n"
+        "dotfiles\tadmin,agent\tjq,unzip\n"
+    )
+
+
+def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
+    # Every shipped mod parses, and its `# runas:` targets are known. Guards the
+    # headers themselves, which nothing else type-checks.
+    specs = devbox.load_mod_specs(_project())
+    assert [s.name for s in specs] == list(devbox.DEFAULT_BASE_MODS)
+    for spec in specs:
+        assert spec.runas, f"{spec.name} resolved to no runas target"
+        for target in spec.runas:
+            assert target in devbox.RUNAS_TARGETS
+
+
+def test_shipped_mods_never_call_sudo(isolated_mods):
+    # A mod body runs as an account without sudo. `sudo` in a mod is a bug now:
+    # apt goes through `# packages:`, and real privilege through `# runas: root`.
+    for spec in devbox.load_mod_specs(_project()):
+        for line in spec.path.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue  # prose about sudo is fine; calling it is not
+            assert "sudo " not in stripped, f"{spec.name}: {stripped}"
+
+
+def test_dotfiles_runs_for_both_accounts_after_its_root_half(isolated_mods):
+    # The privileged user gets the dotfiles too, so `devbox ssh --admin` - the
+    # debugging shell - is usable. The apt half is a separate, root-only mod.
+    specs = {s.name: s for s in devbox.load_mod_specs(_project())}
+    assert specs["dotfiles"].runas == ["admin", "agent"]
+    assert specs["dotfiles-packages"].runas == ["root"]
+    assert "dotfiles-packages" in specs["dotfiles"].requires
+    order = [s.name for s in devbox.load_mod_specs(_project())]
+    assert order.index("dotfiles-packages") < order.index("dotfiles")
 
 
 def test_render_env_file_shell_quotes_values():
@@ -1212,7 +1393,7 @@ def test_run_sync_dies_on_rsync_failure(tmp_path, monkeypatch):
         devbox.run_sync(proj, "devbox-foo", host_home=str(tmp_path), guest_home="/home/alice")
 
 
-def test_run_envvars_writes_managed_file_and_wires_zshenv(monkeypatch):
+def test_run_envvars_writes_the_agents_managed_file_and_wires_zshenv(monkeypatch):
     captured = {}
 
     def fake_run(argv, **kw):
@@ -1221,21 +1402,117 @@ def test_run_envvars_writes_managed_file_and_wires_zshenv(monkeypatch):
         return _cp(argv, 0)
 
     monkeypatch.setattr(devbox.subprocess, "run", fake_run)
-    devbox.run_envvars("devbox-foo", {"GITHUB_TOKEN": "github_pat_x", "K": "v w"})
-    assert captured["argv"][:4] == ["ssh", "devbox-foo", "bash", "-c"]
+    devbox.run_envvars("devbox-foo-admin", {"GITHUB_TOKEN": "github_pat_x", "K": "v w"},
+                       "agentbot")
+    # Connects as the PRIVILEGED user (writing another user's home needs sudo)
+    # but every path it writes is the agent's - the creds belong to the account
+    # that does the work, and only that account gets a copy.
+    assert captured["argv"][:4] == ["ssh", "devbox-foo-admin", "bash", "-c"]
     remote = captured["argv"][4]
-    # writes the managed 0600 file and ensures ~/.zshenv sources it
-    assert "$HOME/.config/devbox/env" in remote
-    assert "umask 077" in remote
-    assert "$HOME/.zshenv" in remote
-    # the creds are piped over stdin (never in the command / a log), shell-quoted
+    assert "/home/agentbot/.config/devbox/env" in remote
+    assert "-o agentbot -g agentbot -m 0600" in remote
+    assert "/home/agentbot/.zshenv" in remote
+    # the creds are piped over stdin (never in the command / argv / a log)
+    assert "github_pat_x" not in remote
     assert captured["input"] == b"export GITHUB_TOKEN=github_pat_x\nexport K='v w'\n"
 
 
 def test_run_envvars_dies_on_failure(monkeypatch):
     monkeypatch.setattr(devbox.subprocess, "run", lambda argv, **k: _cp(argv, 1))
     with pytest.raises(SystemExit):
-        devbox.run_envvars("devbox-foo", {"K": "v"})
+        devbox.run_envvars("devbox-foo-admin", {"K": "v"}, "agentbot")
+
+
+# ---- payload delivery -------------------------------------------------------
+def _captured_driver_run(monkeypatch, *args, **kw):
+    """Run `_run_driver` against a fake subprocess and return what it sent.
+    `remote` is the command the box's shell will actually see - argv[4] is that
+    string shlex-quoted for ssh, so it gets unwrapped here."""
+    import shlex
+    captured = {}
+
+    def fake_run(argv, **k):
+        captured["argv"] = argv
+        captured["remote"] = shlex.split(argv[4])[0]
+        captured["input"] = k.get("input")
+        return _cp(argv, 0)
+
+    monkeypatch.setattr(devbox.subprocess, "run", fake_run)
+    devbox.cli._run_driver(*args, **kw)
+    return captured
+
+
+def test_run_driver_makes_the_payload_readable_by_the_agent(monkeypatch):
+    # The driver drops into the unprivileged agent to run a mod, so the payload
+    # has to be readable by it. mktemp -d is always 0700 whatever the umask, and
+    # tar applies the umask to what it creates - including the `mods/` directory,
+    # which the archive only implies. Both need pinning or every mod EACCESes.
+    c = _captured_driver_run(monkeypatch, "devbox-foo-admin", b"tar", [], log=True)
+    remote = c["remote"]
+    assert "umask 022" in remote
+    assert 'chmod 0755 "$d"' in remote
+    assert remote.index("umask 022") < remote.index("tar -xzf")
+    assert c["input"] == b"tar"
+
+
+def test_run_driver_tees_only_when_asked(monkeypatch):
+    # The full run's log is what `devbox status` tails; the --ensure-users
+    # preamble must not clobber it with its own two lines of output.
+    with_log = _captured_driver_run(monkeypatch, "a", b"", [], log=True)["remote"]
+    without = _captured_driver_run(monkeypatch, "a", b"", ["--ensure-users"],
+                                   log=False)["remote"]
+    assert "provision.log" in with_log
+    assert "provision.log" not in without
+    assert "--ensure-users" in without
+
+
+def test_run_driver_quotes_mod_names(monkeypatch):
+    remote = _captured_driver_run(monkeypatch, "a", b"", ["rust", "a b"], log=True)["remote"]
+    assert "rust 'a b'" in remote
+
+
+# ---- dual SSH aliases -------------------------------------------------------
+def test_alias_names_agent_keeps_the_bare_name():
+    # `devbox-<name>` must keep pointing at the agent: it is the alias every
+    # existing jj remote already names, and the checkout is in the agent's home.
+    assert devbox.cli._alias_names("binius") == ("devbox-binius", "devbox-binius-admin")
+
+
+def test_refresh_ssh_aliases_writes_both_stanzas(tmp_path, monkeypatch):
+    monkeypatch.setattr(devbox.cli, "SSH_DIR", tmp_path / "ssh")
+    monkeypatch.setattr(devbox.cli, "KNOWN_HOSTS_PATH", tmp_path / "ssh" / "known_hosts")
+    monkeypatch.setattr(devbox.cli, "SSH_USER_CONFIG", tmp_path / "user_ssh_config")
+
+    aliases = devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", _project())
+    assert aliases == ("devbox-binius", "devbox-binius-admin")
+
+    conf = (tmp_path / "ssh" / "binius.conf").read_text()
+    assert "Host devbox-binius\n    HostName 10.0.0.5\n    User agentbot\n" in conf
+    assert "Host devbox-binius-admin\n    HostName 10.0.0.5\n    User alice\n" in conf
+    # both stanzas share the dedicated known-hosts file
+    assert conf.count("UserKnownHostsFile") == 2
+
+
+def test_refresh_ssh_aliases_rewrites_cleanly_on_a_new_address(tmp_path, monkeypatch):
+    # Written whole each time, so a re-created instance can't leave a stale
+    # duplicate stanza behind.
+    monkeypatch.setattr(devbox.cli, "SSH_DIR", tmp_path / "ssh")
+    monkeypatch.setattr(devbox.cli, "KNOWN_HOSTS_PATH", tmp_path / "ssh" / "known_hosts")
+    monkeypatch.setattr(devbox.cli, "SSH_USER_CONFIG", tmp_path / "user_ssh_config")
+    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", _project())
+    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.9", _project())
+    conf = (tmp_path / "ssh" / "binius.conf").read_text()
+    assert conf.count("Host devbox-binius\n") == 1
+    assert "10.0.0.5" not in conf
+
+
+def test_plan_sync_defaults_the_guest_home_to_the_agent(tmp_path):
+    # Synced files are agent skills and project config: they belong to the
+    # account that does the work, not the privileged one.
+    (tmp_path / "skills").mkdir()
+    proj = _project(sync=[_sync("$HOME/skills")], agent_user="botty")
+    jobs = devbox.plan_sync(proj, host_home=str(tmp_path))
+    assert jobs[0].guest_path == "/home/botty/skills"
 
 
 def _sync_args(envvars=False, files=False, mods=None):

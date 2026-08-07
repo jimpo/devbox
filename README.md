@@ -14,11 +14,51 @@ It currently supports three VM providers: **libvirt** (local VMs), **ec2**
 
 Every devbox starts from the latest Ubuntu LTS as its base image — currently
 Ubuntu 26.04 "Resolute Raccoon" — brought to life on first boot by a single
-bash **init script** handed to the instance as user-data (just the login user,
-baseline packages, `BASH_ENV` wiring, and the hostname). Everything else — jj, dotfiles, Claude Code, the repo,
+bash **init script** handed to the instance as user-data (just the privileged
+user, baseline packages, `BASH_ENV` wiring, and the hostname). Everything else — jj, dotfiles, Claude Code, the repo,
 a project's toolchain — is provisioned by composable, idempotent **mods** run
 **over SSH** after boot, so a box can be reconverged in place (`devbox sync
 --mods`) instead of rebuilt.
+
+### Two accounts per box
+
+A box has two users, and AI agents run as the one without privilege:
+
+| | **privileged** (`user`, default `$USER`) | **agent** (`agent_user`, default = the project name) |
+| --- | --- | --- |
+| sudo | NOPASSWD `ALL` | **none**, and in no group that grants it |
+| home | `/home/<user>`, `0750` | `/home/<agent_user>`, `0750` |
+| holds | the provisioning payload, `~/provision.log` | the repo checkout, `~/.claude`, `~/.local/bin`, the `[env]` creds |
+| SSH | `devbox ssh --admin` | `devbox ssh` (the default) |
+| created by | the init script, at first boot | the provisioning driver, so it reconverges |
+
+**What this buys, and what it doesn't.** A sudoless agent still has full network
+egress and still holds `GITHUB_TOKEN` / `LINEAR_API_KEY` — which for most threat
+models *are* the crown jewels. This is containment of **system integrity**, not
+of **credential exfiltration**. What it does gain: the agent can't tamper with
+the provisioner or the system, can't read the privileged user's home, can't
+persist outside its own, and has a crisply defined blast radius.
+
+> **Never grant the agent partial sudo.** `NOPASSWD: /usr/bin/apt-get` is
+> equivalent to full root — `apt-get install ./evil.deb` runs maintainer scripts
+> as root, and `-o APT::Update::Pre-Invoke=…` runs arbitrary commands. The same
+> goes for `sudo systemctl`, `sudo pip`, or membership in `docker`/`lxd`. If any
+> of those get added, the isolation is decorative and should be described that
+> way. The provisioning driver asserts this on every run and refuses to continue
+> if the agent has picked up sudo or a root-equivalent group.
+
+The trade-off is real and deliberate: **the agent cannot install system
+packages.** Where it used to `sudo apt-get install` its way out of a missing
+build dependency mid-task, it now needs a `# packages:` line on a mod and a
+`devbox sync --mods`. First boot installs `build-essential` and `pkg-config` to
+cover the common case.
+
+**Migrating an existing box: recreate it.** There is no in-place upgrade. A
+`devbox sync --mods` against a box built under the old single-user model will
+create the agent account and move the canonical checkout to its home, but
+nothing moves the old tree — it stays in the privileged user's home, orphaned and
+no longer synced or fetched. The driver warns when it sees one. Land any work in
+flight first (`devbox jj fetch`), then `destroy` + `create`.
 
 Once a box is up, the way you work with it —
 `ssh`/`exec`/`list`/`provision`/`jj fetch`/`sync` — is backend-independent; only
@@ -78,18 +118,23 @@ Lightsail) — see [Per-project setup](#per-project-setup) for the `[ec2]` /
 | `devbox stop` | Gracefully shut down (ACPI) a running domain. |
 | `devbox destroy` | Tear down the domain and its overlay disk (the cached base image is left alone). |
 | `devbox ip` | Print the domain's IPv4. |
-| `devbox ssh [-- args...]` | `ssh` into the domain. |
-| `devbox status` | SSH in and show `cloud-init status --long` plus the tail of `~/provision.log`. |
+| `devbox ssh [-- args...]` | `ssh` into the domain as the **unprivileged agent user** — where the repo checkout and tooling live. `devbox ssh --admin` logs in as the privileged user instead; that's the box's only sudo shell, for debugging the machine itself. |
+| `devbox status` | SSH in (as the privileged user, whose home holds the log) and show `cloud-init status --long` plus the tail of `~/provision.log`. |
 | `devbox sync --envvars` | (Re-)write the box's devbox-managed 0600 `[env]` file — scoped creds/vars (`GITHUB_TOKEN`, API keys) into its shell env. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
 | `devbox sync --mods[=a,b,c]` | (Re-)run the provisioning **mods** over SSH against a running box — reconverge (bump jj, add a plugin, re-apply a project's rust mod) without destroy+create. Covers base **and** project mods. Idempotent; tees to `~/provision.log` (per-mod logs in `~/provision/`). No list runs the whole playbook; a comma-separated list runs just those (fast iteration). |
 | `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync — agent skills, git-excluded project files. Re-runnable + incremental. See "Host→box file sync" below. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or EC2), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
-| `devbox host` | Refresh the SSH alias used for `jj fetch` (below); prints the alias name. |
+| `devbox host` | Refresh the SSH aliases used for `jj fetch` (below); prints the agent alias, and names the `-admin` one. |
 
 `devbox sync` requires at least one of `--envvars`/`--mods`/`--files` (any
 combination). They run in that order — env before mods (a mod may need a cred,
 e.g. a private clone), files last (dsts can depend on the repo being cloned).
-It's the same three steps `devbox create` runs on a fresh box.
+It's the same steps `devbox create` runs on a fresh box.
+
+Each instance gets **two** SSH aliases: `devbox-<name>` for the agent (the one
+`jj fetch` and `--files` use, and the name every existing jj remote already
+carries) and `devbox-<name>-admin` for the privileged user (`--envvars` and
+`--mods`, both of which need sudo).
 
 Every subcommand accepts `-C/--project-dir PATH` and `--name NAME` (both
 before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
@@ -261,7 +306,12 @@ purely this machine's VM config):
 # project = "my-project"    # a label on this project's instances
 #                           # (default: the directory's basename)
 # provider = "libvirt"      # default provider for a bare `devbox create`
-# user, vcpus, memory_mib, disk_gb optionally override the global [defaults]
+# user = "jimpo"            # the PRIVILEGED account (sudo). Default: host $USER
+# agent_user = "my-project" # the UNPRIVILEGED account agents run as (no sudo).
+#                           # Default: the project name. Must be a legal Linux
+#                           # username, differ from `user`, and not be a system
+#                           # or cloud-image account — validated up front.
+# vcpus, memory_mib, disk_gb optionally override the global [defaults]
 # mods = ["rust"]           # provisioning mods appended after the base playbook
 #                           # (see "Provisioning: mods" below)
 
@@ -369,6 +419,14 @@ EBS volume. Trade-offs worth knowing:
 creds; a project can select it with `provider = "aws"` and no `[lightsail]`
 section at all.
 
+> **On IMDS and instance roles.** devbox attaches **no** instance profile on
+> either AWS provider, so there are no role credentials to steal at
+> `169.254.169.254` today. If you ever add one, note that the unprivileged agent
+> reaches the metadata endpoint exactly as easily as root does — an instance
+> role would hand it AWS credentials outright, straight past the account split.
+> Block IMDS for the agent user (an iptables owner-match rule on that address) in
+> the same change that attaches the profile.
+
 `[repo]` drives how the sandbox gets your code, via the built-in
 `repo-bootstrap` mod (see below) — no project needs to author this by hand:
 
@@ -398,12 +456,14 @@ effective **playbook** is the built-in base plus the project's own `mods`,
 appended:
 
 ```
-base (built-in, fixed order):  jj → github-auth → dotfiles → vim → claude-code → repo-bootstrap
+base (built-in, fixed order):  jj → github-auth → dotfiles-packages → dotfiles →
+                               vim → claude-code → repo-bootstrap
 project mods (config.toml):    + rust + wasm-tools + …
 ```
 
 Base ordering encodes the constraints (jj + github-auth before repo-bootstrap
-so a private `jj git clone` can authenticate). The 95% case is "just add rust":
+so a private `jj git clone` can authenticate; `dotfiles-packages`, the root half,
+before `dotfiles`, the per-user half). The 95% case is "just add rust":
 `mods = ["rust"]`.
 
 **Resolution** — each mod name resolves to a `<name>.sh` script by precedence
@@ -416,25 +476,39 @@ mods/*.sh                     # built-in, at the repo root
 ```
 
 **Static files, env for context.** Mods are static (lintable, shellcheck-able,
-diffable) and receive context via the **environment** (`DEVBOX_USER`,
-`DEVBOX_JJ_NAME`, `DEVBOX_REPO_URL`, …), not `%TOKEN%` substitution. The driver
-also sources the box's `[env]` creds file (see [Credentials](#credentials-env)),
-so a mod that needs a secret — e.g. `repo-bootstrap` cloning a private repo with
-`GITHUB_TOKEN` — has it, and it never lands in a script on disk or a log.
+diffable, and directly runnable — the metadata below is comment headers, so the
+shebang stays on line 1) and receive context via the **environment**
+(`DEVBOX_AGENT_USER`, `DEVBOX_ADMIN_USER`, `DEVBOX_JJ_NAME`, `DEVBOX_REPO_URL`,
+…), not `%TOKEN%` substitution. Each mod also sources its own target user's
+`[env]` creds file (see [Credentials](#credentials-env)), so a mod that needs a
+secret — e.g. `repo-bootstrap` cloning a private repo with `GITHUB_TOKEN` — has
+it, and it never lands in a script on disk, in a command line, or in a log.
 
-**Self-contained.** A mod `sudo apt-get install -y`s what it needs (the dev user
-has NOPASSWD sudo; apt-install is idempotent) rather than relying on the init
-script's package list — which is why a project never has to touch the first-boot
-layer at all.
+**A mod body runs without sudo.** The driver runs as the privileged user and
+drops to the agent for each mod, because configuring a user's home directory is
+what a mod almost always does. So `sudo` inside a mod is a bug — use the two
+headers below instead. This is also why the payload carries no secrets: it has to
+be readable by the account the driver drops into.
+
+**Who a mod runs as (`# runas:`).** Default `agent`. Also `admin` (the privileged
+account) and `root`. A mod may name more than one and then runs once per target —
+`dotfiles` is `# runas: admin agent`, so `devbox ssh --admin` gets a usable shell
+too. Validated before any boot/SSH; an unknown target is a hard error.
+
+**System packages (`# packages:`).** `# packages: jq unzip` — apt-installed by
+the driver, as the privileged user, before the body runs. This is the sanctioned
+route now that a mod body has no sudo. The index is refreshed once per run.
 
 **Delivered over SSH** (one path). devbox tars the resolved driver + mods +
-context + manifest, pipes it to the box over the `devbox-<name>` SSH alias,
-extracts it into a per-run temp dir (owned by the SSH user), and runs the driver.
-This is the **only** delivery path — the same for a fresh box and a reconverge:
+context + manifest, pipes it to the box over the `devbox-<name>-admin` SSH alias
+(the driver needs sudo), extracts it into a per-run temp dir, and runs the
+driver. This is the **only** delivery path — the same for a fresh box and a
+reconverge:
 
-- **`devbox create`** — after boot (once the init script has created the user and
-  installed packages), runs the mods, then pushes `[[sync]]` files. `create`
-  blocks through all of it, so when it returns the box is fully provisioned.
+- **`devbox create`** — after boot (once the init script has created the
+  privileged user and installed packages), creates the agent account, injects the
+  `[env]` creds, runs the mods, then pushes `[[sync]]` files. `create` blocks
+  through all of it, so when it returns the box is fully provisioned.
 - **`devbox sync --mods[=a,b,c]`** — reconverge a live box; no list runs the
   whole playbook, a list runs just those (fast iteration while writing a mod).
 
@@ -443,8 +517,19 @@ The init script carries **no** provisioning payload — it only does base setup.
 mid-provision, re-run `devbox sync --mods`.)
 
 The driver runs each mod in playbook order, stops at the first failure (naming
-which mod), and tees each mod's output to `~/provision/<name>.log` plus the
-combined `~/provision.log` that `devbox status` tails.
+which mod and which account), and tees each mod's output to
+`~/provision/<name>.log` — `~/provision/<name>.<user>.log` for a mod that runs
+for more than one account — plus the combined `~/provision.log` that `devbox
+status` tails. All of these live in the **privileged** user's home, since that
+is where the driver runs.
+
+Before any mod, on every run, the driver ensures the box's users: it creates the
+agent account if absent (no supplementary groups, `0750` home, locked password,
+your SSH key authorized), locks both homes down, writes each account's
+`~/.bash_env`, and **refuses to continue** if the agent has somehow acquired sudo
+or a root-equivalent group. It is a driver preamble rather than a mod on purpose:
+it must always run, must not be shadowable by a project's `.devbox/mods/`, and
+must not be skippable via `devbox sync --mods=jj`.
 
 **Idempotency contract:** every mod either overwrites unconditionally or guards
 on "already done", so `create` and every reconverge are safe. Each built-in
@@ -474,8 +559,13 @@ mods = ["rust"]
 ```bash
 # .devbox/mods/rust.sh
 #!/usr/bin/env bash
+#
+# packages: clang libssl-dev
+#
+# No `# runas:` — it defaults to the agent, whose $HOME this installs into.
+# No `sudo` either: the body has none. Packages go in the header above, where
+# the driver installs them as the privileged user before this runs.
 set -euo pipefail
-sudo apt-get install -y build-essential clang pkg-config libssl-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 . "$HOME/.cargo/env"
 # ... cargo tools, claude plugin install rust-analyzer-lsp, etc.
@@ -497,22 +587,33 @@ which collides with cloud-init's jinja): `%DEVBOX_USER%`, `%DEVBOX_SSH_PUBKEY%`
 and `%DEVBOX_HOSTNAME%` (the instance's canonical name). What it does, as root,
 under `set -euo pipefail`:
 
-1. Creates the login user — `sudo` group, a `/etc/sudoers.d` NOPASSWD drop-in,
-   locked password, and `~/.ssh/authorized_keys` holding your public key. This
-   is **first**, before the package install, so SSH access is never gated on
-   (or lost to) a slow or failing apt step.
+1. Creates the **privileged** user — `sudo` group, a `/etc/sudoers.d` NOPASSWD
+   drop-in, locked password, `0750` home, and `~/.ssh/authorized_keys` holding
+   your public key. This is **first**, before the package install, so SSH access
+   is never gated on (or lost to) a slow or failing apt step.
 2. Sets the hostname to the instance name. It also drops a `preserve_hostname`
    cloud-init snippet, so cloud-init doesn't revert the name to the
    datasource's on the next reboot.
-3. Appends `BASH_ENV=/home/<user>/.bash_env` to `/etc/environment`, so
-   non-interactive bash (e.g. Claude Code's Bash tool) picks up what the mods
-   install.
+3. Installs `/etc/devbox/bash_env` and points `/etc/environment` at it with
+   `BASH_ENV=/etc/devbox/bash_env`, so non-interactive bash (e.g. Claude Code's
+   Bash tool) picks up what the mods install. It is a **shared stub** that
+   sources `$HOME/.bash_env`, because `/etc/environment` is one system-wide
+   table and the box has two accounts — a per-user path there would make one
+   user source the other's file. (`BASH_ENV=$HOME/…` is not an option: pam_env
+   reads `/etc/environment` as plain `KEY=VALUE`, so the expansion has to happen
+   in bash.)
 4. Adds the official GitHub CLI apt repo, then installs the baseline the mods
-   lean on: `zsh vim python3 curl git git-lfs ca-certificates gh rsync`. (The
-   repo is needed because `gh` isn't in every Ubuntu release's archive —
-   notably 24.04, the newest LTS blueprint Lightsail offers — and under
-   `set -e` a missing package would abort first boot.) No distro upgrade.
+   lean on: `zsh vim python3 curl git git-lfs ca-certificates gh rsync
+   build-essential pkg-config`. (The repo is needed because `gh` isn't in every
+   Ubuntu release's archive — notably 24.04, the newest LTS blueprint Lightsail
+   offers — and under `set -e` a missing package would abort first boot.) No
+   distro upgrade.
 5. Switches the login shell to `zsh` now that it exists.
+
+It deliberately does **not** create the agent user. User-data runs once, at first
+boot, so an account born here could never appear on an existing box and changing
+`agent_user` would need a rebuild — the provisioning driver creates it instead,
+where it reconverges.
 
 Every step is idempotent, and the whole thing carries no provisioning payload —
 mods run over SSH afterwards. A project cannot extend this layer (the
@@ -533,13 +634,17 @@ GITHUB_TOKEN = "github_pat_..."
 SOME_API_KEY = "..."
 ```
 
-**In the guest**, devbox writes a single managed 0600 file — `~/.config/devbox/env`
-(`export KEY=val` lines) — and sources it from **both** `~/.zshenv` (interactive
-zsh) **and** `~/.bash_env` (the `BASH_ENV` target). The second one matters: Claude
-Code's Bash tool runs *non-interactive bash*, which doesn't read `.zshenv` — so
-creds only in `.zshenv` would be invisible to the agent and anything it runs. The
-values are also exported into the provisioning run, so a mod that needs a cred
-(e.g. `repo-bootstrap`'s private `jj git clone`) sees it.
+**In the guest**, devbox writes a single managed 0600 file in the **agent's**
+home — `/home/<agent_user>/.config/devbox/env` (`export KEY=val` lines) — and
+sources it from **both** that user's `~/.zshenv` (interactive zsh) **and** its
+`~/.bash_env` (the `BASH_ENV` target). The second one matters: Claude Code's Bash
+tool runs *non-interactive bash*, which doesn't read `.zshenv` — so creds only in
+`.zshenv` would be invisible to the agent and anything it runs.
+
+The agent's home is the **only** copy. The privileged user can still read it via
+sudo — it's the trusted side of the box — but nothing writes a second copy, and a
+mod running as `admin` or `root` therefore sees no credentials at all. A mod that
+needs one should be an agent mod (as `repo-bootstrap` and `github-auth` are).
 
 **GitHub auth** is just `GITHUB_TOKEN` in `[env]`: `gh` reads it natively (no
 `gh auth login`, so nothing lands in `~/.config/gh/hosts.yml`), and the
@@ -651,12 +756,12 @@ jj new wip@devbox-my-project         # check out the fetched bookmark
 
 `devbox jj fetch` refreshes the SSH alias (address via the provider), ensures a jj
 git remote named after the alias (`devbox-<name>`) points at the instance's
-colocated repo (`ssh://devbox-<name>/home/<user>/<dir>`), and runs `jj git
+colocated repo (`ssh://devbox-<name>/home/<agent_user>/<dir>`), and runs `jj git
 fetch`. It's equivalent to the manual flow:
 
 ```bash
 devbox host                                             # prints alias, e.g. devbox-my-project
-jj git remote add devbox-my-project ssh://devbox-my-project/home/<user>/<dir>
+jj git remote add devbox-my-project ssh://devbox-my-project/home/<agent_user>/<dir>
 jj git fetch --remote devbox-my-project
 ```
 
@@ -670,7 +775,7 @@ a push update a non-bare repo's checked-out working tree). The host seeds it:
 
 ```bash
 devbox host                                             # prints alias, e.g. devbox-my-project-dev
-jj git remote add sandbox ssh://devbox-my-project-dev/home/<user>/<dir>
+jj git remote add sandbox ssh://devbox-my-project-dev/home/<agent_user>/<dir>
 jj bookmark set main -r @ --allow-backwards   # the bookmark name MUST be "main" -
                                                 # matches the sandbox repo's initial-branch
 jj git push --remote sandbox --allow-new -b main

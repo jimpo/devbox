@@ -24,16 +24,20 @@ from .providers import awsauth, base, ec2, libvirt, lightsail  # noqa: F401
 from .cli import main  # noqa: F401
 from .initscript import (INIT_SCRIPT_PATH, render_init_script,  # noqa: F401
                          substitute_tokens)
-from .provision import (BUILTIN_MODS_DIR, DEFAULT_BASE_MODS, DRIVER_PATH,  # noqa: F401
-                        GLOBAL_MODS_DIR, PROVISION_LOG, PayloadFile,
+from .provision import (BUILTIN_MODS_DIR, DEFAULT_BASE_MODS, DEFAULT_RUNAS,  # noqa: F401
+                        DRIVER_PATH, GLOBAL_MODS_DIR, PROVISION_LOG,
+                        RUNAS_TARGETS, ModSpec, PayloadFile,
                         build_payload, build_tarball, effective_mods,
-                        parse_requires, render_env_file, resolve_env,
-                        resolve_jj_identity, resolve_mod, validate_mods)
+                        load_mod_specs, parse_header, parse_packages,
+                        parse_requires, parse_runas, render_env_file,
+                        render_manifest, resolve_env, resolve_jj_identity,
+                        resolve_mod, validate_mods)
 from .config import (AwsConfig, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
                      DEFAULT_CACHE_DIR, DEFAULT_DISK_GB, DEFAULT_LIBVIRT_URI,
                      DEFAULT_LIGHTSAIL_BLUEPRINT, DEFAULT_LIGHTSAIL_BUNDLE,
                      DEFAULT_MEMORY_MIB, DEFAULT_NETWORK, DEFAULT_PROVIDER,
-                     DEFAULT_VCPUS, Ec2Config, Ec2ProjectConfig,
+                     DEFAULT_VCPUS, RESERVED_USERNAMES, USERNAME_RE,
+                     Ec2Config, Ec2ProjectConfig,
                      GlobalConfig, LightsailProjectConfig, PREFIXED_PROVIDERS,
                      PROJECT_CONFIG_FILE, PROJECT_MARKER_DIR,
                      PROVIDERS, ProjectConfig, RepoConfig, SyncEntry, compose_instance_name,

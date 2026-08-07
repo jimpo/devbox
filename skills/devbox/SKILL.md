@@ -13,6 +13,13 @@ playbook of idempotent provisioning **mods** (jj, dotfiles, Claude Code, GitHub
 auth, repo bootstrap) that devbox owns; each project adds only what's different
 via `.devbox/config.toml`. Full reference: `README.md` in this repo.
 
+**Two accounts per box.** A privileged user (`user`, default host `$USER`) that
+provisioning runs as, and an unprivileged one (`agent_user`, default = the
+project name) with **no sudo**, which AI agents, the repo checkout and the
+`[env]` creds live under. `devbox ssh` lands on the agent; `devbox ssh --admin`
+is the privileged shell. This contains system integrity, not credentials — the
+agent still has network egress and still holds the tokens.
+
 ## Commands
 
 `-C PATH` (project dir) and `--name NAME` (target a specific instance) go
@@ -23,7 +30,7 @@ via `.devbox/config.toml`. Full reference: `README.md` in this repo.
 | `devbox create` | Boot + provision the project's default libvirt VM, or a named cloud instance with `--provider ec2\|aws --name <n>`. |
 | `devbox list` | All devbox-managed instances (libvirt on this host + EC2/Lightsail account-wide): name, provider, state, resources. |
 | `devbox up` / `stop` / `destroy` | Start / graceful-shutdown / tear down (destroy also deletes the disk). |
-| `devbox ip` / `ssh [-- args]` / `status` | Print IP / SSH in / show cloud-init progress + `~/provision.log`. |
+| `devbox ip` / `ssh [-- args]` / `status` | Print IP / SSH in as the unprivileged agent user (`ssh --admin` for the privileged one, the box's only sudo shell) / show cloud-init progress + `~/provision.log`. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo (refreshes the SSH alias + `devbox-<name>` jj remote, runs `jj git fetch`). |
 | `devbox sync --envvars` | (Re-)write the box's 0600 `[env]` file — scoped creds/vars (`GITHUB_TOKEN`, API keys) into its shell env. Full rewrite each run. |
 | `devbox sync --mods[=a,b]` | Run provisioning mods over SSH on a live box (reconverge, no rebuild). No list = whole playbook; else just those. |
@@ -59,7 +66,9 @@ take an explicit `--name` and get a canonical `<provider>-<name>` (e.g.
 ```toml
 # project = "<name>"    # instance label; default = the marker dir's basename
 # provider = "libvirt"  # default provider for a bare `create`
-# user, vcpus, memory_mib, disk_gb  # override the global [defaults]
+# user = "<name>"       # privileged account (sudo); default = host $USER
+# agent_user = "<name>" # unprivileged account agents run as; default = project
+# vcpus, memory_mib, disk_gb  # override the global [defaults]
 mods = ["rust"]          # project mods, appended after the base playbook
 
 [env]                    # creds/vars into the box's shell env; overrides global per-key
@@ -105,9 +114,10 @@ architecture = "arm64"    # x86_64 | arm64
 - **Repo modes:** `clone` (existing remote; needs `dir` + `url`), `push`
   (brand-new project, no remote yet; `dir` only — seed it after create, below),
   `none` (scratch VM; omit `[repo]`).
-- **`[env]` creds:** injected into the box as a 0600 `~/.config/devbox/env`
-  sourced by the shells (and exported into provisioning, so a private clone sees
-  `GITHUB_TOKEN`). Written by `devbox sync --envvars` (auto-run on `create`).
+- **`[env]` creds:** injected into the **agent user's** home as a 0600
+  `~/.config/devbox/env` sourced by that user's shells (and by agent-targeted
+  mods at provision time, so a private clone sees `GITHUB_TOKEN`). Written by
+  `devbox sync --envvars` (auto-run on `create`).
   Values are plaintext in git-excluded `.devbox/config.toml` — accepted for
   scoped creds; don't put them in a committed file.
 - **File sync:** `devbox sync --files` rsyncs host-local, non-VCS files onto the
@@ -120,23 +130,32 @@ architecture = "arm64"    # x86_64 | arm64
 
 ### Mods (provisioning)
 
-The base playbook (`jj → github-auth → dotfiles → vim → claude-code →
-repo-bootstrap`) is built in. Add a project mod only for extra tooling
-(`Cargo.toml` → a rust mod, `package.json` → a node mod):
+The base playbook (`jj → github-auth → dotfiles-packages → dotfiles → vim →
+claude-code → repo-bootstrap`) is built in. Add a project mod only for extra
+tooling (`Cargo.toml` → a rust mod, `package.json` → a node mod):
 
 1. List it: `mods = ["rust"]` in `.devbox/config.toml`.
 2. Write `.devbox/mods/rust.sh` — self-contained and idempotent, taking context
-   from the **environment** (`DEVBOX_USER`, `DEVBOX_JJ_NAME`, `DEVBOX_REPO_DIR`,
-   …), not `%TOKEN%`s:
+   from the **environment** (`DEVBOX_AGENT_USER`, `DEVBOX_JJ_NAME`,
+   `DEVBOX_REPO_DIR`, …), not `%TOKEN%`s:
 
    ```bash
    #!/usr/bin/env bash
+   #
+   # packages: clang libssl-dev
+   #
    set -euo pipefail
-   sudo apt-get install -y build-essential clang pkg-config libssl-dev  # dev user has NOPASSWD sudo
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
    . "$HOME/.cargo/env"
    # ... cargo tools, `claude plugin install rust-analyzer-lsp`, etc.
    ```
+
+**A mod body has no sudo.** It runs as the box's unprivileged agent account, so
+`sudo` in a mod is a bug. Declare apt packages with a `# packages:` header (the
+driver installs them as the privileged user beforehand), and use
+`# runas: root` for the rare step that genuinely needs privilege. `# runas:`
+defaults to `agent` and also accepts `admin`; a mod naming more than one target
+runs once per target.
 
 Resolution is **project > global (`~/.config/devbox/mods`) > built-in** by name.
 Every mod must be idempotent (it runs on `create` *and* every `devbox sync
@@ -153,8 +172,10 @@ after the mod needing it — it doesn't reorder, just enforces order.
 
 **What takes effect how:** provisioning runs entirely over SSH. A mod change (or
 the `mods` list) reconverges a live box via `devbox sync --mods` — no rebuild. A
-first-boot change (devbox's `init-script.sh`: base packages, the login user)
-needs `devbox destroy` + `create`, since user-data runs only on first boot.
+first-boot change (devbox's `init-script.sh`: base packages, the privileged user)
+needs `devbox destroy` + `create`, since user-data runs only on first boot. The
+agent account is *not* first-boot — the driver creates it, so `agent_user`
+changes reconverge via `devbox sync --mods`.
 
 ## Setting up & syncing
 
@@ -173,7 +194,7 @@ wip -r @`; on the host `devbox jj fetch` then `jj new wip@devbox-<name>`.
 
 ```bash
 devbox host                                        # prints the alias, devbox-<name>
-jj git remote add devbox-<name> ssh://devbox-<name>/home/<user>/<dir>
+jj git remote add devbox-<name> ssh://devbox-<name>/home/<agent_user>/<dir>
 jj bookmark set main -r @ --allow-backwards        # bookmark MUST be "main"
 jj git push --remote devbox-<name> -b main
 ```
