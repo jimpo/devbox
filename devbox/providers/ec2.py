@@ -25,6 +25,7 @@ from typing import Optional
 from ..config import (AwsConfig, DEFAULT_AMI_NAME_FILTER, Ec2Config,
                       Ec2ProjectConfig, GlobalConfig, parse_instance_name)
 from ..util import die
+from .awsauth import error_code, make_client
 from .base import Instance, InstanceSpec, Provider
 
 MANAGED_TAG = "devbox:managed"
@@ -43,21 +44,9 @@ CAPACITY_ERROR_CODES = {"InsufficientInstanceCapacity", "Unsupported"}
 
 
 def _make_ec2_client(aws: AwsConfig):
-    try:
-        import boto3
-    except ImportError:
-        die("boto3 is required for the EC2 provider: pip install boto3 "
-            "(or `uv tool install --with boto3 devbox`)")
-    session = boto3.Session(profile_name=aws.profile, region_name=aws.region)
-    return session.client("ec2")
-
-
-def _error_code(err: Exception) -> Optional[str]:
-    """boto3/botocore ClientError code, duck-typed (no botocore import needed)."""
-    response = getattr(err, "response", None)
-    if isinstance(response, dict):
-        return response.get("Error", {}).get("Code")
-    return None
+    # Credentials are resolved (and a login offered if they've expired) inside
+    # make_client, before the first API call - see providers/awsauth.py.
+    return make_client(aws, "ec2", "EC2 provider")
 
 
 class Ec2Provider(Provider):
@@ -235,7 +224,7 @@ class Ec2Provider(Provider):
             try:
                 resp = self.ec2.run_instances(**call)
             except Exception as err:  # noqa: BLE001 - re-raised below unless capacity
-                if subnet is None or _error_code(err) not in CAPACITY_ERROR_CODES:
+                if subnet is None or error_code(err) not in CAPACITY_ERROR_CODES:
                     raise
                 last_error = err
                 nxt = candidates[i + 1] if i + 1 < len(candidates) else None

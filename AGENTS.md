@@ -27,8 +27,13 @@ subnet capacity fallback, lifecycle), the **aws/Lightsail provider against a
 fake Lightsail client** (`LightsailProvider` with an injected `client=`:
 create-instances request shape incl. bundle/blueprint/AZ defaults, client-side
 tag discovery + paging, the bare-name collision guard, list/state/address,
-lifecycle), and the jj-remote wiring for `devbox jj
-fetch` (`_ensure_jj_remote` add/set-url/noop with a monkeypatched `subprocess`).
+lifecycle), the jj-remote wiring for `devbox jj
+fetch` (`_ensure_jj_remote` add/set-url/noop with a monkeypatched `subprocess`),
+and the **AWS credential handling** (`providers/awsauth.py`: auth-error
+duck-typing, the up-front `credential_problem` check against a fake session, the
+`aws sso login` command derived from a temp `~/.aws/config`, the TTY/non-TTY/
+declined prompt paths, and `cli._run`'s one-line errors) — the exception fakes
+carry botocore's real class names, since that naming is what the matcher keys on.
 It does not and cannot exercise `create`/`up`/`stop`/`destroy`/`host`/`provision`/
 `list`/`jj fetch` end-to-end against real infra (`jj fetch`'s actual `jj git
 fetch` needs a
@@ -84,12 +89,18 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   both boto3, lazily imported + injectable client
   for tests); `__init__.py` (`get_provider`, `all_providers` — the AWS-backed
   providers, `AWS_PROVIDERS = ("ec2", "aws")`, gated on
-  `[aws]` creds being configured). Only `create`/`start`/`stop`/`destroy`/`state`/
+  `[aws]` creds being configured); `awsauth.py` — the single `make_client` both
+  AWS providers build through, which resolves the profile's credentials *before*
+  the first API call and offers `aws sso login` when they've lapsed
+  (`AwsAuthError` carries a finished, user-facing message; `cli._run` also
+  catches the server-side auth failures that can't be seen up front, via
+  `is_auth_error`). Only `create`/`start`/`stop`/`destroy`/`state`/
   `address`/`list` are per-backend; everything above (config, render,
   provisioning, ssh/exec, target resolution, list aggregation) is shared, and
   subcommands go through the seam rather than calling `virsh`/boto3 directly.
-- `cli.py` — argparse + subcommand handlers + `main`; `__main__.py` for
-  `python -m devbox`.
+- `cli.py` — argparse + subcommand handlers + `main` (which dispatches through
+  `_run`, the one place AWS credential failures become `error:` lines instead of
+  a boto traceback); `__main__.py` for `python -m devbox`.
 - `__init__.py` — re-exports a flat `devbox.X` API for convenience/tests.
 
 `pyproject.toml` (hatchling) declares the `devbox.cli:main` entry point,

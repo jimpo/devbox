@@ -38,7 +38,8 @@ from .config import (DEFAULT_PROVIDER, GlobalConfig, KNOWN_HOSTS_PATH, PROVIDERS
                      resolve_project)
 from .provision import PROVISION_LOG, build_payload, build_tarball, resolve_env
 from .sync import run_envvars, run_sync
-from .providers import InstanceSpec, all_providers, get_provider
+from .providers import (AwsAuthError, InstanceSpec, all_providers,
+                        auth_error_message, get_provider, is_auth_error)
 from .util import die
 
 
@@ -532,7 +533,24 @@ def main() -> None:
     project = None
     if getattr(args, "needs_project", True):
         project = resolve_project(args.project_dir or Path.cwd(), global_config)
-    args.func(args, global_config, project)
+    _run(args, global_config, project)
+
+
+def _run(args: argparse.Namespace, gc: GlobalConfig, project: Optional[ProjectConfig]) -> None:
+    """Dispatch, turning AWS credential failures into one-line errors instead of
+    a boto stack trace. Credentials that can be checked up front are handled at
+    client construction (providers/awsauth.py), which offers to log in and then
+    carries on; what reaches here is either that path giving up (AwsAuthError,
+    message already written) or a token that only the server rejected - too late
+    to resume, so we say what to run."""
+    try:
+        args.func(args, gc, project)
+    except AwsAuthError as err:
+        die(str(err))
+    except Exception as err:  # noqa: BLE001 - re-raised unless it's an auth failure
+        if gc.aws is not None and is_auth_error(err):
+            die(auth_error_message(gc.aws, err))
+        raise
 
 
 if __name__ == "__main__":

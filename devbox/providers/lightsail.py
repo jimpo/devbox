@@ -35,6 +35,7 @@ from typing import Optional
 from ..config import (AwsConfig, DEFAULT_LIGHTSAIL_BUNDLE, GlobalConfig,
                       LightsailProjectConfig, parse_instance_name)
 from ..util import die
+from .awsauth import make_client
 from .base import Instance, InstanceSpec, Provider
 
 MANAGED_TAG = "devbox:managed"
@@ -44,13 +45,9 @@ CREATED_AT_TAG = "devbox:created-at"
 
 
 def _make_lightsail_client(aws: AwsConfig):
-    try:
-        import boto3
-    except ImportError:
-        die("boto3 is required for the AWS (Lightsail) provider: pip install boto3 "
-            "(or `uv tool install --with boto3 devbox`)")
-    session = boto3.Session(profile_name=aws.profile, region_name=aws.region)
-    return session.client("lightsail")
+    # Credentials are resolved (and a login offered if they've expired) inside
+    # make_client, before the first API call - see providers/awsauth.py.
+    return make_client(aws, "lightsail", "AWS (Lightsail) provider")
 
 
 class LightsailProvider(Provider):

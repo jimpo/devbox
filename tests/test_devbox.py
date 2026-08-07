@@ -1950,3 +1950,311 @@ def test_cmd_destroy_declined_leaves_untouched(monkeypatch, capsys):
     devbox.cli.cmd_destroy(_destroy_args(yes=False), gc, _project())
     assert provider.destroyed == []
     assert "Aborted" in capsys.readouterr().out
+
+
+# ---- AWS credential handling (JIM-97) ---------------------------------------
+class SSOError(Exception):
+    """Stands in for botocore.exceptions.SSOError. awsauth recognises botocore
+    exceptions by class name (it never imports botocore), so the fakes carry the
+    real names - that naming *is* the contract under test."""
+
+
+class UnauthorizedSSOTokenError(SSOError):
+    """Stands in for botocore's expired-SSO-session error, which awsauth matches
+    only through its SSOError base."""
+
+
+class _FakeCredentials:
+    """boto3 credentials stand-in. An SSO profile resolves to a *deferred*
+    credentials object, so the token only turns out to be stale when
+    get_frozen_credentials() forces the refresh."""
+    def __init__(self, frozen_error=None):
+        self._frozen_error = frozen_error
+
+    def get_frozen_credentials(self):
+        if self._frozen_error is not None:
+            raise self._frozen_error
+        return ("AKIAEXAMPLE", "secret")
+
+
+class _FakeSession:
+    """boto3.Session stand-in: only credential resolution matters here."""
+    def __init__(self, credentials=None, get_error=None):
+        self.credentials = credentials
+        self.get_error = get_error
+        self.clients = []
+
+    def get_credentials(self):
+        if self.get_error is not None:
+            raise self.get_error
+        return self.credentials
+
+    def client(self, service):
+        self.clients.append(service)
+        return f"{service}-client"
+
+
+_EXPIRED_SSO = UnauthorizedSSOTokenError(
+    "The SSO session associated with this profile has expired or is otherwise "
+    "invalid. To refresh this SSO session run aws sso login with the "
+    "corresponding profile.")
+
+
+def _ok_session():
+    return _FakeSession(credentials=_FakeCredentials())
+
+
+def _expired_session():
+    return _FakeSession(credentials=_FakeCredentials(frozen_error=_EXPIRED_SSO))
+
+
+@pytest.fixture
+def aws_config_file(tmp_path, monkeypatch):
+    """An ~/.aws/config with one SSO profile, one static-keys profile, and an
+    SSO default. AWS_PROFILE is cleared so the host's env can't leak in."""
+    cfg = tmp_path / "aws-config"
+    cfg.write_text(
+        "[profile dev]\n"
+        "sso_session = corp\n"
+        "sso_account_id = 1234\n"
+        "region = us-east-1\n\n"
+        "[profile keys]\n"
+        "region = us-east-1\n\n"
+        "[default]\n"
+        "sso_start_url = https://example.awsapps.com/start\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(cfg))
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    return cfg
+
+
+def _aws(profile="dev"):
+    return devbox.AwsConfig(region="us-east-1", profile=profile)
+
+
+# -- is_auth_error (what counts as "log in again") --
+def test_is_auth_error_matches_sso_subclass():
+    # Matched through the MRO: UnauthorizedSSOTokenError is only listed via SSOError.
+    assert devbox.is_auth_error(_EXPIRED_SSO)
+
+
+def test_is_auth_error_matches_client_error_codes():
+    assert devbox.is_auth_error(_FakeClientError("ExpiredToken"))
+    assert devbox.is_auth_error(_FakeClientError("UnauthenticatedException"))
+
+
+def test_is_auth_error_ignores_other_failures():
+    # A capacity error or a plain bug is not a credentials problem.
+    assert not devbox.is_auth_error(_FakeClientError("InsufficientInstanceCapacity"))
+    assert not devbox.is_auth_error(RuntimeError("boom"))
+
+
+# -- credential_problem (the up-front check) --
+def test_credential_problem_none_when_credentials_resolve():
+    assert devbox.credential_problem(_ok_session()) is None
+
+
+def test_credential_problem_reports_expired_sso_token():
+    problem = devbox.credential_problem(_expired_session())
+    # First sentence only - the "run aws sso login" one is ours to say.
+    assert problem == ("The SSO session associated with this profile has expired "
+                       "or is otherwise invalid")
+
+
+def test_credential_problem_reports_missing_credentials():
+    assert devbox.credential_problem(_FakeSession(credentials=None)) == "no credentials found"
+
+
+def test_credential_problem_reports_load_time_failure():
+    session = _FakeSession(get_error=SSOError("token file is unreadable"))
+    assert devbox.credential_problem(session) == "token file is unreadable"
+
+
+def test_credential_problem_reraises_non_auth_errors():
+    session = _FakeSession(get_error=RuntimeError("disk on fire"))
+    with pytest.raises(RuntimeError):
+        devbox.credential_problem(session)
+
+
+# -- login_command (only SSO profiles have one) --
+def test_login_command_for_sso_profile(aws_config_file):
+    assert devbox.login_command(_aws("dev")) == ["aws", "sso", "login", "--profile", "dev"]
+
+
+def test_login_command_for_sso_default_profile(aws_config_file):
+    assert devbox.login_command(_aws(None)) == ["aws", "sso", "login"]
+
+
+def test_login_command_none_for_static_key_profile(aws_config_file):
+    # Nothing devbox could run would refresh static keys - say so instead.
+    assert devbox.login_command(_aws("keys")) is None
+
+
+def test_login_command_none_for_unknown_profile(aws_config_file):
+    assert devbox.login_command(_aws("nope")) is None
+
+
+def test_login_command_falls_back_to_aws_profile_env(aws_config_file, monkeypatch):
+    monkeypatch.setenv("AWS_PROFILE", "dev")
+    assert devbox.login_command(_aws(None)) == ["aws", "sso", "login", "--profile", "dev"]
+
+
+# -- prompt_login --
+@pytest.fixture
+def aws_cli_present(monkeypatch):
+    monkeypatch.setattr(devbox.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+
+def _record_runs(monkeypatch, returncode=0):
+    runs = []
+
+    def fake_run(argv, **kw):
+        runs.append(argv)
+        return subprocess.CompletedProcess(argv, returncode)
+
+    monkeypatch.setattr(devbox.subprocess, "run", fake_run)
+    return runs
+
+
+def test_prompt_login_runs_the_login_when_accepted(aws_config_file, aws_cli_present,
+                                                   monkeypatch, capsys):
+    runs = _record_runs(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda *a: "")  # bare Enter = yes
+    devbox.prompt_login(_aws("dev"), "expired", stdin=_FakeStdin(isatty=True))
+    assert runs == [["aws", "sso", "login", "--profile", "dev"]]
+    assert "are missing or expired (expired)" in capsys.readouterr().out
+
+
+def test_prompt_login_declined_raises_with_the_command(aws_config_file, aws_cli_present,
+                                                       monkeypatch):
+    runs = _record_runs(monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    with pytest.raises(devbox.AwsAuthError, match="aws sso login --profile dev"):
+        devbox.prompt_login(_aws("dev"), "expired", stdin=_FakeStdin(isatty=True))
+    assert runs == []
+
+
+def test_prompt_login_non_tty_raises_without_prompting(aws_config_file, aws_cli_present,
+                                                       monkeypatch):
+    # No TTY to ask on (a script, a pipe): say what to run rather than hang.
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("input() must not be called"))
+    with pytest.raises(devbox.AwsAuthError, match="aws sso login --profile dev"):
+        devbox.prompt_login(_aws("dev"), "expired", stdin=_FakeStdin(isatty=False))
+
+
+def test_prompt_login_without_a_login_command_raises(aws_config_file, aws_cli_present,
+                                                     monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("input() must not be called"))
+    with pytest.raises(devbox.AwsAuthError, match="refresh them and re-run"):
+        devbox.prompt_login(_aws("keys"), "expired", stdin=_FakeStdin(isatty=True))
+
+
+def test_prompt_login_without_the_aws_cli_raises(aws_config_file, monkeypatch):
+    monkeypatch.setattr(devbox.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("input() must not be called"))
+    with pytest.raises(devbox.AwsAuthError, match="not on \\$PATH"):
+        devbox.prompt_login(_aws("dev"), "expired", stdin=_FakeStdin(isatty=True))
+
+
+def test_prompt_login_failed_login_raises(aws_config_file, aws_cli_present, monkeypatch):
+    _record_runs(monkeypatch, returncode=1)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    with pytest.raises(devbox.AwsAuthError, match="failed \\(exit 1\\)"):
+        devbox.prompt_login(_aws("dev"), "expired", stdin=_FakeStdin(isatty=True))
+
+
+# -- ensure_credentials (check -> prompt -> re-check on a fresh session) --
+def test_ensure_credentials_passes_through_when_valid(monkeypatch):
+    monkeypatch.setattr(devbox.awsauth, "prompt_login",
+                        lambda *a, **kw: pytest.fail("must not prompt"))
+    session = _ok_session()
+    assert devbox.ensure_credentials(lambda: session, _aws("dev")) is session
+
+
+def test_ensure_credentials_prompts_then_uses_a_fresh_session(monkeypatch):
+    # The stale session caches what it resolved, so the post-login re-check has
+    # to run against a newly built one.
+    sessions = [_expired_session(), _ok_session()]
+    prompted = []
+    monkeypatch.setattr(devbox.awsauth, "prompt_login",
+                        lambda aws, reason, stdin=None: prompted.append(reason))
+    got = devbox.ensure_credentials(lambda: sessions.pop(0), _aws("dev"))
+    assert got is not None and not sessions          # both sessions were built
+    assert prompted and "expired" in prompted[0]
+
+
+def test_ensure_credentials_still_broken_after_login_raises(monkeypatch):
+    monkeypatch.setattr(devbox.awsauth, "prompt_login", lambda *a, **kw: None)
+    with pytest.raises(devbox.AwsAuthError, match="still unusable after logging in"):
+        devbox.ensure_credentials(_expired_session, _aws("dev"))
+
+
+# -- make_client (the provider entry point) --
+def test_make_client_returns_a_client_for_good_credentials(monkeypatch):
+    session = _ok_session()
+    monkeypatch.setattr(devbox.awsauth, "ensure_credentials",
+                        lambda new_session, aws: session)
+    assert devbox.make_client(_aws("dev"), "ec2", "EC2 provider") == "ec2-client"
+
+
+def test_make_client_unknown_profile_dies_cleanly(tmp_path, monkeypatch, capsys):
+    # boto3's ProfileNotFound is a config mistake, not a login problem: point at
+    # the config rather than prompting or dumping a traceback.
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "empty-config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "empty-creds"))
+    with pytest.raises(SystemExit):
+        devbox.make_client(_aws("no-such-profile"), "ec2", "EC2 provider")
+    assert "is not configured" in capsys.readouterr().err
+
+
+# -- the CLI boundary --
+def _run_args(func):
+    import argparse
+    return argparse.Namespace(func=func)
+
+
+def test_cli_run_turns_aws_auth_error_into_one_line(capsys):
+    def boom(args, gc, project):
+        raise devbox.AwsAuthError("AWS credentials are missing; run `aws sso login`")
+
+    with pytest.raises(SystemExit):
+        devbox.cli._run(_run_args(boom), _ec2_gc(), None)
+    err = capsys.readouterr().err
+    assert err.startswith("error: AWS credentials are missing")
+    assert "Traceback" not in err
+
+
+def test_cli_run_turns_mid_command_expiry_into_a_login_hint(aws_config_file, capsys):
+    # An expired token the server rejects can't be caught up front; too late to
+    # prompt and resume, so say what to run.
+    def boom(args, gc, project):
+        raise _FakeClientError("ExpiredToken")
+
+    gc = _ec2_gc()
+    gc.aws = _aws("dev")
+    with pytest.raises(SystemExit):
+        devbox.cli._run(_run_args(boom), gc, None)
+    assert "aws sso login --profile dev" in capsys.readouterr().err
+
+
+def test_cli_run_reraises_unrelated_errors():
+    def boom(args, gc, project):
+        raise RuntimeError("unrelated")
+
+    with pytest.raises(RuntimeError):
+        devbox.cli._run(_run_args(boom), _ec2_gc(), None)
+
+
+def test_check_name_unique_degrades_auth_failure_to_a_warning(monkeypatch, capsys):
+    # A stale AWS session must not block a libvirt create: the collision check
+    # is best-effort, and AwsAuthError carries a message worth printing.
+    class _StaleProvider:
+        name = "ec2"
+
+        def list(self):
+            raise devbox.AwsAuthError("credentials expired; run `aws sso login`")
+
+    monkeypatch.setattr(devbox.cli, "all_providers", lambda gc: [_StaleProvider()])
+    devbox.cli._check_name_unique(_ec2_gc(), "foo")
+    out = capsys.readouterr().out
+    assert "could not check ec2 for name collisions" in out
+    assert "aws sso login" in out

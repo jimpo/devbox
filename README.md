@@ -204,6 +204,22 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    deferred). `boto3` is a declared dependency, so it's always installed, but
    only touched when you actually use AWS.
 
+   **Expired credentials.** Any command that talks to AWS resolves the
+   profile's credentials before its first API call, so a lapsed session is
+   caught up front rather than as a boto stack trace mid-command:
+
+   ```
+   AWS credentials for profile 'dev' are missing or expired (The SSO session
+   associated with this profile has expired or is otherwise invalid).
+   Run `aws sso login --profile dev` now? [Y/n]
+   ```
+
+   Answering yes runs the login and the command carries on. The offer only
+   appears for SSO profiles (nothing devbox could run would refresh static
+   keys) on a TTY — a script, or a non-SSO profile, gets the same one-line
+   message telling it what to fix. A stale AWS session never blocks a libvirt
+   `create`: the cross-provider name-collision check degrades to a warning.
+
    `[jj]` is optional — if unset, `devbox create` falls back to the host's
    own `jj config get user.name`/`user.email` (which you almost certainly
    already have set, if you use jj). It's only truly required if that

@@ -19,7 +19,7 @@ from pathlib import Path  # noqa: F401
 # `devbox.providers.libvirt`, ... are reachable as attributes (some tests
 # monkeypatch module-local names there).
 from . import cli, config, initscript, provision, sync, util  # noqa: F401
-from .providers import base, ec2, libvirt, lightsail  # noqa: F401
+from .providers import awsauth, base, ec2, libvirt, lightsail  # noqa: F401
 
 from .cli import main  # noqa: F401
 from .initscript import (INIT_SCRIPT_PATH, render_init_script,  # noqa: F401
@@ -40,8 +40,12 @@ from .config import (AwsConfig, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
                      find_project_dir, parse_instance_name, resolve_instance,
                      resolve_project)
 from .sync import RsyncJob, plan_sync, run_envvars, run_sync  # noqa: F401
-from .providers import (Ec2Provider, Instance, InstanceSpec, LibvirtProvider,  # noqa: F401
-                        LightsailProvider, Provider, all_providers, get_provider)
+from .providers import (AwsAuthError, Ec2Provider, Instance, InstanceSpec,  # noqa: F401
+                        LibvirtProvider, LightsailProvider, Provider,
+                        all_providers, auth_error_message, get_provider,
+                        is_auth_error)
+from .providers.awsauth import (credential_problem, ensure_credentials,  # noqa: F401
+                                login_command, make_client, prompt_login)
 from .providers.libvirt import (CLOUDIMAGE_KEYRING_PATH, _format_resources,  # noqa: F401
                                 build_metadata_xml, fetch_verified_checksum, read_domain_instance)
 from .cli import _format_age  # noqa: F401

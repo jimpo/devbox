@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from ..config import GlobalConfig
 from ..util import die
+from .awsauth import AwsAuthError, auth_error_message, is_auth_error
 from .base import Instance, InstanceSpec, Provider
 from .ec2 import Ec2Provider
 from .libvirt import LibvirtProvider
@@ -45,4 +46,5 @@ __all__ = [
     "Provider", "Instance", "InstanceSpec",
     "LibvirtProvider", "Ec2Provider", "LightsailProvider",
     "AWS_PROVIDERS", "PROVIDER_REGISTRY", "get_provider", "all_providers",
+    "AwsAuthError", "auth_error_message", "is_auth_error",
 ]
