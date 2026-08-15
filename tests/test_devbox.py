@@ -71,7 +71,8 @@ SOME_API_KEY = "sk-123"
     assert gc.ssh_pubkey_path == devbox.Path("~/.ssh/other.pub").expanduser()
     assert gc.jj_name == "Alice Example"
     assert gc.jj_email == "alice@example.com"
-    assert gc.env == {"GITHUB_TOKEN": "github_pat_example", "SOME_API_KEY": "sk-123"}
+    assert gc.env == {"GITHUB_TOKEN": devbox.EnvVar("github_pat_example"),
+                      "SOME_API_KEY": devbox.EnvVar("sk-123")}
 
 
 def test_global_config_partial_override_keeps_other_defaults(tmp_path):
@@ -206,7 +207,8 @@ def test_resolve_project_agent_user_known_key_no_warning(tmp_path, global_config
 def test_resolve_project_env(tmp_path, global_config):
     _write_marker(tmp_path, '[env]\nGITHUB_TOKEN = "github_pat_proj"\n')
     project = devbox.resolve_project(tmp_path, global_config)
-    assert project.env == {"GITHUB_TOKEN": "github_pat_proj"}
+    # A bare string is the agent's - the account that does the work.
+    assert project.env == {"GITHUB_TOKEN": devbox.EnvVar("github_pat_proj", "agent")}
 
 
 def test_resolve_project_env_defaults_empty(tmp_path, global_config):
@@ -216,6 +218,37 @@ def test_resolve_project_env_defaults_empty(tmp_path, global_config):
 
 def test_resolve_project_env_non_string_dies(tmp_path, global_config):
     _write_marker(tmp_path, '[env]\nPORT = 8080\n')  # values must be strings
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_env_table_form_carries_an_owner(tmp_path, global_config):
+    _write_marker(tmp_path, '[env]\n'
+                            'CLOUDFLARE_TOKEN = { value = "cf_tok", owner = "admin" }\n'
+                            'PLAIN = { value = "p" }\n')
+    assert devbox.resolve_project(tmp_path, global_config).env == {
+        "CLOUDFLARE_TOKEN": devbox.EnvVar("cf_tok", "admin"),
+        "PLAIN": devbox.EnvVar("p", "agent"),    # owner defaults to the agent
+    }
+
+
+def test_resolve_project_env_unknown_owner_dies(tmp_path, global_config):
+    # No "root" owner: a `# runas: root` mod reads the admin's env file.
+    _write_marker(tmp_path, '[env]\nK = { value = "v", owner = "root" }\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_env_unknown_entry_key_dies(tmp_path, global_config):
+    # A typo in an entry's own keys is fatal, unlike an unknown [env] KEY (which
+    # is user-defined by design) - it would otherwise silently mean "agent".
+    _write_marker(tmp_path, '[env]\nK = { value = "v", admin = true }\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+def test_resolve_project_env_table_without_a_value_dies(tmp_path, global_config):
+    _write_marker(tmp_path, '[env]\nK = { owner = "admin" }\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
@@ -623,18 +656,36 @@ def test_build_payload_jj_identity_host_fallback(isolated_mods, pubkey, monkeypa
 # ---- resolve_env (global + project [env], project overrides per-key) --------
 def test_resolve_env_merges_global_and_project():
     gc = _global_config(devbox.Path("/nonexistent"),
-                        env={"GITHUB_TOKEN": "g_tok", "SHARED": "global"})
-    project = _project(env={"SHARED": "project", "PROJECT_ONLY": "p"})
+                        env={"GITHUB_TOKEN": devbox.EnvVar("g_tok"),
+                             "SHARED": devbox.EnvVar("global")})
+    project = _project(env={"SHARED": devbox.EnvVar("project"),
+                            "PROJECT_ONLY": devbox.EnvVar("p")})
     assert devbox.resolve_env(project, gc) == {
-        "GITHUB_TOKEN": "g_tok",     # global-only key kept
-        "SHARED": "project",         # project overrides global per-key
-        "PROJECT_ONLY": "p",         # project-only key added
+        "GITHUB_TOKEN": devbox.EnvVar("g_tok"),     # global-only key kept
+        "SHARED": devbox.EnvVar("project"),         # project overrides per-key
+        "PROJECT_ONLY": devbox.EnvVar("p"),         # project-only key added
     }
+
+
+def test_resolve_env_project_override_replaces_the_owner_too():
+    # The override is per entry, not per field: re-declaring a key hands it to
+    # the account the project names, whatever the global config said.
+    gc = _global_config(devbox.Path("/nonexistent"),
+                        env={"TOKEN": devbox.EnvVar("g_tok", "admin")})
+    project = _project(env={"TOKEN": devbox.EnvVar("p_tok")})
+    assert devbox.resolve_env(project, gc) == {"TOKEN": devbox.EnvVar("p_tok", "agent")}
 
 
 def test_resolve_env_empty_when_neither_set():
     gc = _global_config(devbox.Path("/nonexistent"))
     assert devbox.resolve_env(_project(), gc) == {}
+
+
+def test_env_for_owner_slices_by_account():
+    env = {"GITHUB_TOKEN": devbox.EnvVar("g_tok"),
+           "CLOUDFLARE_TOKEN": devbox.EnvVar("cf_tok", "admin")}
+    assert devbox.env_for_owner(env, "agent") == {"GITHUB_TOKEN": "g_tok"}
+    assert devbox.env_for_owner(env, "admin") == {"CLOUDFLARE_TOKEN": "cf_tok"}
 
 
 # ---- provisioning: mods, env, payload ---------------------------------------
@@ -1393,34 +1444,56 @@ def test_run_sync_dies_on_rsync_failure(tmp_path, monkeypatch):
         devbox.run_sync(proj, "devbox-foo", host_home=str(tmp_path), guest_home="/home/alice")
 
 
-def test_run_envvars_writes_the_agents_managed_file_and_wires_zshenv(monkeypatch):
-    captured = {}
+def _envvars_calls(monkeypatch, env):
+    """run_envvars against a fake subprocess: [(remote command, stdin)] per file,
+    agent's first."""
+    calls = []
 
     def fake_run(argv, **kw):
-        captured["argv"] = argv
-        captured["input"] = kw.get("input")
+        calls.append((argv, kw.get("input")))
         return _cp(argv, 0)
 
     monkeypatch.setattr(devbox.subprocess, "run", fake_run)
-    devbox.run_envvars("devbox-foo-admin", {"GITHUB_TOKEN": "github_pat_x", "K": "v w"},
-                       "agentbot")
-    # Connects as the PRIVILEGED user (writing another user's home needs sudo)
-    # but every path it writes is the agent's - the creds belong to the account
-    # that does the work, and only that account gets a copy.
-    assert captured["argv"][:4] == ["ssh", "devbox-foo-admin", "bash", "-c"]
-    remote = captured["argv"][4]
-    assert "/home/agentbot/.config/devbox/env" in remote
-    assert "-o agentbot -g agentbot -m 0600" in remote
-    assert "/home/agentbot/.zshenv" in remote
-    # the creds are piped over stdin (never in the command / argv / a log)
-    assert "github_pat_x" not in remote
-    assert captured["input"] == b"export GITHUB_TOKEN=github_pat_x\nexport K='v w'\n"
+    devbox.run_envvars("devbox-foo-admin", env, "agentbot")
+    assert [argv[:4] for argv, _ in calls] == [["ssh", "devbox-foo-admin", "bash", "-c"]] * 2
+    return [(argv[4], stdin) for argv, stdin in calls]
+
+
+def test_run_envvars_writes_one_managed_file_per_account(monkeypatch):
+    (agent_cmd, agent_in), (admin_cmd, admin_in) = _envvars_calls(monkeypatch, {
+        "GITHUB_TOKEN": devbox.EnvVar("github_pat_x"),
+        "K": devbox.EnvVar("v w"),
+        "CLOUDFLARE_TOKEN": devbox.EnvVar("cf_tok", "admin"),
+    })
+    # Both connect as the PRIVILEGED user: it owns one of the files, and writing
+    # the agent's home needs sudo.
+    assert "/home/agentbot/.config/devbox/env" in agent_cmd
+    assert "-o agentbot -g agentbot -m 0600" in agent_cmd
+    assert "/home/agentbot/.zshenv" in agent_cmd
+    # Its own home needs no sudo at all.
+    assert "sudo" not in admin_cmd
+    assert "$HOME/.config/devbox/env" in admin_cmd
+    # Each account gets its own entries and no others...
+    assert agent_in == b"export GITHUB_TOKEN=github_pat_x\nexport K='v w'\n"
+    assert admin_in == b"export CLOUDFLARE_TOKEN=cf_tok\n"
+    # ...and the creds are piped over stdin (never in the command / argv / a log).
+    assert "github_pat_x" not in agent_cmd
+    assert "cf_tok" not in admin_cmd
+
+
+def test_run_envvars_rewrites_both_files_even_when_one_is_empty(monkeypatch):
+    # A full rewrite of both is what makes a key moved to the other owner (or
+    # dropped from config) disappear from the account that used to hold it.
+    (_, agent_in), (_, admin_in) = _envvars_calls(
+        monkeypatch, {"GITHUB_TOKEN": devbox.EnvVar("github_pat_x")})
+    assert agent_in == b"export GITHUB_TOKEN=github_pat_x\n"
+    assert admin_in == b""
 
 
 def test_run_envvars_dies_on_failure(monkeypatch):
     monkeypatch.setattr(devbox.subprocess, "run", lambda argv, **k: _cp(argv, 1))
     with pytest.raises(SystemExit):
-        devbox.run_envvars("devbox-foo-admin", {"K": "v"}, "agentbot")
+        devbox.run_envvars("devbox-foo-admin", {"K": devbox.EnvVar("v")}, "agentbot")
 
 
 # ---- payload delivery -------------------------------------------------------

@@ -18,9 +18,11 @@
 # runs WITHOUT sudo. System packages are declared `# packages:` and installed by
 # this driver; the rare mod that truly needs privilege says `# runas: root`.
 #
-# The `[env]` creds are the AGENT's: each mod body sources its own target user's
-# ~/.config/devbox/env, and only the agent has one. A mod needing a credential
-# should be an agent mod.
+# Each mod body sources the `[env]` creds of the account that owns them: its own
+# target user's ~/.config/devbox/env, except a `root` mod, which reads the
+# privileged user's (root has no file of its own, and root is that account's
+# privileged alter ego). Which creds an account gets is the `owner` of each
+# `[env]` entry, host-side.
 #
 # Usage: provision-driver.sh [--ensure-users | <mod-name> ...]
 #   no args        - run the whole playbook (manifest order)
@@ -192,17 +194,28 @@ target_user() {
   esac
 }
 
-# Run one mod body as one target user. sudo resets the environment, so the
-# context and that user's creds are re-established INSIDE the target shell by
-# sourcing files - never passed as `sudo env VAR=...`, which would put secrets in
-# the process argv where any user on the box could read them out of `ps`.
+# The account whose [env] creds a `# runas:` target reads. root has no env file
+# of its own; it gets the privileged user's, so a mod that needs both privilege
+# and a credential (`owner = "admin"` host-side) can have both.
+env_owner() {
+  case "$1" in
+    agent)       printf '%s' "$DEVBOX_AGENT_USER" ;;
+    admin | root) printf '%s' "$DEVBOX_ADMIN_USER" ;;
+  esac
+}
+
+# Run one mod body as one target user, with the creds of `env_home`'s account.
+# sudo resets the environment, so the context and those creds are re-established
+# INSIDE the target shell by sourcing files - never passed as `sudo env VAR=...`,
+# which would put secrets in the process argv where any user on the box could
+# read them out of `ps`.
 run_mod_as() {
-  local file="$1" user="$2"
+  local file="$1" user="$2" env_home="$3"
   sudo -u "$user" -H bash -c '
-    if [ -f "$HOME/.config/devbox/env" ]; then . "$HOME/.config/devbox/env"; fi
+    if [ -f "$3/.config/devbox/env" ]; then . "$3/.config/devbox/env"; fi
     . "$1/context.env"
     exec bash "$2"
-  ' _ "$HERE" "$file"
+  ' _ "$HERE" "$file" "$env_home"
 }
 
 # ---- manifest ---------------------------------------------------------------
@@ -273,7 +286,8 @@ for i in "${SELECTED[@]}"; do
     fi
     # pipefail (set above) makes the mod's failure - not tee's success - the
     # pipeline's status, so a failing mod stops the run.
-    if ! run_mod_as "$file" "$user" 2>&1 | tee "$log_file"; then
+    if ! run_mod_as "$file" "$user" "$(user_home "$(env_owner "$target")")" \
+         2>&1 | tee "$log_file"; then
       echo "devbox: mod '$name' FAILED as '$user' - stopping (see ${log_file/#$HOME/\~})" >&2
       exit 1
     fi

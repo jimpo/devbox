@@ -16,9 +16,10 @@ via `.devbox/config.toml`. Full reference: `README.md` in this repo.
 **Two accounts per box.** A privileged user (`user`, default host `$USER`) that
 provisioning runs as, and an unprivileged one (`agent_user`, default = the
 project name) with **no sudo**, which AI agents, the repo checkout and the
-`[env]` creds live under. `devbox ssh` lands on the agent; `devbox ssh --admin`
-is the privileged shell. This contains system integrity, not credentials — the
-agent still has network egress and still holds the tokens.
+`[env]` creds they need live under. `devbox ssh` lands on the agent; `devbox ssh
+--admin` is the privileged shell. This contains system integrity, not
+credentials — the agent still has network egress and still holds the tokens it
+owns (`owner = "admin"` keeps one out of its reach).
 
 ## Commands
 
@@ -32,7 +33,7 @@ agent still has network egress and still holds the tokens.
 | `devbox up` / `stop` / `destroy` | Start / graceful-shutdown / tear down (destroy also deletes the disk). |
 | `devbox ip` / `ssh [-- args]` / `status` | Print IP / SSH in as the unprivileged agent user (`ssh --admin` for the privileged one, the box's only sudo shell) / show cloud-init progress + `~/provision.log`. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo (refreshes the SSH alias + `devbox-<name>` jj remote, runs `jj git fetch`). |
-| `devbox sync --envvars` | (Re-)write the box's 0600 `[env]` file — scoped creds/vars (`GITHUB_TOKEN`, API keys) into its shell env. Full rewrite each run. |
+| `devbox sync --envvars` | (Re-)write the box's 0600 `[env]` files — scoped creds/vars (`GITHUB_TOKEN`, API keys) into the shell env of each entry's `owner` account. Full rewrite each run. |
 | `devbox sync --mods[=a,b]` | Run provisioning mods over SSH on a live box (reconverge, no rebuild). No list = whole playbook; else just those. |
 | `devbox sync --files` | Push host-local non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync (agent skills, git-excluded files). |
 | `devbox host` | Refresh/print the `devbox-<name>` SSH alias used for `jj fetch`. |
@@ -49,10 +50,12 @@ take an explicit `--name` and get a canonical `<provider>-<name>` (e.g.
 - `[jj] name`/`email` — sandbox identity. Falls back to the host's own `jj
   config get user.name`/`user.email`, so usually no setup. If `devbox create`
   dies for lack of it, ask the user rather than guessing.
-- `[env]` — a flat map of env vars (creds/API keys) injected into every box's
-  shell env. **`GITHUB_TOKEN` here is how the box gets GitHub auth** (private
+- `[env]` — a map of env vars (creds/API keys) injected into every box's shell
+  env. **`GITHUB_TOKEN` here is how the box gets GitHub auth** (private
   clones/pushes); `gh`/`git`/`jj git` read it. A project's `[env]` overrides
-  per-key. Unset is fine for public repos.
+  per-key. Unset is fine for public repos. An entry is a bare string (the agent's
+  env) or `KEY = { value = "...", owner = "admin" }`, which puts it in the
+  privileged user's env instead — for a cred only a privileged mod needs.
 - `[aws] region` (+ optional `profile`) — the shared AWS account creds; enables
   **both** the `ec2` and `aws` (Lightsail) providers. `[ec2]` (optional
   `default_security_groups`, `default_subnets`, `spot`) holds the EC2-specific
@@ -73,6 +76,7 @@ mods = ["rust"]          # project mods, appended after the base playbook
 
 [env]                    # creds/vars into the box's shell env; overrides global per-key
 GITHUB_TOKEN = "github_pat_..."   # how the box gets GitHub auth (repo-scoped PAT)
+# CLOUDFLARE_TOKEN = { value = "...", owner = "admin" }  # privileged user's env
 
 [repo]                   # how the sandbox gets code; omit entirely for none
 mode = "clone"            # clone | push | none
@@ -114,10 +118,11 @@ architecture = "arm64"    # x86_64 | arm64
 - **Repo modes:** `clone` (existing remote; needs `dir` + `url`), `push`
   (brand-new project, no remote yet; `dir` only — seed it after create, below),
   `none` (scratch VM; omit `[repo]`).
-- **`[env]` creds:** injected into the **agent user's** home as a 0600
-  `~/.config/devbox/env` sourced by that user's shells (and by agent-targeted
-  mods at provision time, so a private clone sees `GITHUB_TOKEN`). Written by
-  `devbox sync --envvars` (auto-run on `create`).
+- **`[env]` creds:** injected into the home of the account each entry's `owner`
+  names — the **agent user** by default — as a 0600 `~/.config/devbox/env`
+  sourced by that user's shells (and by that account's mods at provision time, so
+  a private clone sees `GITHUB_TOKEN`). Written by `devbox sync --envvars`
+  (auto-run on `create`).
   Values are plaintext in git-excluded `.devbox/config.toml` — accepted for
   scoped creds; don't put them in a committed file.
 - **File sync:** `devbox sync --files` rsyncs host-local, non-VCS files onto the

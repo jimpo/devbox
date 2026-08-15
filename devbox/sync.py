@@ -23,49 +23,63 @@ import subprocess
 from pathlib import Path
 
 from .config import ProjectConfig
-from .provision import render_env_file
+from .provision import env_for_owner, render_env_file
 from .util import die
 
-# The box-side, devbox-managed 0600 env file, in the AGENT user's home. Holds
-# the effective [env] map as `export KEY=val` lines; sourced from ~/.bash_env
-# (the BASH_ENV target, what non-interactive bash reads) and ~/.zshenv
-# (interactive zsh) so the creds reach both the agent's Bash tool and a human.
+# The box-side, devbox-managed 0600 env file, one per account, in that account's
+# home. Holds the account's slice of the effective [env] map as `export KEY=val`
+# lines; sourced from ~/.bash_env (the BASH_ENV target, what non-interactive bash
+# reads) and ~/.zshenv (interactive zsh) so the creds reach both an agent's Bash
+# tool and a human at a shell.
 #
-# The agent's home is the only copy. The privileged user can still read it via
-# sudo - it is the trusted side of the box - but nothing writes it a second
-# copy, so a mod running as `admin` or `root` sees no credentials. A mod that
-# needs one should be an agent mod.
+# Each entry lands in exactly one of the two files, per its `owner` (see
+# config.EnvVar): the agent's by default, the privileged user's for a cred that
+# only a `# runas: admin|root` mod needs. Homes are 0750 and the files 0600, so
+# the agent cannot read the admin's; the privileged side can read both.
 GUEST_ENV_REL = ".config/devbox/env"
 _ENV_SOURCE_LINE = '[ -f "$HOME/.config/devbox/env" ] && . "$HOME/.config/devbox/env"'
 
 
 def run_envvars(alias: str, env: dict, agent_user: str) -> None:
-    """Write the box's devbox-managed [env] file (0600, agent-owned) from `env`
-    and ensure the agent's ~/.zshenv sources it (~/.bash_env is wired by the
-    provisioning driver). Full rewrite each run - a key dropped from config is
-    dropped from the box. Content is piped over stdin (never echoed to a log,
-    never in argv).
+    """Write the box's devbox-managed [env] files (0600) - the agent's and the
+    privileged user's, each from its owner's slice of `env` - and ensure each
+    ~/.zshenv sources its own (~/.bash_env is wired by the provisioning driver).
+    Both are rewritten in full every run, so a key dropped from config, or moved
+    to the other owner, is dropped from the account that had it. Content is piped
+    over stdin (never echoed to a log, never in argv).
 
-    `alias` is the PRIVILEGED user's alias: this writes into another user's home,
-    so it needs sudo. The agent's home must already exist - `devbox create` and
-    `devbox sync` run the driver's `--ensure-users` preamble first."""
-    content = render_env_file(env)
+    `alias` is the PRIVILEGED user's alias: it owns one of the files, and reaches
+    the other's home with sudo. The agent's home must already exist - `devbox
+    create` and `devbox sync` run the driver's `--ensure-users` preamble first."""
     user = shlex.quote(agent_user)
     home = shlex.quote(f"/home/{agent_user}")
     line = shlex.quote(_ENV_SOURCE_LINE)
-    remote = (
-        'set -e; '
+    _write_env_file(alias, env_for_owner(env, "agent"), agent_user, (
         f'sudo install -d -o {user} -g {user} -m 0700 {home}/.config/devbox; '
         # /dev/stdin is the piped content: the creds never touch a command line.
         f'sudo install -o {user} -g {user} -m 0600 /dev/stdin {home}/.config/devbox/env; '
         f'sudo touch {home}/.zshenv; sudo chown {user}:{user} {home}/.zshenv; '
         f'sudo grep -qxF {line} {home}/.zshenv || '
         f'printf "%s\\n" {line} | sudo tee -a {home}/.zshenv >/dev/null'
-    )
+    ))
+    # The privileged user is the SSH user here, writing its own home: no sudo.
+    _write_env_file(alias, env_for_owner(env, "admin"), "the privileged user", (
+        'install -d -m 0700 "$HOME/.config/devbox"; '
+        'install -m 0600 /dev/stdin "$HOME/.config/devbox/env"; '
+        'touch "$HOME/.zshenv"; '
+        f'grep -qxF {line} "$HOME/.zshenv" || '
+        f'printf "%s\\n" {line} >> "$HOME/.zshenv"'
+    ))
+
+
+def _write_env_file(alias: str, env: dict, owner: str, remote: str) -> None:
+    """Render one account's slice and pipe it to `remote` - a bash snippet that
+    reads the file from /dev/stdin - over SSH."""
     result = subprocess.run(
-        ["ssh", alias, "bash", "-c", shlex.quote(remote)], input=content.encode())
+        ["ssh", alias, "bash", "-c", shlex.quote(f"set -e; {remote}")],
+        input=render_env_file(env).encode())
     if result.returncode != 0:
-        die(f"writing the box's [env] file failed (exit {result.returncode})")
+        die(f"writing the [env] file of {owner} failed (exit {result.returncode})")
 
 
 @dataclasses.dataclass

@@ -120,7 +120,7 @@ Lightsail) — see [Per-project setup](#per-project-setup) for the `[ec2]` /
 | `devbox ip` | Print the domain's IPv4. |
 | `devbox ssh [-- args...]` | `ssh` into the domain as the **unprivileged agent user** — where the repo checkout and tooling live. `devbox ssh --admin` logs in as the privileged user instead; that's the box's only sudo shell, for debugging the machine itself. |
 | `devbox status` | SSH in (as the privileged user, whose home holds the log) and show `cloud-init status --long` plus the tail of `~/provision.log`. |
-| `devbox sync --envvars` | (Re-)write the box's devbox-managed 0600 `[env]` file — scoped creds/vars (`GITHUB_TOKEN`, API keys) into its shell env. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
+| `devbox sync --envvars` | (Re-)write the box's devbox-managed 0600 `[env]` files — scoped creds/vars (`GITHUB_TOKEN`, API keys) into the shell env of the account each one's `owner` names. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
 | `devbox sync --mods[=a,b,c]` | (Re-)run the provisioning **mods** over SSH against a running box — reconverge (bump jj, add a plugin, re-apply a project's rust mod) without destroy+create. Covers base **and** project mods. Idempotent; tees to `~/provision.log` (per-mod logs in `~/provision/`). No list runs the whole playbook; a comma-separated list runs just those (fast iteration). |
 | `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync — agent skills, git-excluded project files. Re-runnable + incremental. See "Host→box file sync" below. |
 | `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or EC2), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
@@ -274,7 +274,7 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    `jj config set --user user.name/user.email` in the sandbox, using
    whichever source resolved.
 
-   `[env]` is a flat map of environment variables — scoped credentials, API
+   `[env]` is a map of environment variables — scoped credentials, API
    keys — injected into every box (see [Credentials](#credentials-env) below).
    A project's `[env]` overrides it per-key. **`GITHUB_TOKEN` is the way to give
    the sandbox GitHub auth**: `gh`/`git`/`jj git` pick it up so private clones
@@ -479,10 +479,12 @@ mods/*.sh                     # built-in, at the repo root
 diffable, and directly runnable — the metadata below is comment headers, so the
 shebang stays on line 1) and receive context via the **environment**
 (`DEVBOX_AGENT_USER`, `DEVBOX_ADMIN_USER`, `DEVBOX_JJ_NAME`, `DEVBOX_REPO_URL`,
-…), not `%TOKEN%` substitution. Each mod also sources its own target user's
-`[env]` creds file (see [Credentials](#credentials-env)), so a mod that needs a
-secret — e.g. `repo-bootstrap` cloning a private repo with `GITHUB_TOKEN` — has
-it, and it never lands in a script on disk, in a command line, or in a log.
+…), not `%TOKEN%` substitution. Each mod also sources the `[env]` creds file of
+the account that owns them (see [Credentials](#credentials-env)) — its target
+user's, or the privileged user's for a `# runas: root` mod — so a mod that needs
+a secret (`repo-bootstrap` cloning a private repo with `GITHUB_TOKEN`,
+`cloudflared` registering a tunnel) has it, and it never lands in a script on
+disk, in a command line, or in a log.
 
 **A mod body runs without sudo.** The driver runs as the privileged user and
 drops to the agent for each mod, because configuring a user's home directory is
@@ -622,7 +624,7 @@ which has the advantage of reconverging on a live box.
 
 ## Credentials (`[env]`)
 
-`[env]` is a flat map of environment variables — scoped credentials, API keys —
+`[env]` is a map of environment variables — scoped credentials, API keys —
 hardcoded in `config.toml` and injected into a box. Global `[env]`
 (`~/.config/devbox`) applies to every box; project `[env]` (`.devbox`, which is
 git-excluded) adds project-specific keys and **overrides the global map
@@ -630,21 +632,30 @@ per-key**.
 
 ```toml
 [env]
-GITHUB_TOKEN = "github_pat_..."
+GITHUB_TOKEN = "github_pat_..."                          # the agent's
 SOME_API_KEY = "..."
+CLOUDFLARE_TOKEN = { value = "...", owner = "admin" }    # the privileged user's
 ```
 
-**In the guest**, devbox writes a single managed 0600 file in the **agent's**
-home — `/home/<agent_user>/.config/devbox/env` (`export KEY=val` lines) — and
-sources it from **both** that user's `~/.zshenv` (interactive zsh) **and** its
-`~/.bash_env` (the `BASH_ENV` target). The second one matters: Claude Code's Bash
-tool runs *non-interactive bash*, which doesn't read `.zshenv` — so creds only in
-`.zshenv` would be invisible to the agent and anything it runs.
+**Each entry belongs to exactly one account.** A bare string goes to the agent —
+the account that does the work, and the right place for anything an agent or a
+mod configuring its home needs. The table form with `owner = "admin"` **moves**
+the entry to the privileged user instead: it never enters the agent's
+environment, and a privileged mod (`# runas: admin`, or `# runas: root`, which
+reads the privileged user's file) gets it. That is for creds an agent has no use
+for — `cloudflared`'s tunnel token, say. `owner = "agent"` is the default and
+spells out the common case.
 
-The agent's home is the **only** copy. The privileged user can still read it via
-sudo — it's the trusted side of the box — but nothing writes a second copy, and a
-mod running as `admin` or `root` therefore sees no credentials at all. A mod that
-needs one should be an agent mod (as `repo-bootstrap` and `github-auth` are).
+**In the guest**, devbox writes one managed 0600 file per account, in that
+account's home — `~/.config/devbox/env` (`export KEY=val` lines) — and sources it
+from **both** that user's `~/.zshenv` (interactive zsh) **and** its `~/.bash_env`
+(the `BASH_ENV` target). The second one matters: Claude Code's Bash tool runs
+*non-interactive bash*, which doesn't read `.zshenv` — so creds only in `.zshenv`
+would be invisible to the agent and anything it runs.
+
+Homes are 0750 and both files 0600, so the agent cannot read the privileged
+user's — which is the whole point of `owner`. The privileged side can read both;
+it is the trusted side of the box.
 
 **GitHub auth** is just `GITHUB_TOKEN` in `[env]`: `gh` reads it natively (no
 `gh auth login`, so nothing lands in `~/.config/gh/hosts.yml`), and the
@@ -652,14 +663,16 @@ needs one should be an agent mod (as `repo-bootstrap` and `github-auth` are).
 credential helper — private clones and pushes work.
 
 **Delivery & idempotency:** `devbox sync --envvars` ships the map over SSH (piped,
-never echoed to a log), rewriting the managed file in full each run — so removing
-a key from config removes it from the box. Auto-run first on `devbox create`.
+never echoed to a log), rewriting both managed files in full each run — so
+removing a key from config, or handing it to the other `owner`, removes it from
+the account that had it. Auto-run first on `devbox create`.
 
-**Security:** plaintext in `config.toml` (host) and the 0600 file (guest) — an
+**Security:** plaintext in `config.toml` (host) and the 0600 files (guest) — an
 accepted trade-off for scoped creds on a personal VM. The real change from a
-credential-helper store is that values now live in the **process environment** of
-everything the agent runs (the point), so they're visible via `/proc/<pid>/environ`
-to the dev user. Keep them out of provision logs (devbox delivers them piped, not
+credential-helper store is that an agent-owned value lives in the **process
+environment** of everything the agent runs (the point), so it's visible via
+`/proc/<pid>/environ` to that account; `owner = "admin"` is how a cred stays out
+of that. Keep them out of provision logs (devbox delivers them piped, not
 substituted).
 
 ## Host→box file sync

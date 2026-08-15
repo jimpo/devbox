@@ -92,18 +92,21 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   built-in), the base playbook, mod metadata (`parse_header` and the
   `# requires:`/`# runas:`/`# packages:` wrappers, `ModSpec`, `load_mod_specs`,
   `render_manifest`), `_provision_context` (DEVBOX_* accounts/pubkey/jj/repo
-  context) + `resolve_env` (the effective `[env]` map), and payload assembly
-  (driver + resolved `mods/*.sh` + `context.env` + manifest). Ships
-  `provision-driver.sh` + `mods/*.sh`. Delivered over SSH (tar → extract → run
-  driver) by `create` and `devbox sync --mods`. Creds are NOT in the payload —
-  each mod sources its own target user's `~/.config/devbox/env` (written by
-  `run_envvars`), which is what keeps the payload safe to make agent-readable.
+  context) + `resolve_env`/`env_for_owner` (the effective `[env]` map, and one
+  account's slice of it), and payload assembly (driver + resolved `mods/*.sh` +
+  `context.env` + manifest). Ships `provision-driver.sh` + `mods/*.sh`. Delivered
+  over SSH (tar → extract → run driver) by `create` and `devbox sync --mods`.
+  Creds are NOT in the payload — each mod sources the `~/.config/devbox/env` of
+  the account that owns them (written by `run_envvars`), which is what keeps the
+  payload safe to make agent-readable.
 - `provision-driver.sh` — runs as the privileged user. A preamble creates the
   agent account (idempotent, also reachable as `--ensure-users`, and refusing to
   continue if the agent has acquired sudo), then each mod's `# packages:` are
   apt-installed as the privileged user and its body run via `sudo -u` per
   `# runas:` target (default: the agent). Context and creds are re-sourced inside
-  the target shell, never passed through `sudo`'s argv.
+  the target shell, never passed through `sudo`'s argv — the creds being the
+  target account's `[env]` entries, or the privileged user's for a `root` mod
+  (`env_owner`).
 - `initscript.py` — renders the shipped `init-script.sh` (literal
   `%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%`/`%DEVBOX_HOSTNAME%` substitution) into
   the user-data every provider gets. The script carries just base setup

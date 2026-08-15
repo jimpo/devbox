@@ -53,6 +53,12 @@ RESERVED_USERNAMES = frozenset({
     "ubuntu", "admin", "ec2-user",
 })
 
+# The accounts an `[env]` entry can belong to. There is no "root" owner: a
+# `# runas: root` mod reads the privileged account's file (see
+# provision-driver.sh), so root is covered by "admin".
+ENV_OWNERS = ("agent", "admin")
+DEFAULT_ENV_OWNER = "agent"
+
 GLOBAL_CONFIG_PATH = Path.home() / ".config" / "devbox" / "config.toml"
 SSH_DIR = Path.home() / ".config" / "devbox" / "ssh"
 KNOWN_HOSTS_PATH = SSH_DIR / "known_hosts"
@@ -121,6 +127,18 @@ def _warn_unknown_keys(data: dict, known_top, known_sections: dict, config_path:
 
 
 # ---- global config ----------------------------------------------------------
+@dataclasses.dataclass(frozen=True)
+class EnvVar:
+    """One `[env]` entry: the value, and the account whose shell env it lands in.
+
+    `owner` picks exactly one account - `owner = "admin"` puts a credential in
+    the privileged user's environment and keeps it out of the agent's, which is
+    what makes it usable by a privileged mod (`# runas: root|admin`) without
+    handing it to the agents. The plain `KEY = "value"` form means the agent."""
+    value: str
+    owner: str = DEFAULT_ENV_OWNER
+
+
 @dataclasses.dataclass
 class AwsConfig:
     """Global `[aws]` section - the shared AWS account creds, used by every
@@ -152,8 +170,8 @@ class GlobalConfig:
     ssh_pubkey_path: Path
     jj_name: Optional[str]
     jj_email: Optional[str]
-    # [env]: credentials/vars injected into every box's shell env (see sync.py).
-    # A project's [env] overrides per-key.
+    # [env]: {KEY: EnvVar} credentials/vars injected into the shell env of one of
+    # a box's two accounts (see sync.py). A project's [env] overrides per-key.
     env: dict = dataclasses.field(default_factory=dict)
     aws: Optional[AwsConfig] = None      # shared AWS account creds
     ec2: Optional[Ec2Config] = None      # EC2-specific globals
@@ -215,12 +233,34 @@ class GlobalConfig:
 
 
 def _resolve_env(data: dict, config_path: Path) -> dict:
-    """Parse `[env]` - a flat table of KEY = "value" credentials/vars injected
-    into a box's shell environment (see sync.py). All values must be strings."""
-    env = data.get("env", {})
-    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
-        die(f"{config_path}: [env] must be a table of string values "
+    """Parse `[env]` - credentials/vars injected into a box's shell environment
+    (see sync.py) - into `{KEY: EnvVar}`. An entry is either a bare string (the
+    agent's environment) or a table `{ value = "...", owner = "admin" }`. A
+    project's `[env]` overrides the global one per key, entry for whole entry:
+    re-declaring a key replaces its owner along with its value."""
+    raw = data.get("env", {})
+    if not isinstance(raw, dict):
+        die(f"{config_path}: [env] must be a table "
             f"(e.g. GITHUB_TOKEN = \"github_pat_...\")")
+    env = {}
+    for key, spec in raw.items():
+        if isinstance(spec, str):
+            env[key] = EnvVar(spec)
+            continue
+        if not isinstance(spec, dict) or not isinstance(spec.get("value"), str):
+            die(f"{config_path}: [env] '{key}' must be a string, or a table with a "
+                f"string `value` (e.g. {key} = {{ value = \"...\", owner = \"admin\" }})")
+        unknown = sorted(set(spec) - {"value", "owner"})
+        if unknown:
+            die(f"{config_path}: [env] '{key}' has unknown key(s) {', '.join(unknown)} - "
+                f"an entry takes `value` and `owner` "
+                f"(one of: {', '.join(ENV_OWNERS)})")
+        owner = spec.get("owner", DEFAULT_ENV_OWNER)
+        if owner not in ENV_OWNERS:
+            die(f"{config_path}: [env] '{key}' has an unknown owner '{owner}' "
+                f"(one of: {', '.join(ENV_OWNERS)}). A `# runas: root` mod reads "
+                f"the admin's environment.")
+        env[key] = EnvVar(spec["value"], owner)
     return env
 
 
@@ -316,9 +356,9 @@ class ProjectConfig:
     mods: list = dataclasses.field(default_factory=list)
     # Host->box file-sync rules from [[sync]] / [[repo.sync]] (see sync.py).
     sync: list = dataclasses.field(default_factory=list)
-    # Project-level [env]: shell-env creds/vars injected into the box, overriding
-    # the global [env] per-key (see sync.py). .devbox/config.toml is git-excluded,
-    # so hardcoding scoped creds here is acceptable.
+    # Project-level [env]: {KEY: EnvVar} shell-env creds/vars injected into the
+    # box, overriding the global [env] per-key (see sync.py). .devbox/config.toml
+    # is git-excluded, so hardcoding scoped creds here is acceptable.
     env: dict = dataclasses.field(default_factory=dict)
     ec2: Optional[Ec2ProjectConfig] = None
     lightsail: Optional[LightsailProjectConfig] = None

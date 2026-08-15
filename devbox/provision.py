@@ -25,9 +25,10 @@ system packages are declared with `# packages:` and installed by the driver, and
 the rare mod that genuinely needs privilege says `# runas: root`.
 
 This buys containment of *system integrity*, not of *credential exfiltration*:
-the agent still has network egress and still holds the `[env]` creds. What it
-cannot do is tamper with the provisioner, the system, or the privileged user's
-home.
+the agent still has network egress and still holds every `[env]` cred it owns.
+What it cannot do is tamper with the provisioner, the system, or the privileged
+user's home - nor read a cred an `[env]` entry gives to the admin instead
+(`owner = "admin"`, for the creds a privileged mod needs and agents do not).
 
 One driver (`provision-driver.sh`) runs the resolved set in order. Provisioning
 is delivered entirely over SSH (single path): devbox tars the payload
@@ -109,12 +110,19 @@ def resolve_jj_identity(gc: GlobalConfig) -> tuple:
 
 
 def resolve_env(project: ProjectConfig, gc: GlobalConfig) -> dict:
-    """The effective `[env]` map for a box: the global creds/vars, with the
-    project's `[env]` overriding per-key. Written into the AGENT user's shell env
-    (see sync.run_envvars), which is also what an agent-targeted mod sources at
-    provision time - so a mod that needs a cred then (e.g. repo-bootstrap's
-    private `jj git clone`) sees it."""
+    """The effective `{KEY: EnvVar}` map for a box: the global creds/vars, with
+    the project's `[env]` overriding per-key (whole entry, owner included). Split
+    by owner into one shell-env file per account (see sync.run_envvars), which is
+    also what a mod sources at provision time - so a mod that needs a cred then
+    (e.g. repo-bootstrap's private `jj git clone`) sees the ones its own account
+    owns."""
     return {**gc.env, **project.env}
+
+
+def env_for_owner(env: dict, owner: str) -> dict:
+    """The `{KEY: value}` slice of an effective `[env]` map belonging to one
+    account - what actually goes into that account's env file."""
+    return {key: var.value for key, var in env.items() if var.owner == owner}
 
 
 # ---- mod resolution ---------------------------------------------------------

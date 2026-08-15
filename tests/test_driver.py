@@ -271,6 +271,24 @@ def test_the_mod_body_runs_with_the_target_users_home(box):
     assert f"home={b.homes / AGENT}" in b.log("homes")
 
 
+def test_each_mod_reads_the_creds_of_the_account_that_owns_them(box):
+    # The two accounts hold different [env] entries (`owner`, host-side), so a
+    # mod must read its own account's file and nothing else. A root mod reads
+    # the privileged user's: root has no file, and that is where a cred a
+    # privileged mod needs lives.
+    echo = 'echo "{name}:agent=${{AGENT_CRED:-}}:admin=${{ADMIN_CRED:-}}" >> "$FAKE_LOG/creds.log"'
+    b = box([_spec("claude-code", extra=echo.format(name="claude-code")),
+             _spec("cloudflared", runas=["root"], extra=echo.format(name="cloudflared"))])
+    b.run("--ensure-users")           # creates the agent home the file goes in
+    for user, var, value in ((AGENT, "AGENT_CRED", "a_tok"), (ADMIN, "ADMIN_CRED", "x_tok")):
+        env_dir = b.homes / user / ".config" / "devbox"
+        env_dir.mkdir(parents=True, exist_ok=True)
+        (env_dir / "env").write_text(f"export {var}={value}\n")
+    assert b.run().returncode == 0
+    assert "claude-code:agent=a_tok:admin=" in b.log("creds")
+    assert "cloudflared:agent=:admin=x_tok" in b.log("creds")
+
+
 def test_context_env_reaches_the_mod_across_the_privilege_drop(box):
     # sudo resets the environment, so the context is re-sourced inside the target
     # shell. If that broke, every mod would see an empty DEVBOX_*.
