@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .config import GlobalConfig, ProjectConfig
+from .config import BoxSpec, GlobalConfig
 from .util import die
 
 INIT_SCRIPT_PATH = Path(__file__).parent / "init-script.sh"
@@ -32,22 +32,23 @@ def substitute_tokens(text: str, tokens: dict) -> str:
     return text
 
 
-def render_init_script(project: ProjectConfig, gc: GlobalConfig,
-                       instance_name: str = None) -> str:
-    """The rendered first-boot user-data script for `project`. `instance_name`
-    is the instance's canonical name (= its hostname); defaults to the project
-    name (the libvirt default instance)."""
+def render_init_script(box: BoxSpec, gc: GlobalConfig) -> str:
+    """The rendered first-boot user-data script for a box. Takes the box, not a
+    project: first boot sets up the machine and its privileged account, and knows
+    nothing about which projects will later attach to it."""
     pubkey = gc.read_ssh_pubkey()
     if not INIT_SCRIPT_PATH.is_file():
         die(f"devbox internal error: init script not found at {INIT_SCRIPT_PATH} "
             f"(broken install?)")
 
     tokens = {
-        # The PRIVILEGED user only - the unprivileged agent account is created by
-        # the provisioning driver, not at first boot (see init-script.sh).
-        "DEVBOX_USER": project.user,
+        # The PRIVILEGED user only - a project's unprivileged agent account is
+        # created by the provisioning driver at attach, not at first boot (see
+        # init-script.sh), so that attaching a project reconverges an existing
+        # box instead of needing a new one.
+        "DEVBOX_USER": box.admin_user,
         "DEVBOX_SSH_PUBKEY": pubkey,
-        "DEVBOX_HOSTNAME": instance_name or project.project,
+        "DEVBOX_HOSTNAME": box.name,
     }
     # The tokens land inside single-quoted shell assignments, so a value
     # carrying a quote or a newline would break out of (or corrupt) the script.

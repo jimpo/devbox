@@ -1,3 +1,6 @@
+import os
+import dataclasses
+import argparse
 import subprocess
 
 import pytest
@@ -120,11 +123,45 @@ def test_resolve_project_basic(tmp_path, global_config):
     _write_marker(tmp_path, 'project = "myproj"\n')
     project = devbox.resolve_project(tmp_path, global_config)
     assert project.project == "myproj"
-    assert project.provider == "libvirt"
-    assert project.vcpus == global_config.vcpus
-    assert project.memory_mib == global_config.memory_mib
-    assert project.disk_gb == global_config.disk_gb
     assert project.repo.mode == "none"
+
+
+def test_resolve_project_box_defaults_to_the_project_name(tmp_path, global_config):
+    # A project that never mentions a box gets one of its own, named after it -
+    # which is what keeps the single-box case working with no configuration.
+    _write_marker(tmp_path, 'project = "myproj"\n')
+    assert devbox.resolve_project(tmp_path, global_config).box == "myproj"
+
+
+def test_resolve_project_box_explicit_wins(tmp_path, global_config):
+    _write_marker(tmp_path, 'project = "myproj"\nbox = "ec2-shared"\n')
+    assert devbox.resolve_project(tmp_path, global_config).box == "ec2-shared"
+
+
+@pytest.mark.parametrize("key,value", [
+    ("provider", '"ec2"'),
+    ("user", '"alice"'),
+    ("vcpus", "4"),
+    ("memory_mib", "2048"),
+    ("disk_gb", "40"),
+])
+def test_resolve_project_rejects_box_level_scalars(tmp_path, global_config, key, value):
+    # Hardware describes a box, which is now created independently and may host
+    # several projects. Silently ignoring `vcpus = 16` would boot the wrong-sized
+    # machine, so it is a hard error that names the flag to use instead.
+    _write_marker(tmp_path, f'project = "p"\n{key} = {value}\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
+
+
+@pytest.mark.parametrize("section", [
+    '[ec2]\ninstance_type = "t3.micro"\n',
+    '[lightsail]\nbundle = "small_3_0"\n',
+])
+def test_resolve_project_rejects_box_level_sections(tmp_path, global_config, section):
+    _write_marker(tmp_path, f'project = "p"\n{section}')
+    with pytest.raises(SystemExit):
+        devbox.resolve_project(tmp_path, global_config)
 
 
 def test_resolve_project_defaults_project_to_dirname(tmp_path, global_config):
@@ -134,28 +171,14 @@ def test_resolve_project_defaults_project_to_dirname(tmp_path, global_config):
     assert project.project == tmp_path.resolve().name
 
 
-def test_resolve_project_overrides_defaults(tmp_path, global_config):
-    _write_marker(
-        tmp_path,
-        'project = "myproj"\nvcpus = 2\nmemory_mib = 2048\ndisk_gb = 10\nuser = "alice"\n',
-    )
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.vcpus == 2
-    assert project.memory_mib == 2048
-    assert project.disk_gb == 10
-    assert project.user == "alice"
-
-
 # ---- agent_user (the unprivileged account) ----------------------------------
 def test_resolve_project_agent_user_defaults_to_the_project_name(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "myproj"\nuser = "alice"\n')
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.user == "alice"          # the privileged account
-    assert project.agent_user == "myproj"   # the unprivileged one
+    _write_marker(tmp_path, 'project = "myproj"\n')
+    assert devbox.resolve_project(tmp_path, global_config).agent_user == "myproj"
 
 
 def test_resolve_project_agent_user_explicit_wins(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "myproj"\nuser = "alice"\nagent_user = "botty"\n')
+    _write_marker(tmp_path, 'project = "myproj"\nagent_user = "botty"\n')
     assert devbox.resolve_project(tmp_path, global_config).agent_user == "botty"
 
 
@@ -171,35 +194,37 @@ def test_resolve_project_agent_user_invalid_username_dies(tmp_path, global_confi
     # Project names are directory basenames, so plenty of legal project names are
     # illegal usernames. Catching it here costs a second; catching it at useradd
     # time costs a boot.
-    _write_marker(tmp_path, f'project = "p"\nuser = "alice"\nagent_user = "{name}"\n')
+    _write_marker(tmp_path, f'project = "p"\nagent_user = "{name}"\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
 
 def test_resolve_project_agent_user_from_an_invalid_project_name_dies(tmp_path, global_config):
     # Same check, reached via the default rather than an explicit key.
-    _write_marker(tmp_path, 'project = "My.Project"\nuser = "alice"\n')
+    _write_marker(tmp_path, 'project = "My.Project"\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
 
-def test_resolve_project_agent_user_equal_to_user_dies(tmp_path, global_config):
-    # One account for both roles is exactly the arrangement this replaces.
-    _write_marker(tmp_path, 'project = "p"\nuser = "alice"\nagent_user = "alice"\n')
-    with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+def test_resolve_project_cannot_check_agent_user_against_the_box_here(
+        tmp_path, global_config):
+    # "agent_user must differ from the box's privileged account" is a real rule,
+    # but the box's account is a property of the machine, not of this file - so
+    # it is enforced at attach time (cmd_create), and resolving must not guess.
+    _write_marker(tmp_path, 'project = "p"\nagent_user = "alice"\n')
+    assert devbox.resolve_project(tmp_path, global_config).agent_user == "alice"
 
 
 @pytest.mark.parametrize("name", ["root", "ubuntu", "ec2-user", "nobody"])
 def test_resolve_project_agent_user_reserved_dies(tmp_path, global_config, name):
     # `ubuntu` is the cloud images' own sudo-capable default user.
-    _write_marker(tmp_path, f'project = "p"\nuser = "alice"\nagent_user = "{name}"\n')
+    _write_marker(tmp_path, f'project = "p"\nagent_user = "{name}"\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
 
 
 def test_resolve_project_agent_user_known_key_no_warning(tmp_path, global_config, capsys):
-    _write_marker(tmp_path, 'project = "p"\nuser = "alice"\nagent_user = "botty"\n')
+    _write_marker(tmp_path, 'project = "p"\nagent_user = "botty"\n')
     devbox.resolve_project(tmp_path, global_config)
     assert capsys.readouterr().err == ""
 
@@ -270,14 +295,15 @@ def test_resolve_project_unknown_top_level_key_warns(tmp_path, global_config, ca
 
 
 def test_resolve_project_unknown_section_key_warns(tmp_path, global_config, capsys):
-    _write_marker(tmp_path, '[ec2]\ninstance_type = "t3.micro"\nname = "x"\n')
+    _write_marker(tmp_path, '[repo]\nmode = "none"\nbranch = "main"\n')
     devbox.resolve_project(tmp_path, global_config)
     err = capsys.readouterr().err
-    assert "unknown key 'ec2.name'" in err
+    assert "unknown key 'repo.branch'" in err
 
 
 def test_resolve_project_known_config_no_warning(tmp_path, global_config, capsys):
-    _write_marker(tmp_path, 'project = "myproj"\nvcpus = 2\n[ec2]\ninstance_type = "t3.micro"\n')
+    _write_marker(tmp_path, 'project = "myproj"\nbox = "dev"\nagent_user = "botty"\n'
+                            'mods = ["rust"]\n[repo]\nmode = "none"\n')
     devbox.resolve_project(tmp_path, global_config)
     assert capsys.readouterr().err == ""
 
@@ -397,17 +423,36 @@ def pubkey(tmp_path):
 
 
 def _project(mode="none", dir="", url=None, env=None,
-             marker_dir=None, mods=None, sync=None, agent_user="agentbot"):
+             marker_dir=None, mods=None, sync=None, agent_user="agentbot",
+             project="test-project", box=None):
     return devbox.ProjectConfig(
-        project="test-project", provider="libvirt", user="alice",
+        project=project,
+        # A project with no `box` of its own attaches to one named after it -
+        # the zero-config case, and what most tests want.
+        box=box if box is not None else project,
         agent_user=agent_user,
-        vcpus=6, memory_mib=1024, disk_gb=10,
         repo=devbox.RepoConfig(mode=mode, dir=dir, url=url),
         marker_dir=marker_dir or devbox.Path("/proj"),
         mods=mods if mods is not None else [],
         sync=sync if sync is not None else [],
         env=env if env is not None else {},
     )
+
+
+def _box(name="test-box", provider="libvirt", admin_user="alice", vcpus=6,
+         memory_mib=1024, disk_gb=10, ec2=None, lightsail=None):
+    return devbox.BoxSpec(
+        name=name, provider=provider, admin_user=admin_user, vcpus=vcpus,
+        memory_mib=memory_mib, disk_gb=disk_gb, ec2=ec2, lightsail=lightsail)
+
+
+def _box_args(name="dev", **kw):
+    """A `devbox box create` argv namespace, with every flag defaulted off."""
+    fields = dict(provider=None, user=None, vcpus=None, memory=None, disk=None,
+                  instance_type=None, arch=None, ami=None, bundle=None,
+                  blueprint=None, zone=None, spot=False, on_demand=False)
+    fields.update(kw)
+    return argparse.Namespace(name=name, **fields)
 
 
 def _global_config(pubkey_path, jj_name="Alice Example", jj_email="alice@example.com",
@@ -429,7 +474,7 @@ def test_render_init_script_is_a_bash_script(pubkey):
     # The user-data every provider gets is a shell script (Lightsail runs
     # user-data natively; cloud-init runs a `#!` script on libvirt/ec2), so the
     # shebang and the abort-on-failure flags are load-bearing.
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     assert rendered.startswith("#!/bin/bash\n")
     assert "set -euo pipefail" in rendered
     assert not rendered.startswith("#cloud-config")
@@ -437,8 +482,7 @@ def test_render_init_script_is_a_bash_script(pubkey):
 
 def test_render_init_script_substitutes_user_and_pubkey(pubkey):
     gc = _global_config(pubkey)
-    rendered = devbox.render_init_script(
-        _project(mode="clone", dir="myrepo", url="https://example.com/x"), gc)
+    rendered = devbox.render_init_script(_box(), gc)
     assert "%DEVBOX_" not in rendered  # every token filled
     assert "DEVBOX_USER='alice'" in rendered
     assert "DEVBOX_HOME='/home/alice'" in rendered
@@ -446,7 +490,7 @@ def test_render_init_script_substitutes_user_and_pubkey(pubkey):
 
 
 def test_render_init_script_creates_the_user_with_key_and_sudo(pubkey):
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     assert "useradd" in rendered
     assert '"$DEVBOX_HOME/.ssh/authorized_keys"' in rendered
     assert "NOPASSWD:ALL" in rendered
@@ -457,13 +501,13 @@ def test_render_init_script_creates_the_user_with_key_and_sudo(pubkey):
 def test_render_init_script_creates_the_user_before_installing_packages(pubkey):
     # SSH access must not be gated on the (slow, network-dependent) package
     # step: a failure there still leaves a reachable, debuggable box.
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     assert rendered.index("useradd") < rendered.index("apt-get")
     assert rendered.index("authorized_keys") < rendered.index("apt-get")
 
 
 def test_render_init_script_installs_the_base_packages(pubkey):
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     for pkg in ("zsh", "vim", "python3", "curl", "git", "git-lfs",
                 "ca-certificates", "gh", "rsync", "build-essential", "pkg-config"):
         assert f"\n  {pkg} " in rendered or f"\n  {pkg}\n" in rendered
@@ -474,7 +518,7 @@ def test_render_init_script_installs_the_base_packages(pubkey):
 def test_render_init_script_adds_the_github_cli_repo_before_installing(pubkey):
     # `gh` is not in the 24.04 archive (the Lightsail blueprint) and a missing
     # package would abort first boot under `set -e`.
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     assert "https://cli.github.com/packages" in rendered
     assert rendered.index("cli.github.com") < rendered.index("install -y")
 
@@ -484,7 +528,7 @@ def test_render_init_script_wires_bash_env_through_a_shared_stub(pubkey):
     # it must not name a per-user path there (one user would source the other's
     # file). It points at a stub that resolves $HOME in bash, where expansion
     # actually works - pam_env's /etc/environment parsing is plain KEY=VALUE.
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     assert "BASH_ENV_STUB='/etc/devbox/bash_env'" in rendered
     assert "/home/alice/.bash_env" not in rendered
     assert "/home/agentbot/.bash_env" not in rendered
@@ -493,11 +537,11 @@ def test_render_init_script_wires_bash_env_through_a_shared_stub(pubkey):
 
 
 def test_render_init_script_creates_only_the_privileged_user(pubkey):
-    # The agent account is deliberately NOT a first-boot concern: user-data runs
-    # once, so an account born here could never reach an existing box and
-    # changing agent_user would need a rebuild. The driver creates it instead.
-    rendered = devbox.render_init_script(_project(agent_user="agentbot"),
-                                         _global_config(pubkey))
+    # A project's agent account is deliberately NOT a first-boot concern:
+    # user-data runs once, so an account born here could never reach an existing
+    # box, and attaching a second project would need a rebuild. The driver
+    # creates them instead - which is why first boot takes a box, not a project.
+    rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     assert "agentbot" not in rendered
     assert rendered.count("useradd") == 1
 
@@ -505,18 +549,14 @@ def test_render_init_script_creates_only_the_privileged_user(pubkey):
 def test_render_init_script_locks_down_the_home_directory(pubkey):
     # Ubuntu's default HOME_MODE is 0755, which would let the unprivileged agent
     # read the privileged user's entire home.
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     assert "--key HOME_MODE=0750" in rendered
 
 
-def test_render_init_script_hostname_defaults_from_project_name(pubkey):
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
-    assert "DEVBOX_HOSTNAME='test-project'" in rendered
-
-
-def test_render_init_script_hostname_uses_the_instance_name(pubkey):
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey),
-                                         instance_name="aws-mybox")
+def test_render_init_script_hostname_is_the_box_name(pubkey):
+    # The hostname is the box's, not any project's: several projects share it.
+    rendered = devbox.render_init_script(_box(name="aws-mybox"),
+                                         _global_config(pubkey))
     assert "DEVBOX_HOSTNAME='aws-mybox'" in rendered
 
 
@@ -524,16 +564,15 @@ def test_render_init_script_carries_no_provisioning_payload(pubkey):
     # Provisioning is over SSH: the init script only does base setup - no
     # driver, no mods, no [env] creds.
     gc = _global_config(pubkey, env={"GITHUB_TOKEN": "github_pat_x"})
-    rendered = devbox.render_init_script(_project(mods=["wasm-tools"]), gc)
+    rendered = devbox.render_init_script(_box(), gc)
     assert "provision-driver.sh" not in rendered
     assert "github_pat_x" not in rendered
-    assert "wasm-tools" not in rendered
 
 
 def test_render_init_script_missing_pubkey_dies(tmp_path):
     gc = _global_config(tmp_path / "missing.pub")
     with pytest.raises(SystemExit):
-        devbox.render_init_script(_project(), gc)
+        devbox.render_init_script(_box(), gc)
 
 
 def test_render_init_script_quote_in_a_token_dies(tmp_path):
@@ -542,12 +581,12 @@ def test_render_init_script_quote_in_a_token_dies(tmp_path):
     path = tmp_path / "id_ed25519.pub"
     path.write_text("ssh-ed25519 AAAAtest o'brien@host\n")
     with pytest.raises(SystemExit):
-        devbox.render_init_script(_project(), _global_config(path))
+        devbox.render_init_script(_box(), _global_config(path))
 
 
 def test_render_init_script_parses_as_bash(pubkey, tmp_path):
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey),
-                                         instance_name="aws-mybox")
+    rendered = devbox.render_init_script(_box(name="aws-mybox"),
+                                         _global_config(pubkey))
     script = tmp_path / "init.sh"
     script.write_text(rendered)
     assert devbox.subprocess.run(["bash", "-n", str(script)]).returncode == 0
@@ -561,7 +600,7 @@ def test_render_init_script_re_execs_under_bash_before_any_bashism(pubkey):
     # the script re-execs itself under bash. The guard is only load-bearing if
     # it precedes EVERY bashism - `set -o pipefail` and the packages array both
     # abort dash on the spot ("set: Illegal option -o pipefail").
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     assert GUARD in rendered
     assert 0 < rendered.index(GUARD) < rendered.index("set -euo pipefail")
     assert rendered.index(GUARD) < rendered.index("DEVBOX_PACKAGES=(")
@@ -570,7 +609,7 @@ def test_render_init_script_re_execs_under_bash_before_any_bashism(pubkey):
 def test_render_init_script_prefix_up_to_the_guard_is_posix_sh(pubkey, tmp_path):
     # Everything dash executes before the re-exec must be POSIX sh: slice the
     # script from the top through the guard line and hand it to `sh -n`.
-    rendered = devbox.render_init_script(_project(), _global_config(pubkey))
+    rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     prefix = rendered[:rendered.index(GUARD) + len(GUARD)] + "\n"
     script = tmp_path / "prefix.sh"
     script.write_text(prefix)
@@ -587,8 +626,8 @@ def isolated_mods(monkeypatch):
     monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR", devbox.Path("/nonexistent-global-mods"))
 
 
-def _payload_map(project, gc):
-    return {pf.path: pf for pf in devbox.build_payload(project, gc)}
+def _payload_map(project, gc, admin_user="alice"):
+    return {pf.path: pf for pf in devbox.build_payload(project, gc, admin_user)}
 
 
 def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubkey):
@@ -637,7 +676,7 @@ def test_build_payload_missing_jj_identity_dies(isolated_mods, pubkey, monkeypat
     monkeypatch.setattr(devbox.shutil, "which", lambda name: None)  # no host jj fallback
     gc = _global_config(pubkey, jj_name=None)
     with pytest.raises(SystemExit):
-        devbox.build_payload(_project(), gc)
+        devbox.build_payload(_project(), gc, "alice")
 
 
 def test_build_payload_jj_identity_host_fallback(isolated_mods, pubkey, monkeypatch):
@@ -758,16 +797,16 @@ def test_parse_requires_trailing_comment_caveat():
         ["jj", "#", "needs", "first"]
 
 
-# ---- validate_mods (`# requires:` ordering over the effective playbook) ------
+# ---- validate_playbooks (`# requires:` ordering across both playbooks) ------
 def _write_project_mod(marker_dir, name, text):
     d = marker_dir / ".devbox" / "mods"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{name}.sh").write_text(text)
 
 
-def test_validate_mods_base_playbook_passes(isolated_mods):
-    # The shipped base playbook (with its backfilled `# requires:` headers) is
-    # correctly ordered - no dep is missing or listed after its dependent.
+def test_validate_mods_base_passes(isolated_mods):
+    # The shipped base playbooks (with their backfilled `# requires:` headers)
+    # are correctly ordered - no dep is missing or listed after its dependent.
     devbox.validate_mods(_project())
 
 
@@ -799,10 +838,11 @@ def test_validate_mods_dep_listed_before_passes(isolated_mods, tmp_path):
 
 def test_build_payload_validates_mods(isolated_mods, pubkey, tmp_path):
     # build_payload is the choke point: a bad `# requires:` fails there (so a
-    # selective `devbox sync <subset>` still validates the full playbook).
+    # selective `devbox sync --mods=a` still validates the full playbook).
     _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# requires: nonexistent\nset -e\n")
     with pytest.raises(SystemExit):
-        devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
+        devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]),
+                             _global_config(pubkey), "alice")
 
 
 # ---- `# runas:` / `# packages:` headers -------------------------------------
@@ -841,20 +881,24 @@ def test_build_payload_validates_runas(isolated_mods, pubkey, tmp_path):
     # Same choke point as `# requires:`: a bad target fails before any boot/SSH.
     _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# runas: wheel\n")
     with pytest.raises(SystemExit):
-        devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
+        devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]),
+                             _global_config(pubkey), "alice")
 
 
-def test_render_manifest_is_tab_separated_with_comma_joined_lists():
-    # The driver parses this with plain IFS splitting - it has no YAML/JSON
-    # parser and should not grow one.
-    specs = [
+def _manifest_specs():
+    return [
         devbox.ModSpec(name="jj", path=devbox.Path("/x/jj.sh"), requires=[],
                        runas=["agent"], packages=[]),
         devbox.ModSpec(name="dotfiles", path=devbox.Path("/x/dotfiles.sh"),
                        requires=["dotfiles-packages"], runas=["admin", "agent"],
                        packages=["jq", "unzip"]),
     ]
-    assert devbox.render_manifest(specs) == (
+
+
+def test_render_manifest_is_tab_separated_with_comma_joined_lists():
+    # The driver parses this with plain IFS splitting - it has no YAML/JSON
+    # parser and should not grow one.
+    assert devbox.render_manifest(_manifest_specs()) == (
         "jj\tagent\t\n"
         "dotfiles\tadmin,agent\tjq,unzip\n"
     )
@@ -883,8 +927,8 @@ def test_shipped_mods_never_call_sudo(isolated_mods):
 
 
 def test_dotfiles_runs_for_both_accounts_after_its_root_half(isolated_mods):
-    # The privileged user gets the dotfiles too, so `devbox ssh --admin` - the
-    # debugging shell - is usable. The apt half is a separate, root-only mod.
+    # The privileged user gets the dotfiles too, so the debugging shell is
+    # usable. The apt half is a separate, root-only mod.
     specs = {s.name: s for s in devbox.load_mod_specs(_project())}
     assert specs["dotfiles"].runas == ["admin", "agent"]
     assert specs["dotfiles-packages"].runas == ["root"]
@@ -939,16 +983,20 @@ def test_build_tarball_is_deterministic():
 
 
 # ---- instance identity / resolution ----------------------------------------
-def test_resolve_instance_defaults_to_project():
-    import argparse
-    args = argparse.Namespace(name=None)
+def test_resolve_instance_defaults_to_the_project_name():
+    # A project that never mentioned a box owns one named after itself.
+    args = argparse.Namespace(box=None)
     assert devbox.resolve_instance(args, _project()) == "test-project"
 
 
-def test_resolve_instance_name_overrides():
-    import argparse
-    args = argparse.Namespace(name="ec2-foo-gpu")
-    assert devbox.resolve_instance(args, _project()) == "ec2-foo-gpu"
+def test_resolve_instance_uses_the_projects_box_key():
+    args = argparse.Namespace(box=None)
+    assert devbox.resolve_instance(args, _project(box="ec2-shared")) == "ec2-shared"
+
+
+def test_resolve_instance_flag_overrides_the_box_key():
+    args = argparse.Namespace(box="ec2-foo-gpu")
+    assert devbox.resolve_instance(args, _project(box="ec2-shared")) == "ec2-foo-gpu"
 
 
 def test_parse_instance_name_bare_is_libvirt():
@@ -990,93 +1038,124 @@ def test_compose_parse_round_trip():
         assert devbox.parse_instance_name(canonical) == (provider, "my-inst")
 
 
-def test_resolve_target_routes_by_instance_name(monkeypatch):
-    # The heart of JIM-71: a canonical ec2-* name routes to the EC2 provider even
-    # when the project's default provider is libvirt, from the name alone.
-    import argparse
+def test_resolve_target_routes_by_box_name(monkeypatch):
+    # A canonical ec2-* name routes to the EC2 provider from the name alone - no
+    # config lookup and no API call to find the owner.
     monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: f"prov:{name}")
     gc = _global_config(devbox.Path("/nonexistent"))
-    args = argparse.Namespace(name="ec2-binius-arm")
+    args = argparse.Namespace(box="ec2-binius-arm")
     assert devbox.cli._resolve_target(args, _project(), gc) == (
         "ec2-binius-arm", "ec2", "prov:ec2")
-    args = argparse.Namespace(name=None)  # bare default -> libvirt
+    args = argparse.Namespace(box=None)  # bare default -> libvirt
     assert devbox.cli._resolve_target(args, _project(), gc) == (
         "test-project", "libvirt", "prov:libvirt")
 
 
-def _create_args(provider=None, name=None):
-    import argparse
-    return argparse.Namespace(provider=provider, name=name, spot=False,
-                              on_demand=False, project_dir=None)
+def _create_args(box=None, adopt=False, **kw):
+    """A `devbox create` argv namespace: the box-create flags plus its own."""
+    args = _box_args(name=None, **kw)
+    args.box = box
+    args.project_dir = None
+    args.adopt = adopt
+    return args
 
 
-def test_cmd_create_rejects_provider_prefixed_project_name():
-    # A project literally named 'ec2-foo' would make its bare libvirt name
-    # misparse as the ec2 provider -> rejected at create.
-    import dataclasses
-    gc = _global_config(devbox.Path("/nonexistent"))
-    project = dataclasses.replace(_project(), project="ec2-foo")
-    with pytest.raises(SystemExit):
-        devbox.cli.cmd_create(_create_args(), gc, project)
+class _CreateStop(Exception):
+    """Ends a create at provider.create(); the rest is SSH/provisioning."""
 
 
-def test_cmd_create_rejects_name_with_provider_prefix():
-    # --name for a cloud create is the bare segment; the prefix is composed in.
-    # Passing an already-prefixed name would double it -> rejected.
-    import dataclasses
-    gc = dataclasses.replace(_global_config(devbox.Path("/nonexistent")),
-                             aws=devbox.AwsConfig(region="us-east-1"))
-    with pytest.raises(SystemExit):
-        devbox.cli.cmd_create(_create_args(provider="ec2", name="ec2-foo"), gc, _project())
+class _FakeCreateProvider:
+    """A provider that records the InstanceSpec and stops there. `state` answers
+    whether the box already exists, which is what decides create-vs-attach."""
+
+    def __init__(self, name="libvirt", state=None):
+        self.name = name
+        self._state = state
+        self.seen = {}
+
+    def state(self, name):
+        return self._state
+
+    def create(self, spec):
+        self.seen["spec"] = spec
+        raise _CreateStop
 
 
-def test_cmd_create_rejects_aws_name_with_provider_prefix():
-    # Same guard for the aws provider: --name aws-foo would compose aws-aws-foo.
-    import dataclasses
-    gc = dataclasses.replace(_global_config(devbox.Path("/nonexistent")),
-                             aws=devbox.AwsConfig(region="us-east-1"))
-    with pytest.raises(SystemExit):
-        devbox.cli.cmd_create(_create_args(provider="aws", name="aws-foo"), gc, _project())
-
-
-def test_cmd_create_passes_lightsail_config_into_spec(monkeypatch, tmp_path, pubkey):
-    # The [lightsail] section has to reach the provider: without this, dropping
-    # `lightsail=project.lightsail` from the InstanceSpec would stay green,
-    # because every Lightsail field has a default.
-    import dataclasses
-
-    class _Stop(Exception):
-        """Ends cmd_create at create(); everything after it is SSH/provisioning."""
-
-    seen = {}
-
-    class _FakeProvider:
-        name = "aws"
-
-        def create(self, spec):
-            seen["spec"] = spec
-            raise _Stop
-
-    gc = dataclasses.replace(_global_config(pubkey),
-                             aws=devbox.AwsConfig(region="us-east-1"))
-    project = dataclasses.replace(
-        _project(marker_dir=tmp_path),
-        provider="aws",
-        lightsail=devbox.LightsailBoxConfig(bundle="medium_3_0"),
-    )
-    monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: _FakeProvider())
+def _patch_create(monkeypatch, provider, pubkey):
+    monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: provider)
     monkeypatch.setattr(devbox.cli, "_check_name_unique", lambda gc, name: None)
-    monkeypatch.setattr(devbox.cli, "build_payload", lambda project, gc: [])
+    monkeypatch.setattr(devbox.cli, "build_payload", lambda p, gc, admin: [])
+    return dataclasses.replace(_global_config(pubkey),
+                               aws=devbox.AwsConfig(region="us-east-1"))
 
-    with pytest.raises(_Stop):
-        devbox.cli.cmd_create(_create_args(provider="aws", name="foo-gpu"), gc, project)
-    spec = seen["spec"]
+
+def test_cmd_box_create_passes_lightsail_flags_into_the_spec(monkeypatch, pubkey):
+    # The Lightsail flags have to reach the provider: without this, dropping
+    # `lightsail=box.lightsail` from the InstanceSpec would stay green, because
+    # every Lightsail field has a default.
+    provider = _FakeCreateProvider(name="aws")
+    gc = _patch_create(monkeypatch, provider, pubkey)
+    args = _box_args("foo-gpu", provider="aws", bundle="medium_3_0")
+    with pytest.raises(_CreateStop):
+        devbox.cli.cmd_box_create(args, gc)
+    spec = provider.seen["spec"]
     assert spec.name == "aws-foo-gpu" and spec.provider == "aws"
-    assert spec.lightsail is project.lightsail
+    assert spec.lightsail.bundle == "medium_3_0"
+    assert spec.admin_user == os.environ.get("USER", "")
     # Lightsail runs user-data as a shell script, so create must hand it one
-    # (hostname = the instance's canonical name).
+    # (hostname = the box's canonical name).
     assert spec.user_data.startswith("#!/bin/bash\n")
     assert "DEVBOX_HOSTNAME='aws-foo-gpu'" in spec.user_data
+
+
+def test_cmd_box_create_on_an_existing_box_is_a_no_op(monkeypatch, pubkey, capsys):
+    # `devbox create` is porcelain over this, so it has to be re-runnable.
+    provider = _FakeCreateProvider(state="running")
+    gc = _patch_create(monkeypatch, provider, pubkey)
+    devbox.cli.cmd_box_create(_box_args("dev"), gc)     # no _CreateStop raised
+    assert "already exists" in capsys.readouterr().out
+    assert provider.seen == {}
+
+
+def test_cmd_create_boots_the_projects_own_box_when_it_is_missing(monkeypatch, pubkey):
+    # The zero-config path: a project that never named a box owns one called
+    # after itself, and `devbox create` boots it on the global [defaults].
+    provider = _FakeCreateProvider()
+    gc = _patch_create(monkeypatch, provider, pubkey)
+    with pytest.raises(_CreateStop):
+        devbox.cli.cmd_create(_create_args(), gc, _project(project="myproj"))
+    assert provider.seen["spec"].name == "myproj"
+
+
+def test_cmd_create_refuses_to_invent_a_missing_shared_box(monkeypatch, pubkey):
+    # A project pointing at a box that isn't there is a different matter:
+    # guessing the shape of somebody else's shared machine is worse than saying
+    # so, since hardware can't be changed afterwards.
+    provider = _FakeCreateProvider()
+    gc = _patch_create(monkeypatch, provider, pubkey)
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_create(_create_args(), gc, _project(box="ec2-shared"))
+    assert provider.seen == {}
+
+
+def test_cmd_create_boots_a_named_box_when_given_box_flags(monkeypatch, pubkey):
+    # ...unless this command line said what shape it should be.
+    provider = _FakeCreateProvider()
+    gc = _patch_create(monkeypatch, provider, pubkey)
+    with pytest.raises(_CreateStop):
+        devbox.cli.cmd_create(_create_args(vcpus=8), gc, _project(box="shared"))
+    assert provider.seen["spec"].name == "shared"
+    assert provider.seen["spec"].vcpus == 8
+
+
+def test_cmd_create_refuses_an_agent_user_that_is_the_boxs_admin(monkeypatch, pubkey):
+    # The rule config.py can't check: the box's privileged account is a property
+    # of the machine, so the collision only shows up at attach time.
+    provider = _FakeCreateProvider(state="running")
+    gc = _patch_create(monkeypatch, provider, pubkey)
+    monkeypatch.setattr(devbox.cli, "_admin_user", lambda provider, name: "alice")
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_create(_create_args(), gc, _project(agent_user="alice"))
 
 
 # ---- libvirt <metadata> stamp -----------------------------------------------
@@ -1520,7 +1599,8 @@ def test_run_driver_makes_the_payload_readable_by_the_agent(monkeypatch):
     # has to be readable by it. mktemp -d is always 0700 whatever the umask, and
     # tar applies the umask to what it creates - including the `mods/` directory,
     # which the archive only implies. Both need pinning or every mod EACCESes.
-    c = _captured_driver_run(monkeypatch, "devbox-foo-admin", b"tar", [], log=True)
+    c = _captured_driver_run(monkeypatch, "devbox-foo-admin", b"tar", [],
+                             log=devbox.PROVISION_LOG)
     remote = c["remote"]
     assert "umask 022" in remote
     assert 'chmod 0755 "$d"' in remote
@@ -1529,52 +1609,63 @@ def test_run_driver_makes_the_payload_readable_by_the_agent(monkeypatch):
 
 
 def test_run_driver_tees_only_when_asked(monkeypatch):
-    # The full run's log is what `devbox status` tails; the --ensure-users
+    # The full run's log is what `devbox status` tails; the --ensure-agent
     # preamble must not clobber it with its own two lines of output.
-    with_log = _captured_driver_run(monkeypatch, "a", b"", [], log=True)["remote"]
-    without = _captured_driver_run(monkeypatch, "a", b"", ["--ensure-users"],
-                                   log=False)["remote"]
+    with_log = _captured_driver_run(monkeypatch, "a", b"", [],
+                                    log=devbox.PROVISION_LOG)["remote"]
+    without = _captured_driver_run(monkeypatch, "a", b"", ["--ensure-users"])["remote"]
     assert "provision.log" in with_log
-    assert "provision.log" not in without
+    assert "tee" not in without                # nothing tee'd, so nothing clobbered
     assert "--ensure-users" in without
 
 
 def test_run_driver_quotes_mod_names(monkeypatch):
-    remote = _captured_driver_run(monkeypatch, "a", b"", ["rust", "a b"], log=True)["remote"]
+    remote = _captured_driver_run(monkeypatch, "a", b"", ["rust", "a b"],
+                                  log=devbox.PROVISION_LOG)["remote"]
     assert "rust 'a b'" in remote
 
 
-# ---- dual SSH aliases -------------------------------------------------------
+# ---- SSH aliases -------------------------------------------------------------
 def test_alias_names_agent_keeps_the_bare_name():
-    # `devbox-<name>` must keep pointing at the agent: it is the alias every
+    # `devbox-<box>` must keep pointing at the agent: it is the alias every
     # existing jj remote already names, and the checkout is in the agent's home.
     assert devbox.cli._alias_names("binius") == ("devbox-binius", "devbox-binius-admin")
 
 
-def test_refresh_ssh_aliases_writes_both_stanzas(tmp_path, monkeypatch):
+@pytest.fixture
+def ssh_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(devbox.cli, "SSH_DIR", tmp_path / "ssh")
     monkeypatch.setattr(devbox.cli, "KNOWN_HOSTS_PATH", tmp_path / "ssh" / "known_hosts")
     monkeypatch.setattr(devbox.cli, "SSH_USER_CONFIG", tmp_path / "user_ssh_config")
+    return tmp_path / "ssh"
 
-    aliases = devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", _project())
+
+def test_refresh_ssh_aliases_writes_both_stanzas(ssh_dir):
+    # The privileged user now comes from the box (its instance stamp) and the
+    # agent from the project - the two have different sources.
+    aliases = devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", "alice", _project())
     assert aliases == ("devbox-binius", "devbox-binius-admin")
 
-    conf = (tmp_path / "ssh" / "binius.conf").read_text()
+    conf = (ssh_dir / "binius.conf").read_text()
     assert "Host devbox-binius\n    HostName 10.0.0.5\n    User agentbot\n" in conf
     assert "Host devbox-binius-admin\n    HostName 10.0.0.5\n    User alice\n" in conf
-    # both stanzas share the dedicated known-hosts file
     assert conf.count("UserKnownHostsFile") == 2
 
 
-def test_refresh_ssh_aliases_rewrites_cleanly_on_a_new_address(tmp_path, monkeypatch):
-    # Written whole each time, so a re-created instance can't leave a stale
-    # duplicate stanza behind.
-    monkeypatch.setattr(devbox.cli, "SSH_DIR", tmp_path / "ssh")
-    monkeypatch.setattr(devbox.cli, "KNOWN_HOSTS_PATH", tmp_path / "ssh" / "known_hosts")
-    monkeypatch.setattr(devbox.cli, "SSH_USER_CONFIG", tmp_path / "user_ssh_config")
-    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", _project())
-    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.9", _project())
-    conf = (tmp_path / "ssh" / "binius.conf").read_text()
+def test_refresh_ssh_aliases_without_a_project_is_admin_only(ssh_dir):
+    # A box command has no project to write an agent stanza for.
+    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", "alice")
+    conf = (ssh_dir / "binius.conf").read_text()
+    assert "Host devbox-binius-admin\n" in conf
+    assert conf.count("Host ") == 1
+
+
+def test_refresh_ssh_aliases_rewrites_cleanly_on_a_new_address(ssh_dir):
+    # Written whole each time, so a re-created box can't leave a stale duplicate
+    # stanza behind.
+    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", "alice", _project())
+    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.9", "alice", _project())
+    conf = (ssh_dir / "binius.conf").read_text()
     assert conf.count("Host devbox-binius\n") == 1
     assert "10.0.0.5" not in conf
 
@@ -1662,33 +1753,85 @@ def test_global_config_aws_requires_region(tmp_path):
         devbox.GlobalConfig.load(path)
 
 
-def test_resolve_project_ec2_section(tmp_path, global_config):
-    _write_marker(
-        tmp_path,
-        'provider = "ec2"\n[ec2]\ninstance_type = "g5.xlarge"\narchitecture = "x86_64"\nspot = true\n',
-    )
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.provider == "ec2"
-    assert project.ec2.instance_type == "g5.xlarge"
-    assert project.ec2.architecture == "x86_64"
-    assert project.ec2.spot is True
+# ---- resolve_box_spec (a box's shape, from flags) ----------------------------
+def test_resolve_box_spec_defaults_to_libvirt_and_the_global_defaults(global_config,
+                                                                     monkeypatch):
+    monkeypatch.setenv("USER", "alice")
+    box = devbox.resolve_box_spec(_box_args("dev"), global_config, "dev")
+    assert box.name == "dev"                 # libvirt boxes stay bare-named
+    assert box.provider == "libvirt"
+    assert box.admin_user == "alice"
+    assert (box.vcpus, box.memory_mib, box.disk_gb) == (
+        global_config.vcpus, global_config.memory_mib, global_config.disk_gb)
+    assert box.ec2 is None and box.lightsail is None
 
 
-def test_resolve_project_no_ec2_section_is_none(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "myproj"\n')
-    assert devbox.resolve_project(tmp_path, global_config).ec2 is None
+def test_resolve_box_spec_flags_win_over_the_defaults(global_config, monkeypatch):
+    monkeypatch.setenv("USER", "alice")
+    args = _box_args("dev", vcpus=2, memory=2048, disk=10, user="bob")
+    box = devbox.resolve_box_spec(args, global_config, "dev")
+    assert (box.vcpus, box.memory_mib, box.disk_gb) == (2, 2048, 10)
+    assert box.admin_user == "bob"
 
 
-def test_resolve_project_ec2_requires_instance_type(tmp_path, global_config):
-    _write_marker(tmp_path, '[ec2]\narchitecture = "arm64"\n')
+def test_resolve_box_spec_composes_the_canonical_cloud_name(global_config, monkeypatch):
+    monkeypatch.setenv("USER", "alice")
+    args = _box_args("dev", provider="ec2", instance_type="g5.xlarge", arch="arm64")
+    box = devbox.resolve_box_spec(args, global_config, "dev")
+    assert box.name == "ec2-dev"
+    assert box.ec2.instance_type == "g5.xlarge"
+    assert box.ec2.architecture == "arm64"
+    assert box.ec2.spot is None              # neither --spot nor --on-demand
+
+
+@pytest.mark.parametrize("flags,expected", [
+    ({"spot": True}, True),
+    ({"on_demand": True}, False),
+])
+def test_resolve_box_spec_market_flags(global_config, monkeypatch, flags, expected):
+    # Neither flag leaves it None, which defers to the global [ec2].spot.
+    monkeypatch.setenv("USER", "alice")
+    args = _box_args("dev", provider="ec2", instance_type="t3.micro", **flags)
+    assert devbox.resolve_box_spec(args, global_config, "dev").ec2.spot is expected
+
+
+def test_resolve_box_spec_ec2_requires_an_instance_type(global_config, monkeypatch):
+    monkeypatch.setenv("USER", "alice")
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_box_spec(_box_args("dev", provider="ec2"), global_config, "dev")
 
 
-def test_resolve_project_ec2_invalid_architecture_dies(tmp_path, global_config):
-    _write_marker(tmp_path, '[ec2]\ninstance_type = "c7i.large"\narchitecture = "ppc64"\n')
+def test_resolve_box_spec_lightsail_defaults(global_config, monkeypatch):
+    monkeypatch.setenv("USER", "alice")
+    box = devbox.resolve_box_spec(_box_args("dev", provider="aws"), global_config, "dev")
+    assert box.name == "aws-dev"
+    assert box.lightsail.bundle is None      # the provider substitutes the default
+    assert box.lightsail.blueprint == devbox.DEFAULT_LIGHTSAIL_BLUEPRINT
+
+
+def test_resolve_box_spec_lightsail_flags(global_config, monkeypatch):
+    monkeypatch.setenv("USER", "alice")
+    args = _box_args("dev", provider="aws", bundle="small_3_0",
+                     blueprint="ubuntu_22_04", zone="us-east-1c")
+    box = devbox.resolve_box_spec(args, global_config, "dev")
+    assert box.lightsail.bundle == "small_3_0"
+    assert box.lightsail.blueprint == "ubuntu_22_04"
+    assert box.lightsail.availability_zone == "us-east-1c"
+
+
+def test_resolve_box_spec_rejects_a_name_that_already_has_a_provider_prefix(
+        global_config, monkeypatch):
+    # The prefix is composed in automatically; passing one would double it.
+    monkeypatch.setenv("USER", "alice")
+    args = _box_args("ec2-dev", provider="ec2", instance_type="t3.micro")
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_box_spec(args, global_config, "ec2-dev")
+
+
+def test_resolve_box_spec_rejects_an_invalid_admin_username(global_config, monkeypatch):
+    monkeypatch.setenv("USER", "")
+    with pytest.raises(SystemExit):
+        devbox.resolve_box_spec(_box_args("dev"), global_config, "dev")
 
 
 # ---- EC2 provider -----------------------------------------------------------
@@ -2009,7 +2152,7 @@ _LS_DEFAULT_CFG = object()  # sentinel: "not passed" (None means "no section")
 
 def _ls_spec(name="aws-foo-gpu", lightsail=_LS_DEFAULT_CFG):
     """An InstanceSpec for the aws provider. `lightsail` defaults to a plain
-    LightsailBoxConfig(); pass None for the no-[lightsail]-section case."""
+    LightsailBoxConfig(); pass None for the no-[lightsail]-flags case."""
     cfg = devbox.LightsailBoxConfig() if lightsail is _LS_DEFAULT_CFG else lightsail
     return devbox.InstanceSpec(
         name=name, admin_user="alice", provider="aws", disk_gb=64,
@@ -2174,60 +2317,6 @@ def test_lightsail_start_missing_dies():
         provider.start("aws-gone")
 
 
-# ---- [lightsail] project config ---------------------------------------------
-def test_resolve_project_lightsail_section(tmp_path, global_config):
-    _write_marker(
-        tmp_path,
-        'provider = "aws"\n[lightsail]\nbundle = "medium_3_0"\n'
-        'blueprint = "debian_12"\navailability_zone = "us-east-1b"\n',
-    )
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.provider == "aws"
-    assert project.lightsail.bundle == "medium_3_0"
-    assert project.lightsail.blueprint == "debian_12"
-    assert project.lightsail.availability_zone == "us-east-1b"
-
-
-def test_resolve_project_lightsail_defaults(tmp_path, global_config):
-    # An empty [lightsail] section => default bundle / Ubuntu / region AZ.
-    _write_marker(tmp_path, 'provider = "aws"\n[lightsail]\n')
-    ls = devbox.resolve_project(tmp_path, global_config).lightsail
-    assert ls.bundle is None  # DEFAULT_LIGHTSAIL_BUNDLE is applied at create
-    assert ls.blueprint == devbox.DEFAULT_LIGHTSAIL_BLUEPRINT == "ubuntu_24_04"
-    assert ls.availability_zone is None  # defaulted to <region>a at create
-
-
-def test_resolve_project_no_lightsail_section_is_none(tmp_path, global_config):
-    # provider = "aws" with no section at all is valid; the provider defaults it.
-    _write_marker(tmp_path, 'provider = "aws"\n')
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.provider == "aws" and project.lightsail is None
-
-
-def test_resolve_project_lightsail_known_keys_no_warning(tmp_path, global_config, capsys):
-    _write_marker(
-        tmp_path,
-        '[lightsail]\nbundle = "medium_3_0"\n'
-        'blueprint = "ubuntu_24_04"\navailability_zone = "us-west-2b"\n',
-    )
-    devbox.resolve_project(tmp_path, global_config)
-    assert "unknown key" not in capsys.readouterr().err
-
-
-def test_resolve_project_lightsail_architecture_key_warns(tmp_path, global_config, capsys):
-    # Lightsail's Linux bundles are x86-only, so there is no architecture knob
-    # (unlike [ec2]); the key is unknown rather than silently accepted.
-    _write_marker(tmp_path, '[lightsail]\narchitecture = "arm64"\n')
-    devbox.resolve_project(tmp_path, global_config)
-    assert "unknown key 'lightsail.architecture'" in capsys.readouterr().err
-
-
-def test_resolve_project_unknown_lightsail_key_warns(tmp_path, global_config, capsys):
-    _write_marker(tmp_path, '[lightsail]\ninstance_type = "t3.micro"\n')  # an EC2 knob
-    devbox.resolve_project(tmp_path, global_config)
-    assert "unknown key 'lightsail.instance_type'" in capsys.readouterr().err
-
-
 # ---- destroy confirmation guard (JIM-69) ------------------------------------
 class _FakeStdin:
     """Minimal stdin stand-in: only `isatty()` matters to _confirm_destroy."""
@@ -2269,6 +2358,8 @@ def test_confirm_destroy_tty_anything_but_yes_aborts(monkeypatch, response):
 
 class _RecordingProvider:
     """Provider seam stub recording whether destroy() was invoked."""
+    name = "libvirt"
+
     def __init__(self):
         self.destroyed = []
 
@@ -2277,23 +2368,26 @@ class _RecordingProvider:
 
 
 def _destroy_args(name=None, yes=False):
-    import argparse
-    return argparse.Namespace(name=name, yes=yes)
+    return argparse.Namespace(name=name, box=name, yes=yes)
 
 
-def test_cmd_destroy_yes_flag_destroys(monkeypatch, capsys):
-    provider = _RecordingProvider()
+def _patch_destroy(monkeypatch, provider, ssh_dir):
     monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: provider)
+
+
+def test_cmd_destroy_yes_flag_destroys(monkeypatch, capsys, ssh_dir):
+    provider = _RecordingProvider()
+    _patch_destroy(monkeypatch, provider, ssh_dir)
     gc = _global_config(devbox.Path("/nonexistent"))
     devbox.cli.cmd_destroy(_destroy_args(yes=True), gc, _project())
     assert provider.destroyed == ["test-project"]
     assert "Destroyed 'test-project'" in capsys.readouterr().out
 
 
-def test_cmd_destroy_declined_leaves_untouched(monkeypatch, capsys):
+def test_cmd_destroy_declined_leaves_untouched(monkeypatch, capsys, ssh_dir):
     # A TTY that answers 'no' aborts: provider.destroy is never called.
     provider = _RecordingProvider()
-    monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: provider)
+    _patch_destroy(monkeypatch, provider, ssh_dir)
     monkeypatch.setattr(devbox.cli.sys, "stdin", _FakeStdin(isatty=True))
     monkeypatch.setattr("builtins.input", lambda *a: "no")
     gc = _global_config(devbox.Path("/nonexistent"))

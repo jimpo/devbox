@@ -272,7 +272,7 @@ def validate_mods(project: ProjectConfig) -> None:
 
 
 # ---- environment context (not %TOKEN% substitution) -------------------------
-def _provision_context(project: ProjectConfig, gc: GlobalConfig) -> dict:
+def _provision_context(project: ProjectConfig, gc: GlobalConfig, admin_user: str) -> dict:
     """The DEVBOX_* provisioning context the driver exposes to every mod
     (non-secret, safe to trace). User credentials/vars are delivered separately
     as the box's [env] file (see sync.run_envvars), not in the payload."""
@@ -280,7 +280,7 @@ def _provision_context(project: ProjectConfig, gc: GlobalConfig) -> dict:
     return {
         # Both accounts, named explicitly: a bare DEVBOX_USER would be ambiguous
         # now that a box has a privileged user and an unprivileged agent.
-        "DEVBOX_ADMIN_USER": project.user,
+        "DEVBOX_ADMIN_USER": admin_user,
         "DEVBOX_AGENT_USER": project.agent_user,
         # The host's public key, so the driver can authorize the same key for the
         # agent account it creates. Public by definition - safe in the payload,
@@ -313,7 +313,7 @@ def render_env_file(env: dict) -> str:
 
 
 # ---- payload assembly -------------------------------------------------------
-def build_payload(project: ProjectConfig, gc: GlobalConfig) -> list:
+def build_payload(project: ProjectConfig, gc: GlobalConfig, admin_user: str) -> list:
     """The full provisioning payload (driver + manifest + env + resolved mods),
     as PayloadFiles. Tarred and run over SSH by both `devbox create` and
     `devbox sync --mods` - the identical set either way."""
@@ -330,7 +330,7 @@ def build_payload(project: ProjectConfig, gc: GlobalConfig) -> list:
     specs = load_mod_specs(project)
     _validate_ordering(specs, project)
 
-    context = _provision_context(project, gc)
+    context = _provision_context(project, gc, admin_user)
 
     payload = [
         PayloadFile("provision-driver.sh", DRIVER_PATH.read_text(), 0o755),

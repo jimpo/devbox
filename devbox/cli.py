@@ -2,27 +2,32 @@
 provider-agnostic: commands resolve config + target, then act through the
 Provider seam.
 
-    devbox create              # download image, define + first-boot the VM
-    devbox up / stop           # start / gracefully shut down a defined VM
-    devbox ip                  # print the VM's IPv4
-    devbox ssh [args...]       # ssh into the VM as the unprivileged agent user
-    devbox ssh --admin         # ssh in as the privileged user (the only sudo shell)
-    devbox status              # cloud-init progress + tail provision.log
-    devbox list                # list devbox-managed instances on this host
-    devbox jj fetch            # jj git fetch the instance's work into the host repo
-    devbox sync --envvars      # inject [env] creds into the box's shell env
+**Box commands** act on a machine, and take its name:
+
+    devbox box create NAME     # download image, define + first-boot a box
+    devbox box list            # every devbox-managed box
+    devbox box up / stop       # start / gracefully shut down a box
+    devbox box ssh NAME        # ssh in as the privileged user (the only sudo shell)
+    devbox box status NAME     # cloud-init progress + the box's provision log
+    devbox box destroy NAME    # tear down, removing the disk
+
+**Project commands** act on this project's account on its box, and take none:
+
+    devbox create              # ensure the box exists, then attach this project
+    devbox ssh [args...]       # ssh in as this project's unprivileged agent user
+    devbox sync --envvars      # inject [env] creds into that account's shell env
     devbox sync --mods[=a,b]   # (re)run provisioning mods over SSH (reconverge)
     devbox sync --files        # rsync host-local files ([[sync]]) onto the box
+    devbox jj fetch            # jj git fetch the account's work into the host repo
     devbox host                # refresh the SSH alias used for jj fetch
-    devbox destroy             # tear down, removing the overlay disk
 
-An instance is no longer the same thing as a project: a project is a label,
-and `--name` targets a specific instance (default: the project's libvirt one).
+A box is not a project: several projects can share one machine, each in its own
+unprivileged account. Which box a project lives on comes from `box` in its
+config (default: the project's own name), overridable with `--box`.
 """
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import os
 import shlex
 import subprocess
@@ -33,10 +38,10 @@ from pathlib import Path
 from typing import Optional
 
 from .initscript import render_init_script
-from .config import (DEFAULT_PROVIDER, GlobalConfig, KNOWN_HOSTS_PATH, PROVIDERS,
-                     ProjectConfig, SSH_DIR, SSH_USER_CONFIG, compose_instance_name,
-                     find_project_dir, parse_instance_name, resolve_instance,
-                     resolve_project)
+from .config import (BoxSpec, DEFAULT_PROVIDER, GlobalConfig, PROVIDERS,
+                     ProjectConfig, SSH_DIR, SSH_USER_CONFIG, find_project_dir,
+                     KNOWN_HOSTS_PATH, parse_instance_name, resolve_box_spec,
+                     resolve_instance, resolve_project)
 from .provision import PROVISION_LOG, build_payload, build_tarball, resolve_env
 from .sync import run_envvars, run_sync
 from .providers import (AwsAuthError, InstanceSpec, all_providers,
@@ -72,26 +77,40 @@ def _print_table(rows: list) -> None:
 
 
 def truncate_known_hosts() -> None:
-    """A freshly created instance has a brand-new SSH host key; stale entries
-    from a previous instance of the same name can only cause false mismatches."""
+    """A freshly created box has a brand-new SSH host key; stale entries from a
+    previous box of the same name can only cause false mismatches."""
     SSH_DIR.mkdir(parents=True, exist_ok=True)
     KNOWN_HOSTS_PATH.write_text("")
     KNOWN_HOSTS_PATH.chmod(0o600)
 
 
-def _resolve_target(args: argparse.Namespace, project: ProjectConfig, gc: GlobalConfig):
-    """The (canonical name, provider) a per-instance command acts on. The
-    provider is derived from the name (parse_instance_name), not project.provider
-    (the bare-create default) - so `devbox ip --name ec2-binius-arm` queries EC2
-    even from a libvirt-default project, routed offline from the name alone."""
-    name = resolve_instance(args, project)
+def _resolve_box(name: str, gc: GlobalConfig):
+    """The (canonical name, provider name, provider) a box command acts on. The
+    provider is derived from the name (parse_instance_name) - pure string
+    routing, so `devbox box ip ec2-dev` reaches EC2 with no config lookup and no
+    API call to find the owner."""
     provider_name, _ = parse_instance_name(name)
     return name, provider_name, get_provider(provider_name, gc)
 
 
+def _resolve_target(args: argparse.Namespace, project: ProjectConfig, gc: GlobalConfig):
+    """The box a project command acts on: `--box`, else the project's `box` key,
+    else its own name."""
+    return _resolve_box(resolve_instance(args, project), gc)
+
+
+def _admin_user(provider, name: str) -> str:
+    """The box's privileged account, read back from the instance itself. A box
+    created before devbox stamped it reports nothing, and was created with the
+    host's own $USER - which is the fallback."""
+    inst = provider.get(name)
+    stamped = inst.admin_user if inst is not None else None
+    return stamped or os.environ.get("USER", "")
+
+
 def _check_name_unique(gc: GlobalConfig, name: str) -> None:
-    """Instance names are globally unique across providers - enforced at create
-    by checking the union `list`. A provider that can't be listed (e.g. EC2 creds
+    """Box names are globally unique across providers - enforced at create by
+    checking the union `list`. A provider that can't be listed (e.g. EC2 creds
     missing) is warned about, not fatal, so a local create isn't blocked by it."""
     for provider in all_providers(gc):
         try:
@@ -100,96 +119,114 @@ def _check_name_unique(gc: GlobalConfig, name: str) -> None:
             print(f"warning: could not check {provider.name} for name collisions: {e}")
             continue
         if any(i.name == name for i in existing):
-            die(f"an instance named '{name}' already exists ({provider.name}); "
+            die(f"a box named '{name}' already exists ({provider.name}); "
                 f"pick another name or destroy it first")
 
 
-# ---- subcommands --------------------------------------------------------------
-def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    provider_name = args.provider or project.provider
-    provider = get_provider(provider_name, gc)
-
-    if provider_name == "libvirt":
-        # libvirt's one instance per project is the bare-named default (= project);
-        # arbitrary --name is reserved for cloud instances.
-        if args.name:
-            die("libvirt instances are the project's bare default (name = the project); "
-                "--name is only for cloud instances")
-        bare = project.project
-        # A project literally named e.g. 'ec2-foo' would make the bare libvirt
-        # name misparse as another provider. Reject it so the name stays routable.
-        misparsed = parse_instance_name(bare)[0]
-        if misparsed != "libvirt":
-            die(f"project name '{bare}' collides with the '<provider>-' instance "
-                f"naming scheme (it parses as provider '{misparsed}'); rename the "
-                f"project via 'project = ...' in .devbox/config.toml")
-    else:
-        # Cloud instances always require an explicit --name.
-        if not args.name:
-            die(f"cloud instances always require --name "
-                f"(e.g. `devbox create --provider {provider_name} --name foo-gpu`)")
-        bare = args.name
-        # The provider prefix is composed in automatically; a --name that already
-        # carries one would double it (e.g. ec2-ec2-foo).
-        if parse_instance_name(bare)[0] != "libvirt":
-            die(f"--name '{bare}' must not start with a provider prefix "
-                f"('{provider_name}-' is added automatically); "
-                f"pass --name {parse_instance_name(bare)[1]}")
-
-    # The canonical name (provider-prefixed for cloud, bare for libvirt) is the
-    # instance's identity: stored on the instance and used by every later command.
-    name = compose_instance_name(provider_name, bare)
-    _check_name_unique(gc, name)
-
-    # --spot/--on-demand are EC2-only knobs; Lightsail has no spot market.
-    ec2_cfg = project.ec2
-    if ec2_cfg is not None and (args.spot or args.on_demand):
-        ec2_cfg = dataclasses.replace(ec2_cfg, spot=bool(args.spot))
-
-    # Build the provisioning payload up front so a bad jj identity / missing mod
-    # surfaces before we boot a box (build_payload resolves both).
-    tarball = build_tarball(build_payload(project, gc))
-
-    spec = InstanceSpec(
-        name=name,
-        admin_user=project.user,
-        provider=provider_name,
-        disk_gb=project.disk_gb,
-        user_data=render_init_script(project, gc, instance_name=name),
+# ---- box lifecycle --------------------------------------------------------------
+def _boot_box(box: BoxSpec, gc: GlobalConfig, provider) -> None:
+    """Launch a box: the machine only. Provisioning is a project's business
+    until the playbook grows a box half of its own."""
+    _check_name_unique(gc, box.name)
+    provider.create(InstanceSpec(
+        name=box.name,
+        admin_user=box.admin_user,
+        provider=box.provider,
+        disk_gb=box.disk_gb,
+        user_data=render_init_script(box, gc),
         created_at=datetime.now(timezone.utc).isoformat(),
-        vcpus=project.vcpus,
-        memory_mib=project.memory_mib,
-        ec2=ec2_cfg,
-        lightsail=project.lightsail,
-    )
-    provider.create(spec)
-
+        vcpus=box.vcpus,
+        memory_mib=box.memory_mib,
+        ec2=box.ec2,
+        lightsail=box.lightsail,
+    ))
     truncate_known_hosts()
+    _wait_ready(provider, box.name, box.admin_user)
 
-    d = args.project_dir or "."
-    target = f"devbox -C {d}" + (f" --name {name}" if provider_name != "libvirt" else "")
 
-    # Provisioning is driven over SSH (single path shared with `devbox sync`):
-    # wait for the box's base cloud-init (privileged user + packages) to be
-    # ready, then run the same steps `devbox sync` does, over the PRIVILEGED
-    # alias (mods need sudo; the agent account doesn't exist yet).
-    #
-    # Order: users -> env -> mods -> files. The agent account has to exist before
-    # its [env] file can be written into its home; env precedes the mods because
-    # a mod may need a cred (repo-bootstrap's private clone); files come last
-    # because their destinations need the repo checkout. `create` blocks
-    # through all of it.
-    agent_alias, admin_alias = _wait_ready(provider, name, project)
-    print("==> creating the box's users ...")
+def cmd_box_create(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+    box = resolve_box_spec(args, gc, args.name)
+    _, _, provider = _resolve_box(box.name, gc)
+    if provider.state(box.name) is not None:
+        print(f"box '{box.name}' already exists; leaving it alone.")
+        return
+    _boot_box(box, gc, provider)
+    print(f"\n==> box '{box.name}' is ready.\n\n"
+          f"  Attach a project:  box = \"{box.name}\" in its .devbox/config.toml, "
+          f"then `devbox create`\n"
+          f"  Admin shell:       devbox box ssh {box.name}\n")
+
+
+def _ensure_box(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig):
+    """The box this project attaches to, booting it first if it doesn't exist.
+
+    A project that never named a box owns one called after itself, and `devbox
+    create` boots it on the global `[defaults]` - the zero-config path. A project
+    that points at a *shared* box is a different matter: if that box is missing,
+    guessing its shape would be worse than saying so, unless the user passed
+    box-create flags on this very command line."""
+    name, provider_name, provider = _resolve_target(args, project, gc)
+    state = provider.state(name)
+    if state is not None:
+        return name, provider, state
+
+    owns_box = name == project.project
+    if not owns_box and not _box_flags_given(args):
+        die(f"box '{name}' does not exist. Create it first:\n"
+            f"  devbox box create {parse_instance_name(name)[1]}"
+            f"{'' if provider_name == DEFAULT_PROVIDER else f' --provider {provider_name}'}")
+    box = resolve_box_spec(args, gc, parse_instance_name(name)[1])
+    _boot_box(box, gc, provider)
+    return name, provider, provider.state(name)
+
+
+def _box_flags_given(args: argparse.Namespace) -> bool:
+    """Whether this command line asked for a box of a particular shape - the
+    signal that creating one here is intended rather than a fallback."""
+    return any(getattr(args, f, None) for f in
+               ("provider", "vcpus", "memory", "disk", "instance_type", "arch",
+                "ami", "spot", "bundle", "blueprint", "zone", "user"))
+
+
+def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    """Ensure this project's box exists, then attach the project to it.
+    Idempotent: on a box that already has this project, it is a reconverge."""
+    name, provider, state = _ensure_box(args, gc, project)
+    if state != "running":
+        print(f"==> starting '{name}' ...")
+        provider.start(name)
+
+    admin_user = _admin_user(provider, name)
+    if admin_user == project.agent_user:
+        die(f"this project's agent_user '{project.agent_user}' is also the "
+            f"privileged account on box '{name}'; the whole point is that agents "
+            f"run without sudo. Set `agent_user = \"...\"` in .devbox/config.toml.")
+
+    # Built up front so a bad jj identity / missing mod surfaces before we touch
+    # the box (build_payload resolves both).
+    tarball = build_tarball(build_payload(project, gc, admin_user))
+    agent_alias, admin_alias = _wait_ready(provider, name, admin_user, project)
+
+    # Order: account -> env -> mods -> files. The agent account has to exist
+    # before its [env] file can be written into its home; env precedes the mods
+    # because a mod may need a cred (repo-bootstrap's private clone); files come
+    # last because their destinations need the repo checkout. `create` blocks
+    # through all of it. Everything but the files goes over the PRIVILEGED alias:
+    # creating an account and writing into another user's home both need sudo.
+    print(f"==> attaching '{project.project}' to '{name}' as user "
+          f"'{project.agent_user}' ...")
     _ensure_box_users(admin_alias, tarball)
     print("==> injecting [env] credentials ...")
     run_envvars(admin_alias, resolve_env(project, gc), project.agent_user)
     print("==> provisioning (running mods over SSH; several minutes) ...")
-    _run_mods(admin_alias, tarball, [])
+    _run_mods(admin_alias, tarball, [], log=PROVISION_LOG)
     if project.sync:
         print("==> syncing host-local files onto the box ...")
         run_sync(project, agent_alias)
-    print(f"\n==> '{name}' is ready.\n\n  SSH:  {target} ssh\n")
+
+    d = args.project_dir or "."
+    print(f"\n==> '{project.project}' is ready on '{name}'.\n\n"
+          f"  SSH:  devbox -C {d} ssh\n")
 
 
 def _poll(fn, timeout: int, interval: int = 5):
@@ -211,23 +248,25 @@ def _ssh_ok(alias: str) -> bool:
     return r.returncode == 0
 
 
-def _wait_ready(provider, name: str, project: ProjectConfig) -> tuple:
-    """Block until a freshly-created box has an address, accepts SSH as the
-    privileged user, and its base cloud-init (that user + packages the mods lean
-    on) has finished; return the refreshed (agent, admin) SSH aliases. Times out
-    pointing at `devbox status`.
+def _wait_ready(provider, name: str, admin_user: str,
+                project: Optional[ProjectConfig] = None):
+    """Block until a box has an address, accepts SSH as the privileged user, and
+    its base cloud-init (that user + packages the mods lean on) has finished.
+    Returns the admin alias, or the (agent, admin) pair when a project is given.
+    Times out pointing at `devbox box status`.
 
-    Readiness is checked over the PRIVILEGED alias: the agent account is created
-    later, by the provisioning driver, so its alias cannot connect yet."""
-    print("==> waiting for the instance to get an address ...")
+    Readiness is checked over the PRIVILEGED alias: a project's agent account is
+    created later, by the provisioning driver, so its alias cannot connect yet."""
+    print("==> waiting for the box to get an address ...")
     ip = _poll(lambda: provider.address(name), timeout=300)
     if not ip:
-        die(f"timed out waiting for '{name}' to get an address; check `devbox status`")
-    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, project)
+        die(f"timed out waiting for '{name}' to get an address; "
+            f"check `devbox box status {name}`")
+    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, admin_user, project)
 
     print("==> waiting for SSH ...")
     if not _poll(lambda: _ssh_ok(admin_alias), timeout=300):
-        die(f"timed out waiting for SSH to '{name}'; check `devbox status`")
+        die(f"timed out waiting for SSH to '{name}'; check `devbox box status {name}`")
 
     print("==> waiting for base cloud-init (user + packages) to finish ...")
     # `cloud-init status --wait` blocks until done: exit 0 = done, 2 = done with
@@ -235,21 +274,21 @@ def _wait_ready(provider, name: str, project: ProjectConfig) -> tuple:
     r = subprocess.run(["ssh", admin_alias, "cloud-init status --wait"])
     if r.returncode not in (0, 2):
         die(f"base cloud-init did not finish cleanly on '{name}' "
-            f"(exit {r.returncode}); check `devbox status`")
-    return agent_alias, admin_alias
+            f"(exit {r.returncode}); check `devbox box status {name}`")
+    return (agent_alias, admin_alias) if project is not None else admin_alias
 
 
-def _run_driver(alias: str, tarball: bytes, driver_args: list, log: bool) -> int:
+def _run_driver(alias: str, tarball: bytes, driver_args: list, log: str = "") -> int:
     """Deliver the provisioning payload over SSH and run the driver with
     `driver_args`: pipe the tarball into a per-run temp dir (extracted as the SSH
-    user, then made world-readable so the driver can drop into the unprivileged
+    user, then made world-readable so the driver can drop into an unprivileged
     agent to run a mod - the payload carries no secrets), optionally teeing to
-    ~/provision.log (the log `devbox status` tails). Returns the driver's status.
+    `~/<log>` (what `devbox status` tails). Returns the driver's status.
 
-    `alias` is always the PRIVILEGED user's: the driver needs sudo to create the
+    `alias` is always the PRIVILEGED user's: the driver needs sudo to create an
     agent account, install `# packages:` and drop privilege per mod."""
     selected = " ".join(shlex.quote(a) for a in driver_args)
-    tee = f' 2>&1 | tee "$HOME/{PROVISION_LOG}"' if log else ""
+    tee = f' 2>&1 | tee "$HOME/{log}"' if log else ""
     # `umask 022` before extracting: tar applies the extracting user's umask to
     # the modes it creates (including the `mods/` directory, which the archive
     # only implies), so a restrictive umask on the box would leave the payload
@@ -265,43 +304,43 @@ def _run_driver(alias: str, tarball: bytes, driver_args: list, log: bool) -> int
 
 
 def _ensure_box_users(alias: str, tarball: bytes) -> None:
-    """Run only the driver's user preamble (create the unprivileged agent
-    account, wire per-user shells). Split out of the full run because the
-    agent's home has to exist before `run_envvars` can write the [env] file into
-    it, and that happens before the mods."""
-    rc = _run_driver(alias, tarball, ["--ensure-users"], log=False)
+    """Run only the driver's user preamble. Split out of the full run because the
+    account's home has to exist before `run_envvars` can write the [env] file
+    into it, and that happens before the mods."""
+    rc = _run_driver(alias, tarball, ["--ensure-users"])
     if rc != 0:
-        die(f"could not create the box's users (exit {rc}); see the output above")
+        die(f"could not set up the project's account (exit {rc}); "
+            f"see the output above")
 
 
-def _run_mods(alias: str, tarball: bytes, mods: list) -> None:
-    """Run the provisioning playbook over SSH (the driver re-runs its user
+def _run_mods(alias: str, tarball: bytes, mods: list, log: str) -> None:
+    """Run a provisioning playbook over SSH (the driver re-runs its account
     preamble first). `mods` selects a subset; empty = the whole playbook."""
-    rc = _run_driver(alias, tarball, mods, log=True)
+    rc = _run_driver(alias, tarball, mods, log=log)
     if rc != 0:
         die(f"provisioning failed (exit {rc}); see the output above "
-            f"or ~/{PROVISION_LOG} on the box")
+            f"or ~/{log} on the box")
 
 
-def cmd_up(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name, _, provider = _resolve_target(args, project, gc)
+def cmd_box_up(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+    name, _, provider = _resolve_box(args.name, gc)
     state = provider.state(name)
     if state is None:
-        die(f"instance '{name}' is not defined; run `devbox create` first")
+        die(f"box '{name}' is not defined; run `devbox box create` first")
     if state == "running":
-        print(f"instance '{name}' is already running.")
+        print(f"box '{name}' is already running.")
         return
     print(f"==> starting '{name}' ...")
     provider.start(name)
 
 
-def cmd_stop(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name, _, provider = _resolve_target(args, project, gc)
+def cmd_box_stop(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+    name, _, provider = _resolve_box(args.name, gc)
     state = provider.state(name)
     if state is None:
-        die(f"instance '{name}' is not defined; run `devbox create` first")
+        die(f"box '{name}' is not defined; run `devbox box create` first")
     if state not in ("running",):
-        print(f"instance '{name}' is already stopped ({state}).")
+        print(f"box '{name}' is already stopped ({state}).")
         return
     print(f"==> stopping '{name}' ...")
     provider.stop(name)
@@ -309,13 +348,13 @@ def cmd_stop(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
 
 def _confirm_destroy(name: str, provider_name: str, assume_yes: bool,
                      stdin=None) -> bool:
-    """Decide whether a destroy may proceed. `destroy` deletes the overlay disk
-    irreversibly, so guard it: --yes (assume_yes) skips the prompt outright;
-    otherwise a non-TTY stdin can't be prompted safely (would hang or silently
-    proceed) so we die pointing at --yes; on a TTY we require the full word
-    'yes'. Anything else -> False (no destroy). Factored out of cmd_destroy so
-    the decision is unit-testable without real infra. `stdin` defaults to the
-    live sys.stdin (resolved at call time so it's patchable)."""
+    """Decide whether a destroy may proceed. `destroy` deletes the disk
+    irreversibly, so guard it: --yes (assume_yes) skips the prompt outright; otherwise a non-TTY
+    stdin can't be prompted safely (would hang or silently proceed) so we die
+    pointing at --yes; on a TTY we require the full word 'yes'. Anything else ->
+    False (no destroy). Factored out of cmd_box_destroy so the decision is
+    unit-testable without real infra. `stdin` defaults to the live sys.stdin
+    (resolved at call time so it's patchable)."""
     if assume_yes:
         return True
     if stdin is None:
@@ -328,15 +367,22 @@ def _confirm_destroy(name: str, provider_name: str, assume_yes: bool,
     return input("Type 'yes' to confirm: ").strip() == "yes"
 
 
-def cmd_destroy(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name, provider_name, provider = _resolve_target(args, project, gc)
+def cmd_box_destroy(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+    name, provider_name, provider = _resolve_box(args.name, gc)
     if not _confirm_destroy(name, provider_name, args.yes):
         print(f"Aborted; '{name}' left untouched.")
         return
     provider.destroy(name)
+    (SSH_DIR / f"{name}.conf").unlink(missing_ok=True)
     tail = (f" (cached base image left in {gc.cache_dir})"
             if provider_name == "libvirt" else "")
     print(f"Destroyed '{name}'{tail}.")
+
+
+def cmd_destroy(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    """Destroy this project's box."""
+    name, _, _ = _resolve_target(args, project, gc)
+    cmd_box_destroy(argparse.Namespace(name=name, yes=args.yes), gc)
 
 
 def cmd_ip(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
@@ -347,81 +393,103 @@ def cmd_ip(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -
     print(ip)
 
 
+def cmd_box_ssh(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+    """The privileged shell - the box's only sudo account. For debugging the
+    machine itself; a project's own shell is `devbox ssh`."""
+    name, _, provider = _resolve_box(args.name, gc)
+    ip = provider.address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+    _, admin_alias = _refresh_ssh_aliases(name, ip, _admin_user(provider, name))
+    os.execvp("ssh", ["ssh", admin_alias, *args.ssh_args])
+
+
 def cmd_ssh(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name, _, provider = _resolve_target(args, project, gc)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    # The unprivileged agent by default - that's where the repo checkout and the
-    # tooling live. --admin is the privileged account, and the only shell on the
-    # box with sudo; it exists for debugging the machine itself.
-    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, project)
-    os.execvp("ssh", ["ssh", admin_alias if args.admin else agent_alias, *args.ssh_args])
+    # This project's unprivileged account - that's where its repo checkout and
+    # tooling live. The box's privileged shell is `devbox box ssh <box>`.
+    agent_alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), project)
+    os.execvp("ssh", ["ssh", agent_alias, *args.ssh_args])
+
+
+def _tail_provision_log(provider, name: str, log: str) -> None:
+    """cloud-init progress + the tail of one provisioning log, over the
+    privileged alias (the driver runs there, so the logs are in its home)."""
+    ip = provider.address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+    _, admin_alias = _refresh_ssh_aliases(name, ip, _admin_user(provider, name))
+    subprocess.run([
+        "ssh", admin_alias,
+        f"cloud-init status --long; echo ---; tail -n 80 ~/{log} 2>/dev/null",
+    ], check=False)
+
+
+def cmd_box_status(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+    name, _, provider = _resolve_box(args.name, gc)
+    _tail_provision_log(provider, name, PROVISION_LOG)
 
 
 def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     name, _, provider = _resolve_target(args, project, gc)
-    ip = provider.address(name)
-    if not ip:
-        die(f"no address for '{name}' yet (still booting?).")
-    # Over the privileged alias: provision.log lives in that user's home, since
-    # the driver runs there.
-    _, admin_alias = _refresh_ssh_aliases(name, ip, project)
-    subprocess.run([
-        "ssh", admin_alias,
-        f"cloud-init status --long; echo ---; tail -n 80 ~/{PROVISION_LOG} 2>/dev/null",
-    ], check=False)
+    _tail_provision_log(provider, name, PROVISION_LOG)
 
 
-def cmd_list(args: argparse.Namespace, gc: GlobalConfig, project: Optional[ProjectConfig]) -> None:
-    # Global view: every devbox-managed instance, unioned across providers.
-    # EC2 is account-wide; libvirt is this-host-only.
-    instances = [inst for provider in all_providers(gc) for inst in provider.list()]
-    instances.sort(key=lambda i: i.name)
-    if not instances:
-        print("No devbox-managed instances.")
+def cmd_box_list(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+    # Global view: every devbox-managed box, unioned across providers. EC2 is
+    # account-wide; libvirt is this-host-only.
+    boxes = [inst for provider in all_providers(gc) for inst in provider.list()]
+    boxes.sort(key=lambda i: i.name)
+    if not boxes:
+        print("No devbox-managed boxes.")
         return
     rows = [("NAME", "PROVIDER", "STATE", "RESOURCES", "UP")]
-    for i in instances:
-        up = "—"
+    for i in boxes:
+        up = "\u2014"
         if i.state == "running":
             up = _format_age(i.created_at)
             if i.cost_hint:
-                up += " ($)"  # this instance is costing money while running
+                up += " ($)"  # this box is costing money while running
         rows.append((i.name, i.provider, i.state, i.resources, up))
     _print_table(rows)
 
 
-def _alias_names(name: str) -> tuple:
-    """The two SSH aliases for an instance: (agent, admin).
+def _alias_names(box: str) -> tuple:
+    """The two SSH aliases for a box: (agent, admin).
 
-    `devbox-<name>` stays pointed at the UNPRIVILEGED agent user - it is the
+    `devbox-<box>` stays pointed at the UNPRIVILEGED agent user - it is the
     alias muscle memory and every existing jj remote already names, and the
     agent's home is where the repo checkout lives. The privileged user gets the
-    `-admin` suffix; it is what provisioning and `devbox ssh --admin` use."""
-    return f"devbox-{name}", f"devbox-{name}-admin"
+    `-admin` suffix; it is what provisioning and `devbox box ssh` use."""
+    return f"devbox-{box}", f"devbox-{box}-admin"
 
 
-def _refresh_ssh_aliases(name: str, ip: str, project: ProjectConfig) -> tuple:
-    """Write/refresh both SSH aliases for an instance (host, user, dedicated
-    known-hosts) and return them as (agent_alias, admin_alias). Provider-agnostic
-    - `ip` is whatever the provider resolved (libvirt DHCP lease or EC2 public
-    IP)."""
-    agent_alias, admin_alias = _alias_names(name)
+def _refresh_ssh_aliases(box: str, ip: str, admin_user: str,
+                         project: Optional[ProjectConfig] = None) -> tuple:
+    """Write/refresh both SSH aliases for a box (host, user, dedicated
+    known-hosts) and return them as (agent_alias, admin_alias). The privileged
+    user now comes from the instance rather than the project, since it is a
+    property of the machine. Provider-agnostic - `ip` is whatever the provider
+    resolved (libvirt DHCP lease or EC2 public IP)."""
+    agent_alias, admin_alias = _alias_names(box)
     SSH_DIR.mkdir(parents=True, exist_ok=True)
     if not KNOWN_HOSTS_PATH.is_file():
         KNOWN_HOSTS_PATH.write_text("")
         KNOWN_HOSTS_PATH.chmod(0o600)
 
-    host_conf = SSH_DIR / f"{name}.conf"
-    host_conf.write_text("".join(
+    stanzas = [(admin_alias, admin_user)]
+    if project is not None:
+        stanzas.insert(0, (agent_alias, project.agent_user))
+    (SSH_DIR / f"{box}.conf").write_text("".join(
         f"Host {alias}\n"
         f"    HostName {ip}\n"
         f"    User {user}\n"
         f"    UserKnownHostsFile {KNOWN_HOSTS_PATH}\n"
         f"    StrictHostKeyChecking accept-new\n"
-        for alias, user in ((agent_alias, project.agent_user),
-                            (admin_alias, project.user))
+        for alias, user in stanzas
     ))
 
     include_line = f"Include {SSH_DIR}/*.conf"
@@ -445,7 +513,8 @@ def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, project)
+    agent_alias, admin_alias = _refresh_ssh_aliases(
+        name, ip, _admin_user(provider, name), project)
     # The agent alias is the one `jj fetch` uses and the one worth printing; the
     # admin alias is refreshed alongside it and named for completeness.
     print(agent_alias)
@@ -477,8 +546,7 @@ def _ensure_jj_remote(repo_dir: Path, remote: str, url: str) -> None:
 def cmd_jj_fetch(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     # jj git fetch (box->host): refresh the SSH alias (address via the provider,
     # so this is identical for libvirt or AWS), ensure the local jj remote points
-    # at the instance's colocated repo, and fetch. `[repo]` is project-level, so
-    # any instance in the project is fetched the same way.
+    # at this project's colocated repo on its box, and fetch.
     if project.repo.mode == "none" or not project.repo.dir:
         die("this project has no [repo] configured (set [repo] mode/dir); nothing to fetch")
     name, _, provider = _resolve_target(args, project, gc)
@@ -486,11 +554,11 @@ def cmd_jj_fetch(args: argparse.Namespace, gc: GlobalConfig, project: ProjectCon
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
 
-    # The agent alias: the checkout is in the agent's home, and `jj git fetch`
-    # runs git-upload-pack as the login user - there is no sudo-ing through that.
-    # An existing remote from before the two-user split points at the privileged
-    # user's home; _ensure_jj_remote re-points it, so old checkouts self-heal.
-    alias, _ = _refresh_ssh_aliases(name, ip, project)
+    # The agent alias: the checkout is in this project's own account, and `jj git
+    # fetch` runs git-upload-pack as the login user - there is no sudo-ing through
+    # that. An existing remote pointing at an older home is re-pointed by
+    # _ensure_jj_remote, so old checkouts self-heal.
+    alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), project)
     remote_url = f"ssh://{alias}/home/{project.agent_user}/{project.repo.dir}"
     repo_dir = find_project_dir(args.project_dir or Path.cwd())
     _ensure_jj_remote(repo_dir, alias, remote_url)
@@ -526,79 +594,128 @@ def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, project)
+    admin_user = _admin_user(provider, name)
+    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, admin_user, project)
 
     # Order: env -> mods -> files. Mods may need a cred (e.g. repo-bootstrap's
     # private clone); file dsts (e.g. ~/<repo>/.claude/skills) need the repo clone.
     # env and mods go over the privileged alias (writing another user's home /
-    # running the driver both need sudo); files go over the agent's.
-    tarball = build_tarball(build_payload(project, gc)) if (do_envvars or do_mods) else None
+    # running the driver both need sudo); files go over this project's own.
+    tarball = (build_tarball(build_payload(project, gc, admin_user))
+               if (do_envvars or do_mods) else None)
     if do_envvars:
-        # The agent's home has to exist before its [env] file can land in it -
-        # true on a box that predates this account, not just a brand-new one.
+        # The account's home has to exist before its [env] file can land in it -
+        # true on a box this project has never attached to, not just a new one.
         _ensure_box_users(admin_alias, tarball)
         print(f"==> injecting [env] credentials into '{name}' ...")
         run_envvars(admin_alias, resolve_env(project, gc), project.agent_user)
     if do_mods:
         mods = _split_mods(args.mods)
-        scope = f" (mods: {', '.join(mods)})" if mods else ""
-        print(f"==> provisioning '{name}' over SSH{scope} ...")
-        _run_mods(admin_alias, tarball, mods)
+        subset = f" (mods: {', '.join(mods)})" if mods else ""
+        print(f"==> provisioning '{name}' over SSH{subset} ...")
+        _run_mods(admin_alias, tarball, mods, log=PROVISION_LOG)
     if do_files:
         print(f"==> syncing host-local files to '{name}' ...")
         run_sync(project, agent_alias)
     print("done.")
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(
-        description="Manage per-project dev-sandbox VMs (libvirt or AWS).")
-    # Defined before add_subparsers so they can't be swallowed by ssh's
-    # argparse.REMAINDER: `devbox --name foo ssh -- -v`.
-    p.add_argument("-C", "--project-dir", type=Path, default=None,
-                    help="project directory to resolve the devbox marker from (default: cwd)")
-    p.add_argument("--name", default=None,
-                    help="target a specific instance by name (default: the project's libvirt instance)")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    c = sub.add_parser("create", help="download image, define + first-boot the VM")
-    c.add_argument("--provider", choices=PROVIDERS, default=None,
-                    help=f"provider to launch on (default: the project's, else {DEFAULT_PROVIDER})")
-    market = c.add_mutually_exclusive_group()
+def _add_box_create_flags(parser: argparse.ArgumentParser) -> None:
+    """The shape of a box, as flags. There is no box config file: resources are
+    fixed at create and readable from the provider afterwards, so a persisted
+    spec could only ever disagree with the machine."""
+    parser.add_argument("--provider", choices=PROVIDERS, default=None,
+                        help=f"provider to launch on (default: {DEFAULT_PROVIDER})")
+    parser.add_argument("--user", default=None,
+                        help="the box's privileged account (default: $USER)")
+    parser.add_argument("--vcpus", type=int, default=None, help="libvirt: vCPUs")
+    parser.add_argument("--memory", type=int, default=None, metavar="MIB",
+                        help="libvirt: memory in MiB")
+    parser.add_argument("--disk", type=int, default=None, metavar="GB",
+                        help="disk size in GB (ignored on Lightsail, whose bundle fixes it)")
+    parser.add_argument("--instance-type", default=None, help="EC2: instance type")
+    parser.add_argument("--arch", choices=("x86_64", "arm64"), default=None,
+                        help="EC2: architecture (default: x86_64)")
+    parser.add_argument("--ami", default=None, help="EC2: pin an explicit AMI id")
+    parser.add_argument("--bundle", default=None, help="Lightsail: bundle id")
+    parser.add_argument("--blueprint", default=None, help="Lightsail: OS blueprint id")
+    parser.add_argument("--zone", default=None, help="Lightsail: availability zone")
+    market = parser.add_mutually_exclusive_group()
     market.add_argument("--spot", action="store_true", help="EC2: force a spot instance")
     market.add_argument("--on-demand", action="store_true",
                         help="EC2: force an on-demand instance")
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(
+        description="Manage shared dev-sandbox VMs (libvirt or AWS) and the "
+                    "projects attached to them.")
+    # Defined before add_subparsers so they can't be swallowed by ssh's
+    # argparse.REMAINDER: `devbox --box foo ssh -- -v`.
+    p.add_argument("-C", "--project-dir", type=Path, default=None,
+                    help="project directory to resolve the devbox marker from (default: cwd)")
+    p.add_argument("--box", "--name", dest="box", default=None,
+                    help="target a specific box by name (default: the project's `box`)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # ---- box commands: the machine itself, addressed by name ----------------
+    box = sub.add_parser("box", help="create and manage boxes (the VMs projects attach to)")
+    box_sub = box.add_subparsers(dest="box_cmd", required=True)
+    bc = box_sub.add_parser("create", help="download image, define + first-boot a box")
+    bc.add_argument("name", help="the box's name (a provider prefix is added for cloud boxes)")
+    _add_box_create_flags(bc)
+    bc.set_defaults(func=cmd_box_create, needs_project=False)
+    bl = box_sub.add_parser("list", help="list devbox-managed boxes")
+    bl.set_defaults(func=cmd_box_list, needs_project=False)
+    for verb, fn, helptext in (
+            ("up", cmd_box_up, "start an already-defined, shut-off box"),
+            ("stop", cmd_box_stop, "gracefully shut down a running box"),
+            ("status", cmd_box_status, "show cloud-init progress + the box's provision log"),
+    ):
+        bp = box_sub.add_parser(verb, help=helptext)
+        bp.add_argument("name", help="the box's canonical name")
+        bp.set_defaults(func=fn, needs_project=False)
+    bs = box_sub.add_parser("ssh", help="ssh into the box as the privileged user (its only sudo shell)")
+    bs.add_argument("name", help="the box's canonical name")
+    bs.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
+    bs.set_defaults(func=cmd_box_ssh, needs_project=False)
+    bd = box_sub.add_parser("destroy", help="tear down the box and its disk")
+    bd.add_argument("name", help="the box's canonical name")
+    bd.add_argument("-y", "--yes", "--force", action="store_true", dest="yes",
+                    help="skip the confirmation prompt (for scripts)")
+    bd.set_defaults(func=cmd_box_destroy, needs_project=False)
+
+    # ---- project commands: this project's account on its box ----------------
+    c = sub.add_parser("create", help="ensure this project's box exists, then attach to it")
+    _add_box_create_flags(c)
     c.set_defaults(func=cmd_create)
-    sub.add_parser("up", help="start an already-defined, shut-off VM").set_defaults(func=cmd_up)
-    sub.add_parser("stop", help="gracefully shut down a running VM").set_defaults(func=cmd_stop)
-    d = sub.add_parser("destroy", help="tear down the VM and its overlay disk")
+    d = sub.add_parser("destroy", help="tear down this project's box (only if nothing else is on it)")
     d.add_argument("-y", "--yes", "--force", action="store_true", dest="yes",
                    help="skip the confirmation prompt (for scripts)")
     d.set_defaults(func=cmd_destroy)
-    sub.add_parser("ip", help="print the VM's IPv4").set_defaults(func=cmd_ip)
-    s = sub.add_parser("ssh", help="ssh into the VM (as the unprivileged agent user)")
-    s.add_argument("--admin", action="store_true",
-                   help="log in as the privileged user instead (the box's only sudo shell)")
+    sub.add_parser("ip", help="print the box's IPv4").set_defaults(func=cmd_ip)
+    s = sub.add_parser("ssh", help="ssh into the box as this project's agent user")
     s.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
     s.set_defaults(func=cmd_ssh)
-    sub.add_parser("status", help="show cloud-init progress + provision log").set_defaults(func=cmd_status)
-    # Global view - doesn't resolve a project (works anywhere).
-    sub.add_parser("list", help="list devbox-managed instances").set_defaults(func=cmd_list, needs_project=False)
-    # `jj` groups jj-specific operations; `jj fetch` pulls the instance's
-    # bookmarked work box->host (the global -C/--name still go before `jj`).
-    jj = sub.add_parser("jj", help="jj operations against the instance")
+    sub.add_parser("status", help="show cloud-init progress + this project's provision log").set_defaults(func=cmd_status)
+    # `jj` groups jj-specific operations; `jj fetch` pulls the account's
+    # bookmarked work box->host (the global -C/--box still go before `jj`).
+    jj = sub.add_parser("jj", help="jj operations against the box")
     jj_sub = jj.add_subparsers(dest="jj_cmd", required=True)
-    jj_sub.add_parser("fetch", help="jj git fetch the instance's bookmarked work into the host repo").set_defaults(func=cmd_jj_fetch)
-    # `sync` reconverges a live box: [env] creds, provisioning mods, host-local files.
-    sy = sub.add_parser("sync", help="reconverge a running box: --envvars / --mods / --files")
+    jj_sub.add_parser("fetch", help="jj git fetch the account's bookmarked work into the host repo").set_defaults(func=cmd_jj_fetch)
+    # `sync` reconverges a live attachment: [env] creds, mods, host-local files.
+    sy = sub.add_parser("sync", help="reconverge this project on its box: --envvars / --mods / --files")
     sy.add_argument("--envvars", action="store_true",
-                    help="inject the [env] creds/vars into the box's shell env")
+                    help="inject the [env] creds/vars into the account's shell env")
     sy.add_argument("--mods", nargs="?", const="", default=None, metavar="a,b,c",
                     help="run provisioning mods over SSH (all if no list; else comma-separated)")
     sy.add_argument("--files", action="store_true",
                     help="push host-local files ([[sync]]/[[repo.sync]]) to the box via rsync")
     sy.set_defaults(func=cmd_sync)
     sub.add_parser("host", help="refresh the SSH alias used for jj-fetch, print the alias name").set_defaults(func=cmd_host)
+    # `devbox list` stays as the familiar spelling of `devbox box list`.
+    ls = sub.add_parser("list", help="list devbox-managed boxes")
+    ls.set_defaults(func=cmd_box_list, needs_project=False)
 
     args = p.parse_args()
     global_config = GlobalConfig.load()

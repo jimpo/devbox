@@ -33,17 +33,17 @@ from .provision import (BUILTIN_MODS_DIR, DEFAULT_BASE_MODS, DEFAULT_RUNAS,  # n
                         parse_requires, parse_runas, render_env_file,
                         render_manifest, resolve_env, resolve_jj_identity,
                         resolve_mod, validate_mods)
-from .config import (AwsConfig, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
+from .config import (AwsConfig, BoxSpec, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
                      DEFAULT_CACHE_DIR, DEFAULT_DISK_GB, DEFAULT_LIBVIRT_URI,
                      DEFAULT_LIGHTSAIL_BLUEPRINT, DEFAULT_LIGHTSAIL_BUNDLE,
                      DEFAULT_MEMORY_MIB, DEFAULT_NETWORK, DEFAULT_PROVIDER,
                      DEFAULT_VCPUS, ENV_OWNERS, RESERVED_USERNAMES, USERNAME_RE,
-                     Ec2Config, Ec2BoxConfig, EnvVar,
+                     Ec2BoxConfig, Ec2Config, EnvVar,
                      GlobalConfig, LightsailBoxConfig, PREFIXED_PROVIDERS,
                      PROJECT_CONFIG_FILE, PROJECT_MARKER_DIR,
                      PROVIDERS, ProjectConfig, RepoConfig, SyncEntry, compose_instance_name,
-                     find_project_dir, parse_instance_name, resolve_instance,
-                     resolve_project)
+                     find_project_dir, parse_instance_name,
+                     resolve_box_spec, resolve_instance, resolve_project)
 from .sync import RsyncJob, plan_sync, run_envvars, run_sync  # noqa: F401
 from .providers import (AwsAuthError, Ec2Provider, Instance, InstanceSpec,  # noqa: F401
                         LibvirtProvider, LightsailProvider, Provider,

@@ -1,9 +1,19 @@
-"""Global + per-project configuration, marker resolution, and instance targeting.
+"""Global + per-project configuration, marker resolution, and box targeting.
 
 Provider-agnostic. `GlobalConfig` is `~/.config/devbox/config.toml`;
-`ProjectConfig` is a project's `.devbox/config.toml` ("defaults for machines
-launched from here", not "my one VM"). `resolve_instance` picks which instance
-a command targets.
+`ProjectConfig` is a project's `.devbox/config.toml`.
+
+**A box is not a project.** A box is a VM - provider, resources, image, and one
+privileged account - and several projects can share one. A project is content:
+its unprivileged account, its checkout, its creds, its mods. So a project's
+config carries no hardware at all: a box's shape is given as CLI flags to
+`devbox box create` (`BoxSpec`), and the box itself is the record of what it is
+(provider tags / libvirt <metadata>), since hardware can't change after create
+and the live values are readable from the provider anyway.
+
+A project says which box it lives on with `box = "<name>"`, defaulting to its
+own name - which is why the one-box-per-project case still needs no config at
+all. `resolve_instance` picks which box a command targets.
 """
 from __future__ import annotations
 
@@ -32,13 +42,14 @@ PROVIDERS = ("libvirt", "ec2", "aws")
 # routing), instead of an API call per `ssh`/`ip`/... to find the owner.
 PREFIXED_PROVIDERS = tuple(p for p in PROVIDERS if p != DEFAULT_PROVIDER)
 
-# A box has two accounts (see provision.py): the privileged `user` (the SSH
-# target devbox provisions through, sudo-enabled) and the unprivileged
-# `agent_user` that AI agents and the repo checkout live under. `agent_user`
-# defaults to the project name, which is a directory basename by default - so it
-# is validated here rather than trusted, since plenty of legal project names
-# ('MyProject', 'foo.bar', '2fa-lib') are not legal Linux usernames. Failing at
-# config-resolve time costs a second; failing in `useradd` costs a boot.
+# A box has a privileged account (`admin_user`, the SSH target devbox
+# provisions through, sudo-enabled; a box property, set at `devbox box create`)
+# and one unprivileged `agent_user` per attached project, which that project's
+# AI agents and repo checkout live under. `agent_user` defaults to the project
+# name, which is a directory basename by default - so it is validated here
+# rather than trusted, since plenty of legal project names ('MyProject',
+# 'foo.bar', '2fa-lib') are not legal Linux usernames. Failing at config-resolve
+# time costs a second; failing in `useradd` costs a boot.
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 # Usernames the agent account must never take: standard Debian/Ubuntu system
@@ -306,7 +317,9 @@ class SyncEntry:
 
 @dataclasses.dataclass
 class Ec2BoxConfig:
-    """Per-project `[ec2]` launch defaults (cfleet's "instance template")."""
+    """EC2 launch settings for one box, from `devbox box create --instance-type
+    ...`. Not persisted: hardware is fixed at create, and the live values are
+    readable from EC2 afterwards."""
     instance_type: str
     architecture: str = "x86_64"           # "x86_64" | "arm64"
     ami: Optional[str] = None              # explicit AMI id; else looked up
@@ -318,14 +331,13 @@ class Ec2BoxConfig:
 
 @dataclasses.dataclass
 class LightsailBoxConfig:
-    """Per-project `[lightsail]` launch defaults for the `aws` provider. Every
-    field is optional: `provider = "aws"` with no `[lightsail]` section at all
-    launches on pure defaults. (The section name intentionally differs from the
-    provider name - `aws` is the user-facing provider, Lightsail the backend.)
+    """Lightsail launch settings for one box (the `aws` provider). Every field is
+    optional: `devbox box create foo --provider aws` with no other flags launches
+    on pure defaults.
 
     There is no disk knob: a Lightsail bundle fixes CPU/RAM/disk together, so
-    the project's `disk_gb` is ignored on this provider. There is no
-    architecture knob either: Lightsail's Linux bundles are x86-only.
+    `--disk` is ignored on this provider. There is no architecture knob either:
+    Lightsail's Linux bundles are x86-only.
     """
     # Explicit Lightsail bundle id; when unset, DEFAULT_LIGHTSAIL_BUNDLE
     # (xlarge_3_0 = 16 GB / 4 vCPU / 320 GB).
@@ -337,18 +349,35 @@ class LightsailBoxConfig:
 
 
 @dataclasses.dataclass
-class ProjectConfig:
-    project: str                  # label/tag on instances (default: marker dir basename)
-    provider: str                 # default provider for a bare `create` ("libvirt")
-    # The box's two accounts. `user` is the PRIVILEGED one (sudo, created by the
-    # init script, the SSH target provisioning runs through); `agent_user` is the
-    # unprivileged one AI agents and the repo checkout live under, created by the
-    # provisioning driver. See the module constants above.
-    user: str
-    agent_user: str
+class BoxSpec:
+    """One box's shape, assembled from `devbox box create` flags and the global
+    `[defaults]`. Deliberately NOT persisted host-side: resources are immutable
+    after create, and what a box *is* can be read back from the provider. The
+    one fact that can't be (the privileged account, needed to build the SSH alias
+    before we can log in and ask) is stamped onto the instance instead."""
+    name: str                     # canonical instance name (bare, or <provider>-<n>)
+    provider: str
+    admin_user: str               # the box's PRIVILEGED account (sudo)
     vcpus: int
     memory_mib: int
     disk_gb: int
+    ec2: Optional[Ec2BoxConfig] = None
+    lightsail: Optional[LightsailBoxConfig] = None
+
+
+@dataclasses.dataclass
+class ProjectConfig:
+    """A project: content, not hardware. Everything here describes what gets set
+    up inside one unprivileged account on a box - never the box itself."""
+    project: str                  # the project's name (default: marker dir basename)
+    # The box this project attaches to, as a canonical instance name. Defaults to
+    # the project's own name, which is what keeps the one-box-per-project case
+    # working with no configuration at all.
+    box: str
+    # The unprivileged account this project's agents, checkout and creds live
+    # under, created by the provisioning driver at attach. One per project; the
+    # box's privileged account is a box property, not a project one.
+    agent_user: str
     repo: RepoConfig
     marker_dir: Path              # the project's marker directory (holds .devbox/)
     # Ordered provisioning mods appended after the built-in base playbook (see
@@ -360,8 +389,6 @@ class ProjectConfig:
     # box, overriding the global [env] per-key (see sync.py). .devbox/config.toml
     # is git-excluded, so hardcoding scoped creds here is acceptable.
     env: dict = dataclasses.field(default_factory=dict)
-    ec2: Optional[Ec2BoxConfig] = None
-    lightsail: Optional[LightsailBoxConfig] = None
 
 
 def _load_toml(path: Path) -> dict:
@@ -441,39 +468,18 @@ def _resolve_sync(data: dict, config_path: Path, repo: RepoConfig) -> list:
     return entries
 
 
-def _resolve_ec2_project_config(data: dict, config_path: Path) -> Optional[Ec2BoxConfig]:
-    ec2_data = data.get("ec2")
-    if ec2_data is None:
-        return None
-    instance_type = ec2_data.get("instance_type")
-    if not instance_type:
-        die(f"{config_path}: [ec2] requires 'instance_type'")
-    arch = ec2_data.get("architecture", "x86_64")
-    if arch not in ("x86_64", "arm64"):
-        die(f"{config_path}: [ec2] architecture must be 'x86_64' or 'arm64' (got {arch!r})")
-    return Ec2BoxConfig(
-        instance_type=instance_type,
-        architecture=arch,
-        ami=ec2_data.get("ami"),
-        ami_name_filter=ec2_data.get("ami_name_filter"),
-        ami_owner=ec2_data.get("ami_owner", DEFAULT_AMI_OWNER),
-        spot=ec2_data.get("spot"),
-        interruption_behavior=ec2_data.get("interruption_behavior", "stop"),
-    )
-
-
-def _resolve_lightsail_project_config(data: dict, config_path: Path) -> Optional[LightsailBoxConfig]:
-    """Parse the optional `[lightsail]` section. Returns None when absent - the
-    provider substitutes an all-defaults config, so `provider = "aws"` alone is
-    a complete project."""
-    ls_data = data.get("lightsail")
-    if ls_data is None:
-        return None
-    return LightsailBoxConfig(
-        bundle=ls_data.get("bundle"),
-        blueprint=ls_data.get("blueprint", DEFAULT_LIGHTSAIL_BLUEPRINT),
-        availability_zone=ls_data.get("availability_zone"),
-    )
+# Keys that used to describe a project's one VM and are now box-level, given as
+# flags to `devbox box create`. Kept as hard errors rather than ignored warnings:
+# silently dropping `vcpus = 16` would boot the wrong-sized box.
+_BOX_LEVEL_KEYS = {
+    "provider": "--provider",
+    "user": "--user",
+    "vcpus": "--vcpus",
+    "memory_mib": "--memory",
+    "disk_gb": "--disk",
+    "ec2": "--instance-type/--arch/--ami/--spot",
+    "lightsail": "--bundle/--blueprint/--zone",
+}
 
 
 def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
@@ -482,67 +488,84 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
     config_path = devbox_dir / PROJECT_CONFIG_FILE
     data = _load_toml(config_path)
 
-    # `name` used to be "the VM"; an instance is no longer a project (a project
-    # can now have several). Fail loudly rather than silently ignoring a stale
-    # field so the mismatch is obvious.
+    # `name` used to be "the VM"; a box is not a project (a box now hosts as many
+    # projects as attach to it). Fail loudly rather than silently ignoring a
+    # stale field so the mismatch is obvious.
     if "name" in data:
-        die(f"{config_path}: 'name' is no longer a project field - an instance is "
-            f"not a project. Remove it; the project defaults to the directory name "
-            f"('{marker_dir.name}', override with 'project = ...'). Address a specific "
-            f"instance with --name.")
+        die(f"{config_path}: 'name' is no longer a project field - a box is not a "
+            f"project. Remove it; the project defaults to the directory name "
+            f"('{marker_dir.name}', override with 'project = ...'). Say which box "
+            f"this project lives on with 'box = ...'.")
+
+    stale = sorted(k for k in _BOX_LEVEL_KEYS if k in data)
+    if stale:
+        flags = ", ".join(f"'{k}' ({_BOX_LEVEL_KEYS[k]})" for k in stale)
+        die(f"{config_path}: {flags} describe a BOX, not a project - a box is "
+            f"created independently and can host several projects. Remove "
+            f"{'them' if len(stale) > 1 else 'it'} and pass the flag to "
+            f"`devbox box create` instead; point this project at the result with "
+            f"'box = \"<name>\"'.")
 
     _warn_unknown_keys(
         data,
-        known_top={"project", "provider", "user", "agent_user", "vcpus", "memory_mib",
-                   "disk_gb", "mods"},
+        known_top={"project", "box", "agent_user", "mods"},
         known_sections={
             "repo": {"mode", "dir", "url", "sync"},
             "sync": _ANY_KEYS,  # array-of-tables, validated by _parse_sync_entry
             "env": _ANY_KEYS,   # arbitrary user-defined credentials/vars
-            "ec2": {"instance_type", "architecture", "ami", "ami_name_filter",
-                    "ami_owner", "spot", "interruption_behavior"},
-            "lightsail": {"bundle", "blueprint", "availability_zone"},
         },
         config_path=config_path,
     )
 
-    provider = data.get("provider", DEFAULT_PROVIDER)
-    if provider not in PROVIDERS:
-        die(f"{config_path}: provider must be one of {PROVIDERS} (got {provider!r})")
-
     repo = _resolve_repo_config(data, config_path)
     project_name = data.get("project", marker_dir.name)
-    user, agent_user = _resolve_users(data, project_name, config_path)
     return ProjectConfig(
         project=project_name,
-        provider=provider,
-        user=user,
-        agent_user=agent_user,
-        vcpus=data.get("vcpus", global_config.vcpus),
-        memory_mib=data.get("memory_mib", global_config.memory_mib),
-        disk_gb=data.get("disk_gb", global_config.disk_gb),
+        box=_resolve_box_name(data, project_name, config_path),
+        agent_user=_resolve_agent_user(data, project_name, config_path),
         repo=repo,
         marker_dir=marker_dir,
         mods=_resolve_mods(data, config_path),
         sync=_resolve_sync(data, config_path, repo),
         env=_resolve_env(data, config_path),
-        ec2=_resolve_ec2_project_config(data, config_path),
-        lightsail=_resolve_lightsail_project_config(data, config_path),
     )
 
 
-def _resolve_users(data: dict, project_name: str, config_path: Path) -> tuple:
-    """The box's (privileged, unprivileged) usernames. `user` defaults to the
-    host's own $USER; `agent_user` defaults to the project name. Both are
-    validated here so an illegal name fails in a second rather than at
-    `useradd` time, a boot later."""
-    user = data.get("user", os.environ.get("USER", ""))
+def _resolve_box_name(data: dict, project_name: str, config_path: Path) -> str:
+    """The canonical name of the box this project attaches to. Defaults to the
+    project's own name, so a project that never mentions a box gets one of its
+    own - today's single-box behavior, unchanged."""
+    box = data.get("box", project_name)
+    if not isinstance(box, str) or not box:
+        die(f"{config_path}: box must be a non-empty instance name "
+            f"(e.g. box = \"dev\" or box = \"ec2-dev\")")
+    origin = ("box" if "box" in data else
+              f"the project name {project_name!r}, which box defaults to")
+    _validate_instance_name(box, f"{config_path}: {origin}")
+    return box
+
+
+def _validate_instance_name(name: str, origin: str) -> None:
+    """A box's name has to survive the round trip through
+    compose/parse_instance_name, which is how every command routes to a provider
+    offline. A name like 'ec2-foo' on libvirt would misparse as another
+    provider's, and a name that already carries its own provider prefix would
+    have it doubled."""
+    head, sep, _ = name.partition("-")
+    if sep and head in PREFIXED_PROVIDERS:
+        return  # already canonical for that provider
+    if name in PREFIXED_PROVIDERS or any(c.isspace() for c in name) or "/" in name:
+        die(f"{origin}: {name!r} is not a usable box name")
+
+
+def _resolve_agent_user(data: dict, project_name: str, config_path: Path) -> str:
+    """The unprivileged account this project occupies on its box. Defaults to the
+    project name, and is validated here so an illegal name fails in a second
+    rather than at `useradd` time, a boot later. It cannot be checked against the
+    box's privileged account until attach time - that account is a property of
+    the box, not of this file."""
     agent_user = data.get("agent_user", project_name)
 
-    if not USERNAME_RE.match(user):
-        die(f"{config_path}: user {user!r} is not a valid Linux username "
-            f"(lowercase letters/digits/'-'/'_', not starting with a digit, "
-            f"32 chars max); set `user = \"...\"`")
     if not USERNAME_RE.match(agent_user):
         # The overwhelmingly common cause is the default: a project name (i.e. a
         # directory basename) that is not a legal username. Say so.
@@ -551,14 +574,10 @@ def _resolve_users(data: dict, project_name: str, config_path: Path) -> tuple:
         die(f"{config_path}: agent_user {agent_user!r} is not a valid Linux username "
             f"(lowercase letters/digits/'-'/'_', not starting with a digit, "
             f"32 chars max) - it comes from {origin}; set `agent_user = \"...\"`")
-    if agent_user == user:
-        die(f"{config_path}: agent_user and user must differ (both are {user!r}) - "
-            f"the whole point is that agents run as an account without sudo; "
-            f"set `agent_user = \"...\"`")
     if agent_user in RESERVED_USERNAMES:
         die(f"{config_path}: agent_user {agent_user!r} is a reserved system or "
             f"cloud-image account; set `agent_user = \"...\"` to something else")
-    return user, agent_user
+    return agent_user
 
 
 def _resolve_mods(data: dict, config_path: Path) -> list:
@@ -593,8 +612,72 @@ def compose_instance_name(provider: str, name: str) -> str:
 
 
 def resolve_instance(args, project: ProjectConfig) -> str:
-    """Which instance a command targets, as its canonical name. Explicit --name
-    wins (the full canonical name, e.g. `ec2-binius-arm`); otherwise the
-    project's bare-named libvirt default (= the project name). Cloud instances
-    are always named, so they only ever match via --name."""
-    return args.name or project.project
+    """Which box a command targets, as its canonical name. Explicit --box wins
+    (the full canonical name, e.g. `ec2-dev`), then the project's `box` key,
+    then - for a project that has never mentioned a box - its own name."""
+    return getattr(args, "box", None) or project.box
+
+
+def resolve_box_spec(args, gc: GlobalConfig, bare_name: str) -> BoxSpec:
+    """The box `devbox box create` is about to launch, from its flags and the
+    global `[defaults]`. `bare_name` is the name without a provider prefix; the
+    canonical name is composed here.
+
+    This is the only place a box's shape is assembled, and it lives nowhere
+    afterwards: hardware is immutable once the instance exists, so re-deriving it
+    from a config file would only ever risk disagreeing with the machine."""
+    provider = args.provider or DEFAULT_PROVIDER
+    if provider not in PROVIDERS:
+        die(f"provider must be one of {PROVIDERS} (got {provider!r})")
+    _validate_instance_name(bare_name, "box name")
+    if parse_instance_name(bare_name)[0] != DEFAULT_PROVIDER:
+        die(f"box name '{bare_name}' must not start with a provider prefix "
+            f"('{provider}-' is added automatically); "
+            f"pass the name as '{parse_instance_name(bare_name)[1]}'")
+
+    admin_user = args.user or os.environ.get("USER", "")
+    if not USERNAME_RE.match(admin_user):
+        die(f"the box's privileged user {admin_user!r} is not a valid Linux "
+            f"username (lowercase letters/digits/'-'/'_', not starting with a "
+            f"digit, 32 chars max); pass --user")
+
+    return BoxSpec(
+        name=compose_instance_name(provider, bare_name),
+        provider=provider,
+        admin_user=admin_user,
+        vcpus=args.vcpus or gc.vcpus,
+        memory_mib=args.memory or gc.memory_mib,
+        disk_gb=args.disk or gc.disk_gb,
+        ec2=_ec2_box_config(args, provider),
+        lightsail=_lightsail_box_config(args, provider),
+    )
+
+
+def _ec2_box_config(args, provider: str) -> Optional[Ec2BoxConfig]:
+    if provider != "ec2":
+        return None
+    if not args.instance_type:
+        die("EC2 boxes need an instance type: pass --instance-type "
+            "(e.g. `devbox box create dev --provider ec2 --instance-type m7g.xlarge`)")
+    arch = args.arch or "x86_64"
+    if arch not in ("x86_64", "arm64"):
+        die(f"--arch must be 'x86_64' or 'arm64' (got {arch!r})")
+    return Ec2BoxConfig(
+        instance_type=args.instance_type,
+        architecture=arch,
+        ami=args.ami,
+        ami_owner=DEFAULT_AMI_OWNER,
+        # --spot/--on-demand are mutually exclusive at the parser; neither given
+        # leaves it None, which defers to the global [ec2].spot default.
+        spot=True if args.spot else (False if args.on_demand else None),
+    )
+
+
+def _lightsail_box_config(args, provider: str) -> Optional[LightsailBoxConfig]:
+    if provider != "aws":
+        return None
+    return LightsailBoxConfig(
+        bundle=args.bundle,
+        blueprint=args.blueprint or DEFAULT_LIGHTSAIL_BLUEPRINT,
+        availability_zone=args.zone,
+    )
