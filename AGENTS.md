@@ -21,7 +21,8 @@ walk-up, the first-boot
 init-script render (token substitution into the shipped `init-script.sh`, now
 box-scoped), the
 modular-provisioning logic (mod resolution
-precedence, mod metadata headers — `# requires:`/`# runas:`/`# packages:` — the
+precedence, the `# /// mod` metadata block — `requires`/`runas`/`packages`, plus
+its rejection of unknown keys, bad values, duplicate and mislabeled fences — the
 two playbooks and `scoped_runas`'s narrowing of each mod's targets, manifest
 rendering, env-file quoting, payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
@@ -46,8 +47,8 @@ declined prompt paths, and `cli._run`'s one-line errors) — the exception fakes
 carry botocore's real class names, since that naming is what the matcher keys on.
 `tests/test_driver.py` is the exception to "the driver can't be tested": it runs
 the real `provision-driver.sh` with fake `sudo`/`useradd`/`id`/`getent`/`apt-get`
-on PATH, which covers manifest parsing, `# runas:` dispatch (including the
-privilege drop's target account and `$HOME`), `# packages:` ordering, selective
+on PATH, which covers manifest parsing, runas dispatch (including the
+privilege drop's target account and `$HOME`), package-install ordering, selective
 runs, failure propagation, the isolation assertions, and the whole attach story:
 box runs (empty `DEVBOX_AGENT_USER`) creating no account, ownership markers
 written/refused/adopted, per-attachment log directories, and two projects sharing
@@ -107,8 +108,8 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   `devbox sync --files`/`--envvars`; both auto-run on `create`.
 - `provision.py` — modular provisioning: mod resolution (project > global >
   built-in), the two playbooks (`box_playbook`/`project_playbook`), mod metadata
-  (`parse_header` and the `# requires:`/`# runas:`/`# packages:` wrappers,
-  `ModSpec`, `load_mod_specs`), `scoped_runas` + `render_manifest` (the scope
+  (`parse_mod_metadata`, which reads the fenced `# /// mod` TOML block with
+  stdlib `tomllib`; `ModSpec`, `load_mod_specs`), `scoped_runas` + `render_manifest` (the scope
   filter, applied entirely host-side so the driver never learns about scopes),
   `_box_context`/`_project_context` (DEVBOX_* accounts/pubkey/jj/repo context)
   + `resolve_env`/`env_for_owner` (the effective `[env]` map, and one
@@ -124,9 +125,9 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   reachable as `--ensure-agent`, recording ownership in `/etc/devbox/projects/`
   and refusing an account that belongs to another project, one with no record at
   all, or one that has acquired sudo). An empty `DEVBOX_AGENT_USER` means a box
-  run and skips it entirely. Then each mod's `# packages:` are
+  run and skips it entirely. Then each mod's packages are
   apt-installed as the privileged user and its body run via `sudo -u` per
-  `# runas:` target (default: the agent). Context and creds are re-sourced inside
+  runas target (default: the agent). Context and creds are re-sourced inside
   the target shell, never passed through `sudo`'s argv — the creds being the
   target account's `[env]` entries, or the privileged user's for a `root` mod
   (`env_owner`).

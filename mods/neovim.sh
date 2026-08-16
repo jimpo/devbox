@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 #
+# /// mod
+# runas = ["root"]
+# ///
+#
 # mod: neovim - the current stable Neovim, from the GitHub release tarball
 # unpacked into /usr/local (so nvim lands at /usr/local/bin/nvim). `stable` is a
 # rolling release pointer, not a pinned version, so this deliberately isn't
 # version-checked: each run re-fetches stable and overwrites in place, picking
 # up upstream's latest.
 #
-# runas: root
-#
 # Root because it writes under /usr/local, one system-wide install for both
-# accounts - and an unpacked tarball is not something `# packages:` can express.
+# accounts - and an unpacked tarball is not something `packages` can express.
 #
 # Idempotency: the download + extract overwrite the same paths every run.
 set -euo pipefail

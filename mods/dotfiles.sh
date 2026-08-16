@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
+# /// mod
+# requires = ["dotfiles-packages"]
+# runas = ["admin", "agent"]
+# ///
+#
 # mod: dotfiles - the per-user half of the configenv setup from
 # github.com/jimpo/configenv: its setup.sh (oh-my-zsh + jimpo theme/plugins,
 # editor configs, dotfiles), so the box stays DRY with the host environment.
 #
-# requires: dotfiles-packages
-# runas: admin agent
-#
-# In BOTH playbooks on purpose, and the reason `# runas:` scoping exists: the
+# In BOTH playbooks on purpose, and the reason `runas` scoping exists: the
 # box runs the admin half once (the privileged user needs a usable shell for
 # `devbox box ssh`, the debugging entry point), and each attaching project runs
 # the agent half in its own account. That means one clone and one oh-my-zsh

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #
+# /// mod
+# packages = ["jq"]
+# ///
+#
 # mod: claude-code - Claude Code (native installer -> ~/.local/bin/claude) plus
 # the github/linear plugins common to every project.
-#
-# packages: jq
 #
 # Runs as the agent (the default target): this is the account a project's agents
 # work in, and the only one that needs Claude Code at all. Each attached project
@@ -23,7 +25,7 @@ claude plugin marketplace add anthropics/claude-plugins-official || true
 # and the agent runs as an account with no sudo, so the interactive permission
 # prompt is pure friction. `bypassPermissions` is the permission mode that skips
 # all approval prompts. Merged into any existing settings.json (never clobbering
-# other keys) with jq (see `# packages:` above) so it's reconverge-safe.
+# other keys) with jq (see the `packages` metadata above) so it's reconverge-safe.
 settings="$HOME/.claude/settings.json"
 mkdir -p "$HOME/.claude"
 [ -f "$settings" ] || echo '{}' >"$settings"

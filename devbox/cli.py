@@ -300,7 +300,7 @@ def _run_driver(alias: str, tarball: bytes, driver_args: list, log: str = "",
     `~/<log>` (what `devbox status` tails). Returns the driver's status.
 
     `alias` is always the PRIVILEGED user's: the driver needs sudo to create an
-    agent account, install `# packages:` and drop privilege per mod."""
+    agent account, install each mod's packages and drop privilege per mod."""
     selected = " ".join(shlex.quote(a) for a in driver_args)
     tee = f' 2>&1 | tee "$HOME/{log}"' if log else ""
     # Flags for the driver that aren't per-mod data go through the environment

@@ -65,7 +65,7 @@ RESERVED_USERNAMES = frozenset({
 })
 
 # The accounts an `[env]` entry can belong to. There is no "root" owner: a
-# `# runas: root` mod reads the privileged account's file (see
+# `runas = ["root"]` mod reads the privileged account's file (see
 # provision-driver.sh), so root is covered by "admin".
 ENV_OWNERS = ("agent", "admin")
 DEFAULT_ENV_OWNER = "agent"
@@ -151,7 +151,7 @@ class EnvVar:
 
     `owner` picks exactly one account - `owner = "admin"` puts a credential in
     the privileged user's environment and keeps it out of the agent's, which is
-    what makes it usable by a privileged mod (`# runas: root|admin`) without
+    what makes it usable by a privileged mod (`runas = ["root"]`/`["admin"]`) without
     handing it to the agents. The plain `KEY = "value"` form means the agent."""
     value: str
     owner: str = DEFAULT_ENV_OWNER
@@ -276,7 +276,7 @@ def _resolve_env(data: dict, config_path: Path) -> dict:
         owner = spec.get("owner", DEFAULT_ENV_OWNER)
         if owner not in ENV_OWNERS:
             die(f"{config_path}: [env] '{key}' has an unknown owner '{owner}' "
-                f"(one of: {', '.join(ENV_OWNERS)}). A `# runas: root` mod reads "
+                f"(one of: {', '.join(ENV_OWNERS)}). A `runas = [\"root\"]` mod reads "
                 f"the admin's environment.")
         env[key] = EnvVar(spec["value"], owner)
     return env

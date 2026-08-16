@@ -77,7 +77,7 @@ DEVBOX_PACKAGES=(
   rsync            # receiver for `devbox sync` (host->box file push)
   # The agent account has no sudo, so it cannot apt-install its way out of a
   # missing build dependency mid-task the way the old single sudo-capable user
-  # could - it takes a `# packages:` line on a mod and a `devbox sync --mods`.
+  # could - it takes a `packages` entry on a mod and a `devbox sync --mods`.
   # Carry the two that virtually every native build wants. Anything beyond this
   # belongs in a mod: first boot is slow enough, and it is slow for every box.
   build-essential

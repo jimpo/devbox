@@ -258,7 +258,7 @@ def test_resolve_project_env_table_form_carries_an_owner(tmp_path, global_config
 
 
 def test_resolve_project_env_unknown_owner_dies(tmp_path, global_config):
-    # No "root" owner: a `# runas: root` mod reads the admin's env file.
+    # No "root" owner: a `runas = ["root"]` mod reads the admin's env file.
     _write_marker(tmp_path, '[env]\nK = { value = "v", owner = "root" }\n')
     with pytest.raises(SystemExit):
         devbox.resolve_project(tmp_path, global_config)
@@ -742,7 +742,7 @@ def test_project_playbook_base_only_when_no_project_mods():
 
 def test_box_playbook_is_fixed():
     # A box takes no config, so its playbook is not extensible per box; a
-    # project that needs more system state ships a `# runas: root` mod.
+    # project that needs more system state ships a `runas = ["root"]` mod.
     assert devbox.box_playbook() == list(devbox.BOX_BASE_MODS)
 
 
@@ -756,7 +756,7 @@ def test_the_two_playbooks_split_the_apt_half_from_the_per_user_half():
         assert per_user not in devbox.BOX_BASE_MODS
 
 
-# ---- scope: which `# runas:` targets run in which playbook -------------------
+# ---- scope: which `runas` targets run in which playbook --------------------
 @pytest.mark.parametrize("runas,box,project", [
     # A mod with an agent half: the box runs everything else, the attachment
     # runs only the agent. This is what stops a second project reinstalling the
@@ -799,41 +799,95 @@ def test_resolve_mod_missing_dies(tmp_path):
         devbox.resolve_mod("nope", tmp_path / "proj", tmp_path / "g", tmp_path / "b")
 
 
-# ---- parse_requires (`# requires:` header, static parse) --------------------
-def test_parse_requires_single_line_single_dep():
-    assert devbox.parse_requires("#!/bin/bash\n# requires: jj\nset -e\n") == ["jj"]
+# ---- parse_mod_metadata (the `# /// mod` block, static parse) ---------------
+def _mod(*meta_lines, body="set -e\n"):
+    """A mod script with a `# /// mod` block holding `meta_lines`."""
+    block = "".join(f"# {line}\n" for line in meta_lines)
+    return f"#!/bin/bash\n#\n# /// mod\n{block}# ///\n#\n{body}"
 
 
-def test_parse_requires_space_separated():
-    assert devbox.parse_requires("# requires: jj github-auth\n") == ["jj", "github-auth"]
+def test_parse_mod_metadata_reads_every_key():
+    meta = devbox.parse_mod_metadata(_mod(
+        'requires = ["jj", "github-auth"]',
+        'runas = ["admin", "agent"]',
+        'packages = ["jq", "unzip"]',
+    ))
+    assert meta == {"requires": ["jj", "github-auth"],
+                    "runas": ["admin", "agent"],
+                    "packages": ["jq", "unzip"]}
 
 
-def test_parse_requires_comma_separated():
-    assert devbox.parse_requires("# requires: jj, github-auth\n") == ["jj", "github-auth"]
+def test_parse_mod_metadata_no_block_is_empty():
+    assert devbox.parse_mod_metadata("#!/bin/bash\n# mod: x\nset -e\n") == {}
 
 
-def test_parse_requires_multiple_lines_unioned():
-    text = "# requires: jj\n# mod: x\n# requires: github-auth, dotfiles\n"
-    assert devbox.parse_requires(text) == ["jj", "github-auth", "dotfiles"]
+def test_parse_mod_metadata_ignores_prose_outside_the_fence():
+    # The whole point of fencing: prose that discusses the metadata keys is no
+    # longer metadata. The old `^# <key>:` scan turned each of these into data.
+    text = _mod('requires = ["jj"]', body=(
+        "# packages: jq unzip\n"
+        "# runas: root\n"
+        "# This mod cannot use `packages` for its deps.\n"
+        "set -e\n"))
+    assert devbox.parse_mod_metadata(text) == {"requires": ["jj"]}
 
 
-def test_parse_requires_dedupes_preserving_order():
-    assert devbox.parse_requires("# requires: jj github-auth\n# requires: jj\n") == \
-        ["jj", "github-auth"]
+def test_parse_mod_metadata_blank_comment_lines_are_allowed():
+    # A bare `#` inside the fence unprefixes to an empty line, not to "#".
+    text = "#!/bin/bash\n# /// mod\n# requires = [\"jj\"]\n#\n# runas = [\"root\"]\n# ///\n"
+    assert devbox.parse_mod_metadata(text) == {"requires": ["jj"], "runas": ["root"]}
 
 
-def test_parse_requires_none_present_is_empty():
-    assert devbox.parse_requires("#!/bin/bash\n# mod: x\nset -e\n") == []
+def test_parse_mod_metadata_rejects_a_second_block():
+    text = _mod('requires = ["jj"]') + '# /// mod\n# runas = ["root"]\n# ///\n'
+    with pytest.raises(SystemExit):
+        devbox.parse_mod_metadata(text)
 
 
-def test_parse_requires_trailing_comment_caveat():
-    # Documents the names-only rule: the capture runs to end of line, so a trailing
-    # inline comment is (wrongly) parsed as a dep name. Authors must not add one.
-    assert devbox.parse_requires("# requires: jj  # needs jj first\n") == \
-        ["jj", "#", "needs", "first"]
+def test_parse_mod_metadata_rejects_a_mislabeled_fence():
+    # `# /// script` is PEP 723's type, and an easy thing to write by mistake.
+    # Silently treating it as "no metadata" would run the mod with every default.
+    text = "#!/bin/bash\n# /// script\n# requires = [\"jj\"]\n# ///\n"
+    with pytest.raises(SystemExit):
+        devbox.parse_mod_metadata(text)
 
 
-# ---- validate_playbooks (`# requires:` ordering across both playbooks) ------
+def test_parse_mod_metadata_rejects_the_old_header_format():
+    # A `# runas: root` line with no fence would otherwise parse as no metadata
+    # and quietly run a privileged mod as the agent - the one silent default
+    # that must not happen. Erroring names the file and shows the replacement.
+    with pytest.raises(SystemExit):
+        devbox.parse_mod_metadata("#!/bin/bash\n# runas: root\nset -e\n")
+    with pytest.raises(SystemExit):
+        devbox.parse_mod_metadata("#!/bin/bash\n# requires: jj\nset -e\n")
+
+
+def test_parse_mod_metadata_legacy_check_ignores_prose_inside_a_fenced_mod():
+    # A mod WITH a block may still discuss the old syntax in its prose (several
+    # built-ins do); only a file with no block at all is checked.
+    text = _mod('runas = ["root"]', body="# packages: jq\nset -e\n")
+    assert devbox.parse_mod_metadata(text) == {"runas": ["root"]}
+
+
+def test_parse_mod_metadata_rejects_invalid_toml():
+    with pytest.raises(SystemExit):
+        devbox.parse_mod_metadata(_mod("requires = [unquoted]"))
+
+
+def test_parse_mod_metadata_rejects_an_unknown_key():
+    # Catches a typo (`require`) that would otherwise be silently ignored.
+    with pytest.raises(SystemExit):
+        devbox.parse_mod_metadata(_mod('require = ["jj"]'))
+
+
+def test_parse_mod_metadata_rejects_a_non_list_value():
+    with pytest.raises(SystemExit):
+        devbox.parse_mod_metadata(_mod('runas = "root"'))
+    with pytest.raises(SystemExit):
+        devbox.parse_mod_metadata(_mod("packages = [1, 2]"))
+
+
+# ---- validate_playbooks (`requires` ordering across both playbooks) ---------
 def _write_project_mod(marker_dir, name, text):
     d = marker_dir / ".devbox" / "mods"
     d.mkdir(parents=True, exist_ok=True)
@@ -841,33 +895,32 @@ def _write_project_mod(marker_dir, name, text):
 
 
 def test_validate_playbooks_base_passes(isolated_mods):
-    # The shipped base playbooks (with their backfilled `# requires:` headers)
-    # are correctly ordered - no dep is missing or listed after its dependent.
+    # The shipped base playbooks (with their `requires` metadata) are correctly
+    # ordered - no dep is missing or listed after its dependent.
     devbox.validate_playbooks(_project())
 
 
 def test_validate_playbooks_project_mod_requiring_base_mod_passes(isolated_mods, tmp_path):
-    _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# requires: jj\nset -e\n")
+    _write_project_mod(tmp_path, "rust", _mod('requires = ["jj"]'))
     devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["rust"]))
 
 
 def test_validate_playbooks_project_mod_requiring_a_box_mod_passes(isolated_mods, tmp_path):
     # A box mod always ran earlier - it belongs to the machine, which exists
     # before any attachment - so it satisfies a dep from the other playbook.
-    _write_project_mod(tmp_path, "rust",
-                       "#!/bin/bash\n# requires: dotfiles-packages\nset -e\n")
+    _write_project_mod(tmp_path, "rust", _mod('requires = ["dotfiles-packages"]'))
     devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["rust"]))
 
 
 def test_validate_playbooks_missing_dep_dies(isolated_mods, tmp_path):
-    _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# requires: nonexistent\nset -e\n")
+    _write_project_mod(tmp_path, "rust", _mod('requires = ["nonexistent"]'))
     with pytest.raises(SystemExit):
         devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["rust"]))
 
 
 def test_validate_playbooks_dep_listed_after_dies(isolated_mods, tmp_path):
     # `a` requires `b`, but `b` is appended after `a` -> misordered -> die.
-    _write_project_mod(tmp_path, "a", "#!/bin/bash\n# requires: b\nset -e\n")
+    _write_project_mod(tmp_path, "a", _mod('requires = ["b"]'))
     _write_project_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
     with pytest.raises(SystemExit):
         devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["a", "b"]))
@@ -875,55 +928,47 @@ def test_validate_playbooks_dep_listed_after_dies(isolated_mods, tmp_path):
 
 def test_validate_playbooks_dep_listed_before_passes(isolated_mods, tmp_path):
     # Same two mods, `b` ahead of `a` -> ordering satisfied.
-    _write_project_mod(tmp_path, "a", "#!/bin/bash\n# requires: b\nset -e\n")
+    _write_project_mod(tmp_path, "a", _mod('requires = ["b"]'))
     _write_project_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
     devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["b", "a"]))
 
 
 def test_build_payload_validates_mods(isolated_mods, pubkey, tmp_path):
-    # build_payload is the choke point: a bad `# requires:` fails there (so a
+    # build_payload is the choke point: a bad `requires` fails there (so a
     # selective `devbox sync --mods=a` still validates the full playbook).
-    _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# requires: nonexistent\nset -e\n")
+    _write_project_mod(tmp_path, "rust", _mod('requires = ["nonexistent"]'))
     with pytest.raises(SystemExit):
         devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]),
                              _global_config(pubkey), "alice")
 
 
-# ---- `# runas:` / `# packages:` headers -------------------------------------
-def test_parse_runas_defaults_to_the_agent():
+# ---- `runas` / `packages` in a resolved ModSpec ------------------------------
+def test_load_mod_specs_runas_defaults_to_the_agent(isolated_mods, tmp_path):
     # The default target is the unprivileged account, because that is what a mod
     # almost always configures: a user's home directory.
-    assert devbox.parse_runas("#!/bin/bash\nset -e\n") == ["agent"]
+    _write_project_mod(tmp_path, "rust", "#!/bin/bash\nset -e\n")
+    spec, = devbox.load_mod_specs(["rust"], tmp_path)
+    assert spec.runas == ["agent"]
+    assert spec.requires == [] and spec.packages == []
 
 
-def test_parse_runas_explicit_single_and_list():
-    assert devbox.parse_runas("# runas: root\n") == ["root"]
-    assert devbox.parse_runas("# runas: admin agent\n") == ["admin", "agent"]
-    assert devbox.parse_runas("# runas: admin, agent\n") == ["admin", "agent"]
-
-
-def test_parse_packages():
-    assert devbox.parse_packages("# packages: jq unzip\n") == ["jq", "unzip"]
-    assert devbox.parse_packages("#!/bin/bash\n") == []
-
-
-def test_parse_header_is_shared_by_every_key():
-    text = "# requires: jj\n# runas: agent\n# packages: jq, unzip\n# packages: ripgrep\n"
-    assert devbox.parse_header(text, "requires") == ["jj"]
-    assert devbox.parse_header(text, "runas") == ["agent"]
-    # multiple lines of one key are unioned, in first-seen order
-    assert devbox.parse_header(text, "packages") == ["jq", "unzip", "ripgrep"]
+def test_load_mod_specs_carries_the_declared_metadata(isolated_mods, tmp_path):
+    _write_project_mod(tmp_path, "rust", _mod(
+        'requires = ["jj"]', 'runas = ["admin", "agent"]', 'packages = ["clang"]'))
+    spec, = devbox.load_mod_specs(["rust"], tmp_path)
+    assert (spec.requires, spec.runas, spec.packages) == \
+        (["jj"], ["admin", "agent"], ["clang"])
 
 
 def test_load_mod_specs_rejects_an_unknown_runas_target(isolated_mods, tmp_path):
-    _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# runas: nobody-special\n")
+    _write_project_mod(tmp_path, "rust", _mod('runas = ["nobody-special"]'))
     with pytest.raises(SystemExit):
         devbox.load_mod_specs(["rust"], tmp_path)
 
 
 def test_build_payload_validates_runas(isolated_mods, pubkey, tmp_path):
-    # Same choke point as `# requires:`: a bad target fails before any boot/SSH.
-    _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# runas: wheel\n")
+    # Same choke point as `requires`: a bad target fails before any boot/SSH.
+    _write_project_mod(tmp_path, "rust", _mod('runas = ["wheel"]'))
     with pytest.raises(SystemExit):
         devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]),
                              _global_config(pubkey), "alice")
@@ -957,8 +1002,8 @@ def test_render_manifest_narrows_the_runas_column_to_the_scope():
 
 
 def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
-    # Every shipped mod parses, and its `# runas:` targets are known. Guards the
-    # headers themselves, which nothing else type-checks.
+    # Every shipped mod's `# /// mod` block parses, and its `runas` targets are
+    # known. Guards the metadata itself, which nothing else type-checks.
     names = [*devbox.box_playbook(), *devbox.project_playbook(_project())]
     specs = devbox.load_mod_specs(names, None)
     assert [s.name for s in specs] == names
@@ -970,7 +1015,7 @@ def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
 
 def test_shipped_mods_never_call_sudo(isolated_mods):
     # A mod body runs as an account without sudo. `sudo` in a mod is a bug now:
-    # apt goes through `# packages:`, and real privilege through `# runas: root`.
+    # apt goes through `packages`, and real privilege through `runas = ["root"]`.
     names = [*devbox.box_playbook(), *devbox.project_playbook(_project())]
     for spec in devbox.load_mod_specs(names, None):
         for line in spec.path.read_text().splitlines():

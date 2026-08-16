@@ -11,8 +11,9 @@ each resolved by name with precedence **project > global > built-in**:
 
 Mods are *static files* (lintable, shellcheck-able, diffable, directly runnable)
 that receive context via the **environment** (DEVBOX_AGENT_USER, DEVBOX_JJ_NAME,
-...) rather than `%TOKEN%` substitution, and declare their metadata in header
-comments (`# requires:`, `# runas:`, `# packages:`). The GitHub PAT goes in a
+...) rather than `%TOKEN%` substitution, and declare their metadata (`requires`,
+`runas`, `packages`) in a fenced `# /// mod` block of TOML - PEP 723's shape, so
+a mod stays runnable and shellcheck-able. The GitHub PAT goes in a
 mode-0600 env file the driver sources without tracing, so it never lands in a
 script on disk or a log.
 
@@ -21,13 +22,13 @@ through) and one unprivileged `agent_user` per attached project, with no sudo,
 which that project's AI agents and repo checkout live under. The driver runs as
 the privileged user and drops to the agent for each mod body, because that is
 what a mod almost always configures: a user's home directory. A mod body
-therefore CANNOT sudo - system packages are declared with `# packages:` and
+therefore CANNOT sudo - system packages are declared with `packages` and
 installed by the driver, and the rare mod that genuinely needs privilege says
-`# runas: root`.
+`runas = ["root"]`.
 
 **Two scopes.** A box playbook runs once per box (at `devbox box create` /
 `devbox box sync`) and a project playbook runs once per attachment (at `devbox
-create` / `devbox sync --mods`). `# runas:` already says which half of a mod
+create` / `devbox sync --mods`). `runas` already says which half of a mod
 belongs where, so scoping is a host-side filter over the targets it declares
 (see `scoped_runas`) rather than anything the driver has to understand: the
 manifest it receives has already been narrowed to the current scope.
@@ -58,6 +59,7 @@ import shlex
 import shutil
 import subprocess
 import tarfile
+import tomllib
 from pathlib import Path
 from typing import Optional
 
@@ -78,20 +80,20 @@ PROJECT_MODS_SUBDIR = "mods"
 # privileged account, which is the box's debugging entry point
 # (`devbox ssh --admin`). Fixed and built-in: there is no box config file, so a
 # box grows beyond this only when an attached project contributes a
-# `# runas: root` mod.
+# `runas = ["root"]` mod.
 BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim")
 
 # The project playbook: what one attachment needs inside its own account.
 # Ordering constraints are encoded here: jj + github-auth must precede
 # repo-bootstrap so a private `jj git clone` can authenticate, and dotfiles must
 # precede vim (which installs the plugins ~/.vimrc declares). `dotfiles`/`vim`
-# appear in BOTH playbooks on purpose - each declares `# runas: admin agent`, and
+# appear in BOTH playbooks on purpose - each declares `runas = ["admin", "agent"]`, and
 # each scope runs only its own half. A project's `mods` are appended after this.
 PROJECT_BASE_MODS = ("jj", "github-auth", "dotfiles", "vim", "neovim",
                      "claude-code", "repo-bootstrap")
 
 # Which playbook a provisioning run is executing. The scope decides which
-# `# runas:` targets of each mod run (see scoped_runas); it is resolved entirely
+# `runas` targets of each mod run (see scoped_runas); it is resolved entirely
 # host-side, so the driver just runs the manifest it is handed.
 SCOPE_BOX = "box"
 SCOPE_PROJECT = "project"
@@ -190,45 +192,107 @@ def resolve_mod(name: str, marker_dir: Optional[Path],
         f"{(marker_dir / PROJECT_MARKER_DIR / 'config.toml') if marker_dir else 'the config'}.")
 
 
-# ---- mod metadata (`# requires:` / `# runas:` / `# packages:` headers) -------
-# A mod declares its metadata in header comment lines, e.g.
-#   # requires: jj github-auth
-#   # runas: agent
-#   # packages: jq unzip
-# Values are space/comma-separated; multiple lines of the same key are unioned.
-# A line holds ONLY values (the capture runs to end of line - no trailing inline
-# comment). Parsed statically from the script text; a mod is never executed to
-# read its metadata. Comment headers rather than a structured front matter keep
-# a mod a plain script: directly runnable, shellcheck-able, shebang on line 1.
-_HEADER_RE_CACHE: dict = {}
+# ---- mod metadata (the `# /// mod` block) ------------------------------------
+# A mod declares its metadata in ONE fenced block of comments holding TOML:
+#
+#   # /// mod
+#   # requires = ["jj", "github-auth"]
+#   # runas = ["admin", "agent"]
+#   # packages = ["jq", "unzip"]
+#   # ///
+#
+# The shape is PEP 723's (Python's inline script metadata, what `uv run` reads),
+# which is also LSB init scripts' `### BEGIN INIT INFO` and mise's `#MISE` - the
+# settled answer for "executable script that also carries metadata". Two
+# properties earn it:
+#
+#   Fenced, so the boundary is explicit. The previous format matched
+#   `^# <key>:` anywhere in the file, which made any prose comment that happened
+#   to start that way silently become metadata - several mods discuss
+#   `# packages:` in their header prose and were saved only by not starting a
+#   line with it.
+#
+#   Comment-prefixed, so a mod stays a plain script: shebang on line 1,
+#   `shellcheck mods/*.sh` clean, `./mods/jj.sh` still runs. The payload ships
+#   the file verbatim and the driver just executes it.
+#
+# TOML rather than YAML because `tomllib` is stdlib on our floor (3.11), so it
+# costs no dependency, and because it is already the language of devbox's own
+# config files. Parsed statically; a mod is never executed to read its metadata.
+MOD_METADATA_TYPE = "mod"
+MOD_METADATA_KEYS = ("requires", "runas", "packages")
+
+# PEP 723's reference regex, with the type left general so a mislabeled fence
+# (`# /// script`) is found and reported rather than silently ignored.
+_MOD_BLOCK_RE = re.compile(
+    r"(?m)^# /// (?P<type>[a-zA-Z0-9-]+)$\s(?P<content>(^#(| .*)$\s)+)^# ///$")
+
+# The header format this replaced, recognized only to reject it (see below).
+_LEGACY_HEADER_RE = re.compile(
+    rf"^#\s*(?P<key>{'|'.join(MOD_METADATA_KEYS)}):.*$", re.MULTILINE)
 
 
-def _header_re(key: str):
-    if key not in _HEADER_RE_CACHE:
-        _HEADER_RE_CACHE[key] = re.compile(rf"^#\s*{key}:\s*(.*)$", re.MULTILINE)
-    return _HEADER_RE_CACHE[key]
+def _unprefix(content: str) -> str:
+    """Strip the comment prefix from a fenced block's lines, per PEP 723: drop
+    two characters when the second is a space, otherwise one (a bare `#`)."""
+    return "".join(line[2:] if line[1:2] == " " else line[1:]
+                   for line in content.splitlines(keepends=True))
 
 
-def parse_header(script_text: str, key: str) -> list:
-    """The values of a mod's `# <key>:` header line(s), in first-seen order
-    (deduped). No such line -> []. Static parse only - never runs the mod."""
-    seen = {}
-    for match in _header_re(key).finditer(script_text):
-        for value in match.group(1).replace(",", " ").split():
-            seen.setdefault(value, None)
-    return list(seen)
+def parse_mod_metadata(script_text: str, path=None) -> dict:
+    """The `{key: [value, ...]}` a mod's `# /// mod` block declares, validated.
+    No block -> {} (every key defaults). Static parse only - never runs the mod.
 
+    Validating here rather than at use sites means a typo (`require`, a bare
+    string instead of an array) fails at playbook-resolution time with the file
+    named, before any boot or SSH."""
+    where = f" ({path})" if path else ""
+    blocks = list(_MOD_BLOCK_RE.finditer(script_text))
+    mine = [m for m in blocks if m.group("type") == MOD_METADATA_TYPE]
+    if not mine:
+        # A fence of the wrong type is a typo, not "no metadata": failing here
+        # beats silently running the mod with every default.
+        if blocks:
+            die(f"mod metadata{where}: found a `# /// {blocks[0].group('type')}` "
+                f"block, but devbox reads `# /// {MOD_METADATA_TYPE}`.")
+        # Same reasoning for the format this replaced: an unfenced `# runas: root`
+        # would now parse as no metadata at all and quietly run the mod as the
+        # agent, which is the one failure mode a silent default must not have.
+        legacy = _LEGACY_HEADER_RE.search(script_text)
+        if legacy:
+            die(f"mod metadata{where}: `{legacy.group(0).strip()}` is the old "
+                f"header format, which devbox no longer reads. Move it into a "
+                f"block:\n\n    # /// {MOD_METADATA_TYPE}\n"
+                f'    # {legacy.group("key")} = ["..."]\n    # ///')
+        return {}
+    if len(mine) > 1:
+        die(f"mod metadata{where}: more than one `# /// {MOD_METADATA_TYPE}` "
+            f"block; a mod declares its metadata once.")
 
-def parse_requires(script_text: str) -> list:
-    """The mods a script declares as dependencies (`# requires:`)."""
-    return parse_header(script_text, "requires")
+    try:
+        data = tomllib.loads(_unprefix(mine[0].group("content")))
+    except tomllib.TOMLDecodeError as exc:
+        # The line/column in `exc` is relative to the block, not the file, so
+        # name the block rather than letting it read as a file position.
+        die(f"the `# /// {MOD_METADATA_TYPE}` block{where} is not valid TOML: {exc}")
+
+    unknown = [k for k in data if k not in MOD_METADATA_KEYS]
+    if unknown:
+        die(f"mod metadata{where} has unknown key(s) "
+            f"{', '.join(repr(k) for k in unknown)}; "
+            f"valid keys are {', '.join(MOD_METADATA_KEYS)}.")
+    for key, value in data.items():
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            die(f"mod metadata{where}: `{key}` must be an array of strings, "
+                f'e.g. `{key} = ["a", "b"]`.')
+    return data
 
 
 # Who a mod's body runs as. `agent` (the default) is the unprivileged account
 # that AI agents and the repo checkout live under - the right target for the
 # overwhelming majority of mods, which configure a user's home directory.
 # `admin` is the privileged account, `root` is for the rare mod that genuinely
-# needs privilege for something `# packages:` can't express. A mod may name more
+# needs privilege for something `packages` can't express. A mod may name more
 # than one, and then runs once per target (e.g. dotfiles, for both humans' sake).
 RUNAS_AGENT = "agent"
 RUNAS_ADMIN = "admin"
@@ -237,21 +301,9 @@ RUNAS_TARGETS = (RUNAS_AGENT, RUNAS_ADMIN, RUNAS_ROOT)
 DEFAULT_RUNAS = (RUNAS_AGENT,)
 
 
-def parse_runas(script_text: str) -> list:
-    """The accounts a mod's body runs as (`# runas:`), defaulting to the agent."""
-    return parse_header(script_text, "runas") or list(DEFAULT_RUNAS)
-
-
-def parse_packages(script_text: str) -> list:
-    """The apt packages a mod needs (`# packages:`), installed by the driver as
-    the privileged user before the body runs. This header exists because a mod
-    body runs without sudo: it cannot install its own dependencies."""
-    return parse_header(script_text, "packages")
-
-
 @dataclasses.dataclass
 class ModSpec:
-    """One resolved mod: where its script is and what its headers declared."""
+    """One resolved mod: where its script is and what its metadata declared."""
     name: str
     path: Path
     requires: list
@@ -260,25 +312,26 @@ class ModSpec:
 
 
 def load_mod_specs(names: list, marker_dir: Optional[Path]) -> list:
-    """Resolve every named mod and parse its headers, in playbook order. One read
-    per mod, shared by validation and payload assembly."""
+    """Resolve every named mod and parse its metadata, in playbook order. One
+    read per mod, shared by validation and payload assembly."""
     specs = []
     for name in names:
         path = resolve_mod(name, marker_dir)
-        text = path.read_text()
-        runas = parse_runas(text)
+        meta = parse_mod_metadata(path.read_text(), path)
+        runas = meta.get("runas") or list(DEFAULT_RUNAS)
         unknown = [r for r in runas if r not in RUNAS_TARGETS]
         if unknown:
-            die(f"mod '{name}' has an unknown `# runas:` target "
+            die(f"mod '{name}' has an unknown `runas` target "
                 f"{', '.join(repr(u) for u in unknown)} ({path}); "
                 f"valid targets are {', '.join(RUNAS_TARGETS)}.")
-        specs.append(ModSpec(name=name, path=path, requires=parse_requires(text),
-                             runas=runas, packages=parse_packages(text)))
+        specs.append(ModSpec(name=name, path=path,
+                             requires=meta.get("requires", []), runas=runas,
+                             packages=meta.get("packages", [])))
     return specs
 
 
 def scoped_runas(runas: list, scope: str) -> list:
-    """The `# runas:` targets of a mod that actually run in `scope`.
+    """The `runas` targets of a mod that actually run in `scope`.
 
     A mod that names the agent has an agent half, and that half belongs to a
     project: at box scope it runs everything *except* the agent (so `dotfiles`
@@ -286,7 +339,7 @@ def scoped_runas(runas: list, scope: str) -> list:
     *only* the agent (so attaching a second project doesn't reinstall the admin's
     oh-my-zsh). A mod that never mentions the agent is pure system work and runs
     whole in whichever playbook lists it - which is what lets a project ship a
-    `# runas: root` mod (docker, a driver) onto its shared box.
+    `runas = ["root"]` mod (docker, a driver) onto its shared box.
 
     An empty result means the mod has nothing to do in this scope; the caller
     leaves it out of the manifest entirely."""
@@ -299,7 +352,7 @@ def scoped_runas(runas: list, scope: str) -> list:
 
 def _validate_ordering(specs: list, config_path, prior: Optional[dict] = None) -> None:
     """Fail fast if a mod is in the playbook without its declared dependencies
-    (`# requires:`) ordered ahead of it. Deliberately NOT a resolver: no
+    (`requires`) ordered ahead of it. Deliberately NOT a resolver: no
     topo-sort, no auto-insert - just check the parsed headers against order.
 
     `prior` names mods that already ran in an earlier playbook (the box's, for a
@@ -322,12 +375,12 @@ def _validate_ordering(specs: list, config_path, prior: Optional[dict] = None) -
 
 
 def validate_playbooks(project: ProjectConfig) -> None:
-    """Validate both playbooks' metadata: `# runas:` targets (in load_mod_specs)
-    and `# requires:` ordering. Runs at playbook-resolution time (static,
+    """Validate both playbooks' metadata: `runas` targets (in load_mod_specs)
+    and `requires` ordering. Runs at playbook-resolution time (static,
     instant, before any boot/SSH).
 
-    The box playbook is indexed first, so a project mod's `# requires:
-    dotfiles-packages` is satisfied by the box having run it - box mods are
+    The box playbook is indexed first, so a project mod's `requires =
+    ["dotfiles-packages"]` is satisfied by the box having run it - box mods are
     always "earlier" than any attachment. Validates the FULL configured playbooks:
     callers must pass the configured project even for selective runs (`devbox
     sync --mods=a`), since deps are about the box's cumulative state, not the
@@ -439,8 +492,8 @@ def build_payload(project: ProjectConfig, gc: GlobalConfig, admin_user: str) -> 
     context + resolved mods), as PayloadFiles. Tarred and run over SSH by both
     `devbox create` and `devbox sync --mods` - the identical set either way.
 
-    Validates BOTH configured playbooks' metadata (`# runas:` targets and
-    `# requires:` ordering) first. This is the single choke point: build_payload
+    Validates BOTH configured playbooks' metadata (`runas` targets and
+    `requires` ordering) first. This is the single choke point: build_payload
     always builds the whole manifest (even for a selective `devbox sync
     --mods=a`, which validates here and then runs only the selected subset), so
     deps are checked against the box's cumulative state, not the subset."""

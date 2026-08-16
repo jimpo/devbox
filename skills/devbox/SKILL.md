@@ -165,7 +165,9 @@ a node mod):
    ```bash
    #!/usr/bin/env bash
    #
-   # packages: clang libssl-dev
+   # /// mod
+   # packages = ["clang", "libssl-dev"]
+   # ///
    #
    set -euo pipefail
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -173,18 +175,24 @@ a node mod):
    # ... cargo tools, `claude plugin install rust-analyzer-lsp`, etc.
    ```
 
-**A mod body has no sudo.** It runs as the project's unprivileged account, so
-`sudo` in a mod is a bug. Declare apt packages with a `# packages:` header (the
-driver installs them as the privileged user beforehand), and use
-`# runas: root` for the rare step that genuinely needs privilege. `# runas:`
-defaults to `agent` and also accepts `admin`; a mod naming more than one target
-runs once per target.
+**Metadata goes in a `# /// mod` block** of comments holding TOML, right after
+the shebang (PEP 723's shape, so the mod stays a runnable, shellcheck-able
+script). The keys are `requires`, `runas` and `packages`, each an array of
+strings, all optional. devbox parses it host-side and hard-errors on an unknown
+key, a bad value or a duplicate block before any boot/SSH. Don't use the old
+`# packages: jq` header lines — a fenced block is the only form devbox reads now.
 
-`# runas:` also decides **scope**: a mod that names `agent` runs only its agent
+**A mod body has no sudo.** It runs as the project's unprivileged account, so
+`sudo` in a mod is a bug. Declare apt packages with `packages` (the driver
+installs them as the privileged user beforehand), and use `runas = ["root"]` for
+the rare step that genuinely needs privilege. `runas` defaults to `["agent"]` and
+also accepts `admin`; a mod naming more than one target runs once per target.
+
+`runas` also decides **scope**: a mod that names `agent` runs only its agent
 half in a project playbook (and everything else in the box playbook — that is how
 `dotfiles` sets up the privileged account once per box and each account
 separately). A mod that names no agent target is pure system work and runs whole
-in whichever playbook lists it — so a project's `# runas: root` mod (docker, a
+in whichever playbook lists it — so a project's `runas = ["root"]` mod (docker, a
 driver) lands on the shared box when it attaches. Prefer `$HOME` installs:
 anything system-wide is shared with every other project on that box, and devbox
 prints a warning naming the mod.
@@ -196,9 +204,8 @@ Every mod must be idempotent (it runs on `create` *and* every `devbox sync
 init script it ships, and the old `.devbox/cloud-config.yaml` fragment no longer
 exists.
 
-A mod that needs another mod to run first declares it in a header comment:
-`# requires: jj github-auth` (names space/comma-separated; **only** dep names —
-no trailing inline comment). devbox validates this statically at playbook
+A mod that needs another mod to run first declares it in its metadata block:
+`requires = ["jj", "github-auth"]`. devbox validates this statically at playbook
 resolution (before boot) and hard-errors if a required mod is missing or ordered
 after the mod needing it — it doesn't reorder, just enforces order. The box
 playbook is indexed first, so a project mod may depend on a box mod.

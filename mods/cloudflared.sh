@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
+# /// mod
+# runas = ["root"]
+# ///
+#
 # mod: cloudflared - Cloudflare's `cloudflared` daemon from their apt repo. When
 # CLOUDFLARE_TOKEN is set, also installs it as a systemd service running that
 # tunnel. No-op service setup when CLOUDFLARE_TOKEN is unset.
 #
-# runas: root
-#
 # Root because it adds an apt repo, installs from it and registers a systemd
-# unit. The package cannot be a `# packages:` entry: it lives in Cloudflare's
+# unit. The package cannot be a `packages` entry: it lives in Cloudflare's
 # own repo, which does not exist until this mod adds it.
 #
 # Idempotency: the keyring/repo files and apt install overwrite/reconcile

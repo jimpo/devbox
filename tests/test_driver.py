@@ -3,8 +3,8 @@ privileged commands.
 
 The driver is bash that runs on a booted box as the privileged user, so its real
 effects (useradd, apt, dropping to another account) cannot run in a test. What
-CAN be tested is all the logic around them: manifest parsing, the `# runas:`
-dispatch, `# packages:` ordering, selective runs, failure propagation, and the
+CAN be tested is all the logic around them: manifest parsing, the runas
+dispatch, package-install ordering, selective runs, failure propagation, and the
 isolation assertions. This module puts fake `sudo`/`useradd`/`id`/`getent`/... on
 PATH ahead of the real ones and asserts on what the driver tried to do.
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
+# /// mod
+# requires = ["dotfiles"]
+# runas = ["admin", "agent"]
+# ///
+#
 # mod: vim - vim-plug plus the plugins declared in ~/.vimrc (base16-vim /
 # vim-go / rust.vim). Depends on the dotfiles mod having written ~/.vimrc, so it
 # is ordered after it in the base playbook.
-#
-# requires: dotfiles
-# runas: admin agent
 #
 # In both playbooks, matching `dotfiles`: the .vimrc it installs calls
 # plug#begin(), so a user with the dotfiles but without plug.vim gets an error on

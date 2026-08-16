@@ -15,9 +15,16 @@
 # created HERE, in the preamble below - not at first boot, so that attaching a
 # project reconverges an existing box instead of needing a new one. Almost every
 # mod configures a user's home directory, and the user it should configure is the
-# agent, so `# runas:` defaults to the agent and a mod body runs WITHOUT sudo.
-# System packages are declared `# packages:` and installed by this driver; the
-# rare mod that truly needs privilege says `# runas: root`.
+# agent, so a mod body runs WITHOUT sudo. System packages are installed by this
+# driver instead, and the rare mod that truly needs privilege gets a different
+# runas target.
+#
+# THIS SCRIPT NEVER PARSES A MOD. Mod metadata (the `# /// mod` TOML block) is
+# read host-side by provision.py, which resolves, validates and orders the
+# playbook and hands over the result as `manifest`. What arrives here is already
+# a decision - name, runas targets, packages - so the columns below are the only
+# vocabulary this script has, and a mod file is opaque to it: it is executed,
+# never read.
 #
 # TWO KINDS OF RUN, distinguished by whether DEVBOX_AGENT_USER is set:
 #   attachment run - one project's playbook, in its own account (the usual case)
@@ -281,7 +288,7 @@ target_user() {
   esac
 }
 
-# The account whose [env] creds a `# runas:` target reads. root has no env file
+# The account whose [env] creds a runas target reads. root has no env file
 # of its own; it gets the privileged user's, so a mod that needs both privilege
 # and a credential (`owner = "admin"` host-side) can have both.
 env_owner() {
@@ -359,14 +366,14 @@ for i in "${SELECTED[@]}"; do
   fi
 
   install_packages "${MOD_PACKAGES[$i]}" || {
-    echo "devbox: mod '$name' FAILED installing its '# packages:' - stopping" >&2
+    echo "devbox: mod '$name' FAILED installing its packages - stopping" >&2
     exit 1
   }
 
   IFS=',' read -r -a targets <<< "${MOD_RUNAS[$i]}"
   for target in "${targets[@]}"; do
     if ! user="$(target_user "$target")"; then
-      echo "devbox: mod '$name' has an unusable '# runas:' target '$target'" \
+      echo "devbox: mod '$name' has an unusable runas target '$target'" \
            "(this run has no agent account)" >&2
       exit 2
     fi

@@ -34,7 +34,7 @@ from .util import die
 #
 # Each entry lands in exactly one of the two files, per its `owner` (see
 # config.EnvVar): this project's agent by default, the box's privileged user for
-# a cred that only a `# runas: admin|root` mod needs. Homes are 0750 with a
+# a cred that only an admin/root mod needs. Homes are 0750 with a
 # per-user group and the files 0600, so no agent can read another project's
 # creds, nor the admin's; the privileged side can read them all.
 GUEST_ENV_REL = ".config/devbox/env"

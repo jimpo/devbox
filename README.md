@@ -73,7 +73,7 @@ radius.
 **What sharing a box costs.** Worth knowing before you put two projects on one
 machine:
 
-- **One apt namespace.** A `# packages:` line or a `# runas: root` mod from one
+- **One apt namespace.** A `packages` entry or a `runas = ["root"]` mod from one
   project upgrades a library every other project builds against. Per-project
   toolchains belong in `$HOME` (rustup, uv, nvm — which is already how every
   base mod but `dotfiles-packages` works). devbox warns when a project run
@@ -88,7 +88,7 @@ machine:
   unrelated projects.
 - **`/proc/<pid>/cmdline` is world-readable**, so one agent can read another's
   argv. (`environ` is 0400, so the env file itself stays private.) A
-  `# runas: root` box mod mounting `/proc` with `hidepid=2` is the fix if that
+  `runas = ["root"]` box mod mounting `/proc` with `hidepid=2` is the fix if that
   matters to you; devbox doesn't ship one.
 - **Shared CPU, RAM and disk.** N agents running `cargo build` contend, and one
   can ENOSPC the rest. Box sizing is now an N-project decision.
@@ -109,7 +109,7 @@ machine:
 
 The trade-off is real and deliberate: **the agent cannot install system
 packages.** Where it used to `sudo apt-get install` its way out of a missing
-build dependency mid-task, it now needs a `# packages:` line on a mod and a
+build dependency mid-task, it now needs a `packages` entry on a mod and a
 `devbox sync --mods`. First boot installs `build-essential` and `pkg-config` to
 cover the common case.
 
@@ -544,12 +544,12 @@ before `dotfiles`, the per-user half). The 95% case is "just add rust":
 **A box takes no config, so its playbook is fixed** — `dotfiles-packages` is the
 one genuinely box-level mod in the base (apt, as root); everything else installs
 into somebody's home. A project that needs more *system* state ships a
-`# runas: root` mod of its own, which runs on the shared box when it attaches;
+`runas = ["root"]` mod of its own, which runs on the shared box when it attaches;
 devbox prints a warning naming it, since that writes state every other project
 sees.
 
 **`dotfiles` and `vim` are in both playbooks on purpose** — each declares
-`# runas: admin agent`, and each scope runs only its own half. The box runs the
+`runas = ["admin", "agent"]`, and each scope runs only its own half. The box runs the
 admin half once (so `devbox box ssh`, the debugging shell, is usable) and each
 attachment runs the agent half in its own account, without redoing the admin's.
 
@@ -563,12 +563,12 @@ mods/*.sh                     # built-in, at the repo root
 ```
 
 **Static files, env for context.** Mods are static (lintable, shellcheck-able,
-diffable, and directly runnable — the metadata below is comment headers, so the
-shebang stays on line 1) and receive context via the **environment**
+diffable, and directly runnable — the metadata below lives in a fenced block of
+comments, so the shebang stays on line 1) and receive context via the **environment**
 (`DEVBOX_AGENT_USER`, `DEVBOX_ADMIN_USER`, `DEVBOX_JJ_NAME`, `DEVBOX_REPO_URL`,
 …), not `%TOKEN%` substitution. Each mod also sources the `[env]` creds file of
 the account that owns them (see [Credentials](#credentials-env)) — its target
-user's, or the privileged user's for a `# runas: root` mod — so a mod that needs
+user's, or the privileged user's for a `runas = ["root"]` mod — so a mod that needs
 a secret (`repo-bootstrap` cloning a private repo with `GITHUB_TOKEN`,
 `cloudflared` registering a tunnel) has it, and it never lands in a script on
 disk, in a command line, or in a log.
@@ -576,13 +576,41 @@ disk, in a command line, or in a log.
 **A mod body runs without sudo.** The driver runs as the privileged user and
 drops to the agent for each mod, because configuring a user's home directory is
 what a mod almost always does. So `sudo` inside a mod is a bug — use the two
-headers below instead. This is also why the payload carries no secrets: it has to
+metadata keys below instead. This is also why the payload carries no secrets: it has to
 be readable by the account the driver drops into.
 
-**Who a mod runs as (`# runas:`).** Default `agent`. Also `admin` (the privileged
-account) and `root`. A mod may name more than one, and then runs once per target
-that is in scope. That header is also what decides scope, so there is no second,
-drifting `# scope:` key to keep in sync:
+**Metadata lives in a `# /// mod` block.** A mod declares `requires`, `runas`
+and `packages` in one fenced block of comments holding TOML, directly after the
+shebang:
+
+```bash
+#!/usr/bin/env bash
+#
+# /// mod
+# requires = ["jj", "github-auth"]
+# runas = ["admin", "agent"]
+# packages = ["jq", "unzip"]
+# ///
+```
+
+The shape is [PEP 723](https://peps.python.org/pep-0723/)'s — Python's inline
+script metadata, what `uv run` reads — and the same idea as LSB init scripts'
+`### BEGIN INIT INFO` or mise's `#MISE`. Being **fenced** means the boundary is
+explicit, so prose elsewhere in the file that happens to mention a key is just
+prose. Being **comment-prefixed** means a mod stays a plain script: shebang on
+line 1, `shellcheck` clean, `./mods/rust.sh` still runs. TOML rather than YAML
+because it's `tomllib` in the standard library (no dependency) and it is already
+the language of devbox's own config files.
+
+Every key is optional, each is an array of strings, and devbox hard-errors on an
+unknown key, a malformed value, a duplicate block, or a mislabeled fence — at
+playbook-resolution time, before any boot or SSH. Parsing is entirely host-side;
+the driver receives a resolved manifest and never reads a mod file.
+
+**Who a mod runs as (`runas`).** Default `["agent"]`. Also `admin` (the
+privileged account) and `root`. A mod may name more than one, and then runs once
+per target that is in scope. That key is also what decides scope, so there is no
+second, drifting `scope` key to keep in sync:
 
 | the mod declares | in the **box** playbook it runs | in a **project** playbook |
 |---|---|---|
@@ -593,7 +621,7 @@ The filter is applied entirely host-side — the manifest the driver receives ha
 already been narrowed — so the driver itself never reasons about scopes.
 Validated before any boot/SSH; an unknown target is a hard error.
 
-**System packages (`# packages:`).** `# packages: jq unzip` — apt-installed by
+**System packages (`packages`).** `packages = ["jq", "unzip"]` — apt-installed by
 the driver, as the privileged user, before the body runs. This is the sanctioned
 route now that a mod body has no sudo. The index is refreshed once per run. Note
 that apt is box-wide: a package one project asks for is installed for everybody.
@@ -638,19 +666,17 @@ shadowable by a project's `.devbox/mods/`, and must not be skippable via
 
 **Idempotency contract:** every mod either overwrites unconditionally or guards
 on "already done", so `create` and every reconverge are safe. Each built-in
-mod's header documents which pattern it uses.
+mod's header prose documents which pattern it uses.
 
-**Declaring dependencies (`# requires:`):** a mod that depends on another running
-first declares it with a header comment — `# requires: jj github-auth` (names
-space/comma-separated; repeat the line to add more, they're unioned). devbox
-parses this statically and, at playbook-resolution time (before any boot/SSH),
-hard-errors if a required mod is missing from either playbook or listed
-*after* the mod that needs it. The box playbook is indexed first, so a project
-mod may depend on a box mod - the machine exists before any attachment does. It is **not** a resolver — it never reorders or
-auto-inserts; it just validates order (so a future reorder can't silently break
-things). The `# requires:` line holds **only** dep names — no trailing inline
-comment (the parse runs to end of line). Built-in examples: `repo-bootstrap`
-`# requires: jj github-auth`, `vim` `# requires: dotfiles`.
+**Declaring dependencies (`requires`):** a mod that depends on another running
+first declares it as `requires = ["jj", "github-auth"]`. devbox parses this
+statically and, at playbook-resolution time (before any boot/SSH), hard-errors if
+a required mod is missing from either playbook or listed *after* the mod that
+needs it. The box playbook is indexed first, so a project mod may depend on a box
+mod — the machine exists before any attachment does. It is **not** a resolver —
+it never reorders or auto-inserts; it just validates order (so a future reorder
+can't silently break things). Built-in examples: `repo-bootstrap`
+`requires = ["jj", "github-auth"]`, `vim` `requires = ["dotfiles"]`.
 
 ### Example: a rust project
 
@@ -666,10 +692,12 @@ mods = ["rust"]
 # .devbox/mods/rust.sh
 #!/usr/bin/env bash
 #
-# packages: clang libssl-dev
+# /// mod
+# packages = ["clang", "libssl-dev"]
+# ///
 #
-# No `# runas:` — it defaults to the agent, whose $HOME this installs into.
-# No `sudo` either: the body has none. Packages go in the header above, where
+# No `runas` — it defaults to the agent, whose $HOME this installs into.
+# No `sudo` either: the body has none. Packages go in the block above, where
 # the driver installs them as the privileged user before this runs.
 set -euo pipefail
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -747,7 +775,7 @@ CLOUDFLARE_TOKEN = { value = "...", owner = "admin" }    # the privileged user's
 the account that does the work, and the right place for anything an agent or a
 mod configuring its home needs. The table form with `owner = "admin"` **moves**
 the entry to the privileged user instead: it never enters the agent's
-environment, and a privileged mod (`# runas: admin`, or `# runas: root`, which
+environment, and a privileged mod (`runas = ["admin"]`, or `["root"]`, which
 reads the privileged user's file) gets it. That is for creds an agent has no use
 for — `cloudflared`'s tunnel token, say. `owner = "agent"` is the default and
 spells out the common case.

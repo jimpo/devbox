@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
+# /// mod
+# requires = ["jj", "github-auth"]
+# ///
+#
 # mod: repo-bootstrap - get the project's code onto the box per [repo] in
 # .devbox/config.toml. "clone" pulls an existing repo via jj; "push" leaves an
 # empty colocated jj+git repo ready to receive `jj git push` from the host;
 # "none" is a no-op. Ordered last in the base playbook (after jj + github-auth,
 # so a private clone can authenticate).
-#
-# requires: jj github-auth
 #
 # Idempotency: guarded on the target directory, so a reconverge is a no-op once
 # the repo exists.
