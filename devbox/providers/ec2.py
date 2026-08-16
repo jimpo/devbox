@@ -12,7 +12,8 @@ Tags stamped on every instance:
   devbox:managed = "true"       (the filter for "mine")
   devbox:name    = <name>       (devbox's canonical name, e.g. ec2-binius-arm;
                                  how commands address the instance)
-  devbox:project = <project>
+  devbox:admin-user = <user>    (the box's privileged account; needed host-side
+                                 to build the SSH alias before logging in)
   devbox:created-at = <ISO-8601>
   Name           = devbox-<bare> (console display; the provider prefix is
                                   redundant AWS-side, so ec2-binius-arm shows
@@ -23,14 +24,16 @@ from __future__ import annotations
 from typing import Optional
 
 from ..config import (AwsConfig, DEFAULT_AMI_NAME_FILTER, Ec2Config,
-                      Ec2ProjectConfig, GlobalConfig, parse_instance_name)
+                      Ec2BoxConfig, GlobalConfig, parse_instance_name)
 from ..util import die
 from .awsauth import error_code, make_client
 from .base import Instance, InstanceSpec, Provider
 
 MANAGED_TAG = "devbox:managed"
 NAME_TAG = "devbox:name"
-PROJECT_TAG = "devbox:project"
+# The box's privileged account. Recorded here rather than host-side because
+# devbox needs it to build the box's SSH alias before it can log in and ask.
+ADMIN_USER_TAG = "devbox:admin-user"
 CREATED_AT_TAG = "devbox:created-at"
 
 # Instance states that still "exist" (terminated instances linger in
@@ -110,7 +113,7 @@ class Ec2Provider(Provider):
             out.append(Instance(
                 name=name,
                 provider="ec2",
-                project=self._tag(inst, PROJECT_TAG),
+                admin_user=self._tag(inst, ADMIN_USER_TAG),
                 state=inst.get("State", {}).get("Name", "unknown"),
                 resources=inst.get("InstanceType", "?"),
                 created_at=self._tag(inst, CREATED_AT_TAG),
@@ -142,7 +145,7 @@ class Ec2Provider(Provider):
         return inst
 
     # ---- AMI lookup ---------------------------------------------------------
-    def _resolve_ami(self, cfg: Ec2ProjectConfig) -> str:
+    def _resolve_ami(self, cfg: Ec2BoxConfig) -> str:
         if cfg.ami:
             return cfg.ami
         name_filter = cfg.ami_name_filter or DEFAULT_AMI_NAME_FILTER[cfg.architecture]
@@ -194,7 +197,7 @@ class Ec2Provider(Provider):
                 "Tags": [
                     {"Key": MANAGED_TAG, "Value": "true"},
                     {"Key": NAME_TAG, "Value": spec.name},
-                    {"Key": PROJECT_TAG, "Value": spec.project},
+                    {"Key": ADMIN_USER_TAG, "Value": spec.admin_user},
                     {"Key": CREATED_AT_TAG, "Value": spec.created_at},
                     {"Key": "Name", "Value": f"devbox-{bare}"},
                 ],

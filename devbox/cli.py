@@ -152,7 +152,7 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
 
     spec = InstanceSpec(
         name=name,
-        project=project.project,
+        admin_user=project.user,
         provider=provider_name,
         disk_gb=project.disk_gb,
         user_data=render_init_script(project, gc, instance_name=name),
@@ -381,14 +381,14 @@ def cmd_list(args: argparse.Namespace, gc: GlobalConfig, project: Optional[Proje
     if not instances:
         print("No devbox-managed instances.")
         return
-    rows = [("NAME", "PROVIDER", "PROJECT", "STATE", "RESOURCES", "UP")]
+    rows = [("NAME", "PROVIDER", "STATE", "RESOURCES", "UP")]
     for i in instances:
         up = "—"
         if i.state == "running":
             up = _format_age(i.created_at)
             if i.cost_hint:
                 up += " ($)"  # this instance is costing money while running
-        rows.append((i.name, i.provider, i.project or "—", i.state, i.resources, up))
+        rows.append((i.name, i.provider, i.state, i.resources, up))
     _print_table(rows)
 
 

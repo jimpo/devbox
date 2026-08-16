@@ -57,22 +57,25 @@ def get_ip(uri: str, name: str) -> Optional[str]:
 
 
 # ---- <metadata> stamp & instance discovery ----------------------------------
-def build_metadata_xml(project: str, provider: str, created_at: str) -> str:
-    """The <devbox> element stamped into a domain's <metadata> at create."""
+def build_metadata_xml(admin_user: str, provider: str, created_at: str) -> str:
+    """The <devbox> element stamped into a domain's <metadata> at create.
+
+    `<user>` is the box's privileged account: devbox needs it to build the box's
+    SSH alias before it can log in and ask, so the instance has to carry it."""
     dev = ET.Element("devbox", {"xmlns": DEVBOX_METADATA_NS})
-    ET.SubElement(dev, "project").text = project
+    ET.SubElement(dev, "user").text = admin_user
     ET.SubElement(dev, "provider").text = provider
     ET.SubElement(dev, "createdAt").text = created_at
     ET.SubElement(dev, "managedBy").text = "devbox"
     return ET.tostring(dev, encoding="unicode")
 
 
-def stamp_domain(uri: str, name: str, project: str, provider: str, created_at: str) -> None:
+def stamp_domain(uri: str, name: str, admin_user: str, provider: str, created_at: str) -> None:
     """Mark a freshly-created domain as devbox-managed. Written to both the live
     and persistent config: `list` reads a running domain's *live* XML, so a
     config-only stamp would leave a just-created (running) box invisible until it
     was restarted."""
-    xml = build_metadata_xml(project, provider, created_at)
+    xml = build_metadata_xml(admin_user, provider, created_at)
     r = virsh(uri, "metadata", name, "--live", "--config",
               "--uri", DEVBOX_METADATA_NS, "--key", DEVBOX_METADATA_KEY, "--set", xml,
               check=False, capture=True)
@@ -110,7 +113,9 @@ def read_domain_instance(uri: str, name: str) -> Optional[dict]:
 
     return {
         "name": name,
-        "project": stamp("project"),
+        # Absent on a box created before the stamp existed; the caller falls back
+        # to the host's $USER, which is what such a box was created with.
+        "admin_user": stamp("user"),
         "provider": stamp("provider") or "libvirt",
         "created_at": stamp("createdAt"),
         "vcpus": intval("vcpu"),
@@ -205,10 +210,10 @@ class LibvirtProvider(Provider):
             out.append(Instance(
                 name=info["name"],
                 provider="libvirt",
-                project=info["project"],
                 state=domain_state(self.uri, name) or "unknown",
                 resources=_format_resources(info["vcpus"], info["memory_kib"]),
                 created_at=info["created_at"],
+                admin_user=info["admin_user"],
             ))
         out.sort(key=lambda i: i.name)
         return out
@@ -260,7 +265,7 @@ class LibvirtProvider(Provider):
 
         # Stamp the domain so `devbox list` recognizes it (and, from day one,
         # records provider + created-at for a future auto-stop reaper).
-        stamp_domain(self.uri, spec.name, spec.project, spec.provider, spec.created_at)
+        stamp_domain(self.uri, spec.name, spec.admin_user, spec.provider, spec.created_at)
 
     def _ensure_base_image(self) -> Path:
         """The shared, cached, GPG-verified base cloud image (one per host,

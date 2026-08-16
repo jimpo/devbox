@@ -21,7 +21,8 @@ Tags stamped on every instance (same keys as EC2, but Lightsail spells a tag
   devbox:managed = "true"       (the filter for "mine")
   devbox:name    = <name>       (devbox's canonical name, e.g. aws-binius;
                                  how commands address the instance)
-  devbox:project = <project>
+  devbox:admin-user = <user>    (the box's privileged account; needed host-side
+                                 to build the SSH alias before logging in)
   devbox:created-at = <ISO-8601>
 
 The Lightsail-side `instanceName` is the BARE name (aws-binius is created as
@@ -33,14 +34,16 @@ from __future__ import annotations
 from typing import Optional
 
 from ..config import (AwsConfig, DEFAULT_LIGHTSAIL_BUNDLE, GlobalConfig,
-                      LightsailProjectConfig, parse_instance_name)
+                      LightsailBoxConfig, parse_instance_name)
 from ..util import die
 from .awsauth import make_client
 from .base import Instance, InstanceSpec, Provider
 
 MANAGED_TAG = "devbox:managed"
 NAME_TAG = "devbox:name"
-PROJECT_TAG = "devbox:project"
+# The box's privileged account. Recorded here rather than host-side because
+# devbox needs it to build the box's SSH alias before it can log in and ask.
+ADMIN_USER_TAG = "devbox:admin-user"
 CREATED_AT_TAG = "devbox:created-at"
 
 
@@ -116,7 +119,7 @@ class LightsailProvider(Provider):
             out.append(Instance(
                 name=name,
                 provider="aws",
-                project=self._tag(inst, PROJECT_TAG),
+                admin_user=self._tag(inst, ADMIN_USER_TAG),
                 state=inst.get("state", {}).get("name", "unknown"),
                 resources=inst.get("bundleId", "?"),
                 created_at=self._tag(inst, CREATED_AT_TAG),
@@ -151,7 +154,7 @@ class LightsailProvider(Provider):
     def create(self, spec: InstanceSpec) -> None:
         # Unlike [ec2] (which needs an instance_type), [lightsail] is entirely
         # optional: every field has a default, so an absent section is fine.
-        cfg = spec.lightsail or LightsailProjectConfig()
+        cfg = spec.lightsail or LightsailBoxConfig()
 
         # The AWS-side name drops the redundant provider prefix (the instance is
         # already known to be on Lightsail): aws-binius -> binius.
@@ -189,7 +192,7 @@ class LightsailProvider(Provider):
             tags=[
                 {"key": MANAGED_TAG, "value": "true"},
                 {"key": NAME_TAG, "value": spec.name},
-                {"key": PROJECT_TAG, "value": spec.project},
+                {"key": ADMIN_USER_TAG, "value": spec.admin_user},
                 {"key": CREATED_AT_TAG, "value": spec.created_at},
             ],
         )

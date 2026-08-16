@@ -305,7 +305,7 @@ class SyncEntry:
 
 
 @dataclasses.dataclass
-class Ec2ProjectConfig:
+class Ec2BoxConfig:
     """Per-project `[ec2]` launch defaults (cfleet's "instance template")."""
     instance_type: str
     architecture: str = "x86_64"           # "x86_64" | "arm64"
@@ -317,7 +317,7 @@ class Ec2ProjectConfig:
 
 
 @dataclasses.dataclass
-class LightsailProjectConfig:
+class LightsailBoxConfig:
     """Per-project `[lightsail]` launch defaults for the `aws` provider. Every
     field is optional: `provider = "aws"` with no `[lightsail]` section at all
     launches on pure defaults. (The section name intentionally differs from the
@@ -360,8 +360,8 @@ class ProjectConfig:
     # box, overriding the global [env] per-key (see sync.py). .devbox/config.toml
     # is git-excluded, so hardcoding scoped creds here is acceptable.
     env: dict = dataclasses.field(default_factory=dict)
-    ec2: Optional[Ec2ProjectConfig] = None
-    lightsail: Optional[LightsailProjectConfig] = None
+    ec2: Optional[Ec2BoxConfig] = None
+    lightsail: Optional[LightsailBoxConfig] = None
 
 
 def _load_toml(path: Path) -> dict:
@@ -441,7 +441,7 @@ def _resolve_sync(data: dict, config_path: Path, repo: RepoConfig) -> list:
     return entries
 
 
-def _resolve_ec2_project_config(data: dict, config_path: Path) -> Optional[Ec2ProjectConfig]:
+def _resolve_ec2_project_config(data: dict, config_path: Path) -> Optional[Ec2BoxConfig]:
     ec2_data = data.get("ec2")
     if ec2_data is None:
         return None
@@ -451,7 +451,7 @@ def _resolve_ec2_project_config(data: dict, config_path: Path) -> Optional[Ec2Pr
     arch = ec2_data.get("architecture", "x86_64")
     if arch not in ("x86_64", "arm64"):
         die(f"{config_path}: [ec2] architecture must be 'x86_64' or 'arm64' (got {arch!r})")
-    return Ec2ProjectConfig(
+    return Ec2BoxConfig(
         instance_type=instance_type,
         architecture=arch,
         ami=ec2_data.get("ami"),
@@ -462,14 +462,14 @@ def _resolve_ec2_project_config(data: dict, config_path: Path) -> Optional[Ec2Pr
     )
 
 
-def _resolve_lightsail_project_config(data: dict, config_path: Path) -> Optional[LightsailProjectConfig]:
+def _resolve_lightsail_project_config(data: dict, config_path: Path) -> Optional[LightsailBoxConfig]:
     """Parse the optional `[lightsail]` section. Returns None when absent - the
     provider substitutes an all-defaults config, so `provider = "aws"` alone is
     a complete project."""
     ls_data = data.get("lightsail")
     if ls_data is None:
         return None
-    return LightsailProjectConfig(
+    return LightsailBoxConfig(
         bundle=ls_data.get("bundle"),
         blueprint=ls_data.get("blueprint", DEFAULT_LIGHTSAIL_BLUEPRINT),
         availability_zone=ls_data.get("availability_zone"),

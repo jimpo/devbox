@@ -9,40 +9,53 @@ import abc
 import dataclasses
 from typing import Optional
 
-from ..config import Ec2ProjectConfig, LightsailProjectConfig
+from ..config import Ec2BoxConfig, LightsailBoxConfig
 
 
 @dataclasses.dataclass
 class InstanceSpec:
-    """What `create` needs to launch one instance. Common fields plus the
+    """What `create` needs to launch one box. Common fields plus the
     provider-specific bits each backend reads (libvirt: vcpus/memory_mib; ec2:
     the [ec2] launch config; aws/Lightsail: the [lightsail] launch config, which
-    may be None since all of its fields have defaults)."""
+    may be None since all of its fields have defaults).
+
+    `admin_user` is stamped onto the instance because the host needs it to build
+    the box's SSH alias *before* it can log in to ask - see `Instance`."""
     name: str
-    project: str
+    admin_user: str
     provider: str
     disk_gb: int
     user_data: str        # rendered init script (first-boot base setup)
     created_at: str       # ISO-8601, stamped onto the instance
     vcpus: Optional[int] = None
     memory_mib: Optional[int] = None
-    ec2: Optional[Ec2ProjectConfig] = None
-    lightsail: Optional[LightsailProjectConfig] = None
+    ec2: Optional[Ec2BoxConfig] = None
+    lightsail: Optional[LightsailBoxConfig] = None
 
 
 @dataclasses.dataclass
 class Instance:
-    """One row of `devbox list`. `resources` is provider-formatted (libvirt:
+    """One row of `devbox box list`. `resources` is provider-formatted (libvirt:
     vCPU/RAM; ec2: the instance type; aws: the Lightsail bundle id). `cost_hint`
-    flags a paid provider so the listing can mark running instances that are
-    costing money."""
+    flags a paid provider so the listing can mark running boxes that are costing
+    money.
+
+    `admin_user` is the box's privileged account. It is recorded on the instance
+    rather than in host-side config because devbox needs it to build the box's
+    SSH alias before it can connect - and because it must be the same answer from
+    any workstation. A box created before the stamp existed reports None; callers
+    fall back to the host's own $USER, which is what it was created with.
+
+    There is deliberately no `project` field: a box hosts as many projects as
+    attach to it, and the answer lives on the box (`/etc/devbox/projects/`), not
+    in a launch-time tag. `devbox box list --attached` reads it from there."""
     name: str
     provider: str
-    project: Optional[str]
     state: str
     resources: str
     created_at: Optional[str]
     cost_hint: bool = False
+    admin_user: Optional[str] = None
 
 
 class Provider(abc.ABC):
@@ -74,3 +87,8 @@ class Provider(abc.ABC):
     @abc.abstractmethod
     def list(self) -> list:
         """Instances this provider manages, as Instance rows."""
+
+    def get(self, name: str) -> Optional[Instance]:
+        """One instance by canonical name, or None. Filters `list()`; a backend
+        with a cheaper single-instance lookup can override."""
+        return next((i for i in self.list() if i.name == name), None)

@@ -1062,7 +1062,7 @@ def test_cmd_create_passes_lightsail_config_into_spec(monkeypatch, tmp_path, pub
     project = dataclasses.replace(
         _project(marker_dir=tmp_path),
         provider="aws",
-        lightsail=devbox.LightsailProjectConfig(bundle="medium_3_0"),
+        lightsail=devbox.LightsailBoxConfig(bundle="medium_3_0"),
     )
     monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: _FakeProvider())
     monkeypatch.setattr(devbox.cli, "_check_name_unique", lambda gc, name: None)
@@ -1092,7 +1092,7 @@ def _domain_xml(metadata_inner="", vcpu=6, memory_kib=12582912):
 
 
 def test_build_metadata_xml_roundtrips_through_reader(monkeypatch):
-    stamp = devbox.build_metadata_xml("myproj", "libvirt", "2026-07-21T10:00:00+00:00")
+    stamp = devbox.build_metadata_xml("alice", "libvirt", "2026-07-21T10:00:00+00:00")
     dumpxml = _domain_xml(metadata_inner=stamp, vcpu=4, memory_kib=8388608)
     monkeypatch.setattr(
         devbox.providers.libvirt, "virsh",
@@ -1100,7 +1100,7 @@ def test_build_metadata_xml_roundtrips_through_reader(monkeypatch):
     )
     info = devbox.read_domain_instance("qemu:///system", "demo")
     assert info == {
-        "name": "demo", "project": "myproj", "provider": "libvirt",
+        "name": "demo", "admin_user": "alice", "provider": "libvirt",
         "created_at": "2026-07-21T10:00:00+00:00", "vcpus": 4, "memory_kib": 8388608,
     }
 
@@ -1151,7 +1151,7 @@ def test_get_provider_unknown_dies():
 
 
 def test_libvirt_provider_list_returns_instances(monkeypatch):
-    stamp = devbox.build_metadata_xml("proj", "libvirt", "2026-07-21T10:00:00+00:00")
+    stamp = devbox.build_metadata_xml("alice", "libvirt", "2026-07-21T10:00:00+00:00")
     dumpxml = _domain_xml(metadata_inner=stamp, vcpu=6, memory_kib=12582912)
 
     def fake_virsh(uri, *a, **k):
@@ -1170,7 +1170,7 @@ def test_libvirt_provider_list_returns_instances(monkeypatch):
     assert len(instances) == 1
     i = instances[0]
     assert isinstance(i, devbox.Instance)
-    assert (i.name, i.provider, i.project, i.state) == ("demo", "libvirt", "proj", "running")
+    assert (i.name, i.provider, i.admin_user, i.state) == ("demo", "libvirt", "alice", "running")
     assert i.resources == "6 vCPU / 12 GiB"
     assert i.created_at == "2026-07-21T10:00:00+00:00"
 
@@ -1746,10 +1746,10 @@ def _ec2_gc(security_groups=("sg-1",), subnets=(), spot=False):
     return gc
 
 
-def _ec2_instance(name="foo", state="running", itype="c7i.large", project="proj", public_ip="1.2.3.4"):
+def _ec2_instance(name="foo", state="running", itype="c7i.large", admin_user="alice", public_ip="1.2.3.4"):
     tags = ([{"Key": "devbox:name", "Value": name}] if name is not None else []) + [
         {"Key": "devbox:managed", "Value": "true"},
-        {"Key": "devbox:project", "Value": project},
+        {"Key": "devbox:admin-user", "Value": admin_user},
         {"Key": "devbox:created-at", "Value": "2026-07-21T10:00:00+00:00"},
     ]
     d = {"InstanceId": "i-123", "State": {"Name": state}, "InstanceType": itype, "Tags": tags}
@@ -1765,9 +1765,9 @@ def _reservations(*instances):
 def _ec2_spec(name="foo-gpu", instance_type="g5.xlarge", architecture="x86_64",
               spot=None, ami=None, disk_gb=64):
     return devbox.InstanceSpec(
-        name=name, project="proj", provider="ec2", disk_gb=disk_gb,
+        name=name, admin_user="alice", provider="ec2", disk_gb=disk_gb,
         user_data="#cloud-config\n", created_at="2026-07-21T12:00:00+00:00",
-        ec2=devbox.Ec2ProjectConfig(instance_type=instance_type, architecture=architecture,
+        ec2=devbox.Ec2BoxConfig(instance_type=instance_type, architecture=architecture,
                                     spot=spot, ami=ami),
     )
 
@@ -1809,8 +1809,8 @@ def test_ec2_list_parses_and_flags_cost():
     instances = provider.list()
     assert len(instances) == 1
     i = instances[0]
-    assert (i.name, i.provider, i.project, i.state, i.resources) == \
-        ("foo", "ec2", "proj", "running", "c7i.large")
+    assert (i.name, i.provider, i.admin_user, i.state, i.resources) == \
+        ("foo", "ec2", "alice", "running", "c7i.large")
     assert i.cost_hint is True
 
 
@@ -1844,7 +1844,7 @@ def test_ec2_create_on_demand_request_shape():
     tags = {t["Key"]: t["Value"] for t in params["TagSpecifications"][0]["Tags"]}
     assert tags["devbox:managed"] == "true"
     assert tags["devbox:name"] == "foo-gpu"
-    assert tags["devbox:project"] == "proj"
+    assert tags["devbox:admin-user"] == "alice"
     assert tags["devbox:created-at"] == "2026-07-21T12:00:00+00:00"
     assert tags["Name"] == "devbox-foo-gpu"
 
@@ -1986,13 +1986,13 @@ def _aws_gc(region="us-west-2"):
 
 
 def _ls_instance(canonical="aws-foo", bare="foo", state="running",
-                 bundle="xlarge_3_0", project="proj", public_ip="1.2.3.4",
+                 bundle="xlarge_3_0", admin_user="alice", public_ip="1.2.3.4",
                  managed="true"):
     """A get_instances entry. Lightsail tags are lowercase key/value (unlike
     EC2's Key/Value), and the Lightsail-side `name` is the bare name while the
     canonical devbox name lives in the devbox:name tag."""
     tags = ([{"key": "devbox:name", "value": canonical}] if canonical is not None else []) + [
-        {"key": "devbox:project", "value": project},
+        {"key": "devbox:admin-user", "value": admin_user},
         {"key": "devbox:created-at", "value": "2026-07-21T10:00:00+00:00"},
     ]
     if managed is not None:
@@ -2009,10 +2009,10 @@ _LS_DEFAULT_CFG = object()  # sentinel: "not passed" (None means "no section")
 
 def _ls_spec(name="aws-foo-gpu", lightsail=_LS_DEFAULT_CFG):
     """An InstanceSpec for the aws provider. `lightsail` defaults to a plain
-    LightsailProjectConfig(); pass None for the no-[lightsail]-section case."""
-    cfg = devbox.LightsailProjectConfig() if lightsail is _LS_DEFAULT_CFG else lightsail
+    LightsailBoxConfig(); pass None for the no-[lightsail]-section case."""
+    cfg = devbox.LightsailBoxConfig() if lightsail is _LS_DEFAULT_CFG else lightsail
     return devbox.InstanceSpec(
-        name=name, project="proj", provider="aws", disk_gb=64,
+        name=name, admin_user="alice", provider="aws", disk_gb=64,
         user_data="#cloud-config\n", created_at="2026-07-21T12:00:00+00:00",
         lightsail=cfg,
     )
@@ -2047,13 +2047,13 @@ def test_lightsail_create_default_request_shape():
     tags = {t["key"]: t["value"] for t in params["tags"]}
     assert tags["devbox:managed"] == "true"
     assert tags["devbox:name"] == "aws-foo-gpu"          # addressing tag: canonical
-    assert tags["devbox:project"] == "proj"
+    assert tags["devbox:admin-user"] == "alice"
     assert tags["devbox:created-at"] == "2026-07-21T12:00:00+00:00"
 
 
 def test_lightsail_create_explicit_overrides_win():
     client = _FakeLightsail()
-    cfg = devbox.LightsailProjectConfig(bundle="medium_3_0", blueprint="debian_12",
+    cfg = devbox.LightsailBoxConfig(bundle="medium_3_0", blueprint="debian_12",
                                         availability_zone="eu-central-1c")
     devbox.LightsailProvider(_aws_gc(), client=client).create(_ls_spec(lightsail=cfg))
     params = _create_params(client)
@@ -2144,8 +2144,8 @@ def test_lightsail_list_filters_and_flags_cost():
     instances = devbox.LightsailProvider(_aws_gc(), client=client).list()
     assert len(instances) == 1
     i = instances[0]
-    assert (i.name, i.provider, i.project, i.state, i.resources) == \
-        ("aws-foo", "aws", "proj", "running", "xlarge_3_0")
+    assert (i.name, i.provider, i.admin_user, i.state, i.resources) == \
+        ("aws-foo", "aws", "alice", "running", "xlarge_3_0")
     assert i.cost_hint is True
 
 
