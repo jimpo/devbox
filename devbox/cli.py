@@ -9,6 +9,7 @@ Provider seam.
     devbox box up / stop       # start / gracefully shut down a box
     devbox box ssh NAME        # ssh in as the privileged user (the only sudo shell)
     devbox box status NAME     # cloud-init progress + the box's provision log
+    devbox box sync --mods     # reconverge the box playbook
     devbox box destroy NAME    # tear down, removing the disk
 
 **Project commands** act on this project's account on its box, and take none:
@@ -43,7 +44,8 @@ from .config import (BoxSpec, DEFAULT_PROVIDER, GlobalConfig, PROVIDERS,
                      ProjectConfig, SSH_DIR, SSH_USER_CONFIG, find_project_dir,
                      known_hosts_path, parse_instance_name, resolve_box_spec,
                      resolve_instance, resolve_project)
-from .provision import build_payload, build_tarball, provision_log, resolve_env
+from .provision import (build_box_payload, build_payload, build_tarball,
+                        provision_log, resolve_env)
 from .sync import run_envvars, run_sync
 from .providers import (AwsAuthError, InstanceSpec, all_providers,
                         auth_error_message, get_provider, is_auth_error)
@@ -129,9 +131,13 @@ def _check_name_unique(gc: GlobalConfig, name: str) -> None:
 
 # ---- box lifecycle --------------------------------------------------------------
 def _boot_box(box: BoxSpec, gc: GlobalConfig, provider) -> None:
-    """Launch a box: the machine only. Provisioning is a project's business
-    until the playbook grows a box half of its own."""
+    """Launch a box and run its own playbook. The box playbook needs no project:
+    it is the apt half of the dotfiles setup plus a usable shell for the
+    privileged account, which is the box's debugging entry point."""
     _check_name_unique(gc, box.name)
+    # Built before the launch so a broken mod surfaces before we boot a machine.
+    tarball = build_tarball(build_box_payload(box.admin_user, gc))
+
     provider.create(InstanceSpec(
         name=box.name,
         admin_user=box.admin_user,
@@ -145,7 +151,10 @@ def _boot_box(box: BoxSpec, gc: GlobalConfig, provider) -> None:
         lightsail=box.lightsail,
     ))
     truncate_known_hosts(box.name)
-    _wait_ready(provider, box.name, box.admin_user)
+
+    admin_alias = _wait_ready(provider, box.name, box.admin_user)
+    print("==> provisioning the box (running its mods over SSH) ...")
+    _run_mods(admin_alias, tarball, [], log=provision_log())
 
 
 def cmd_box_create(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
@@ -701,6 +710,22 @@ def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
     print("done.")
 
 
+def cmd_box_sync(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+    """Reconverge the box's own playbook - the machine, not any attachment."""
+    name, _, provider = _resolve_box(args.name, gc)
+    ip = provider.address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+    admin_user = _admin_user(provider, name)
+    _, admin_alias = _refresh_ssh_aliases(name, ip, admin_user)
+    mods = _split_mods(args.mods or "")
+    subset = f" (mods: {', '.join(mods)})" if mods else ""
+    print(f"==> provisioning box '{name}' over SSH{subset} ...")
+    _run_mods(admin_alias, build_tarball(build_box_payload(admin_user, gc)), mods,
+              log=provision_log())
+    print("done.")
+
+
 def cmd_detach(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
     """Give up this project's account on its box.
 
@@ -807,6 +832,11 @@ def main() -> None:
     bs.add_argument("name", help="the box's canonical name")
     bs.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
     bs.set_defaults(func=cmd_box_ssh, needs_project=False)
+    bsy = box_sub.add_parser("sync", help="reconverge the box's own playbook")
+    bsy.add_argument("name", help="the box's canonical name")
+    bsy.add_argument("--mods", nargs="?", const="", default=None, metavar="a,b,c",
+                     help="run box mods over SSH (all if no list; else comma-separated)")
+    bsy.set_defaults(func=cmd_box_sync, needs_project=False)
     bd = box_sub.add_parser("destroy", help="tear down the box and its disk")
     bd.add_argument("name", help="the box's canonical name")
     bd.add_argument("-y", "--yes", "--force", action="store_true", dest="yes",

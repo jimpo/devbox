@@ -635,7 +635,7 @@ def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubke
     assert payload["provision-driver.sh"].content == devbox.DRIVER_PATH.read_text()
     manifest_names = [line.split("\t")[0]
                       for line in payload["manifest"].content.splitlines()]
-    assert manifest_names == list(devbox.DEFAULT_BASE_MODS)
+    assert manifest_names == list(devbox.PROJECT_BASE_MODS)
     ctx = payload["context.env"].content
     # Both accounts, named explicitly - a bare DEVBOX_USER would be ambiguous now.
     assert "export DEVBOX_ADMIN_USER=alice" in ctx
@@ -653,7 +653,7 @@ def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubke
     # box's 0600 ~/.config/devbox/env (see run_envvars).
     assert "secret.env" not in payload
     assert "GITHUB_TOKEN" not in ctx
-    for name in devbox.DEFAULT_BASE_MODS:
+    for name in devbox.PROJECT_BASE_MODS:
         assert f"mods/{name}.sh" in payload
 
 
@@ -671,7 +671,7 @@ def test_build_payload_appends_project_mods(isolated_mods, pubkey, tmp_path):
     payload = _payload_map(_project(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
     manifest_names = [line.split("\t")[0]
                       for line in payload["manifest"].content.splitlines()]
-    assert manifest_names == [*devbox.DEFAULT_BASE_MODS, "rust"]
+    assert manifest_names == [*devbox.PROJECT_BASE_MODS, "rust"]
     assert payload["mods/rust.sh"].content == "#!/usr/bin/env bash\necho rust\n"
 
 
@@ -731,13 +731,46 @@ def test_env_for_owner_slices_by_account():
 
 
 # ---- provisioning: mods, env, payload ---------------------------------------
-def test_effective_mods_appends_project_after_base():
-    assert devbox.effective_mods(_project(mods=["rust", "wasm"])) == \
-        [*devbox.DEFAULT_BASE_MODS, "rust", "wasm"]
+def test_project_playbook_appends_project_mods_after_the_base():
+    assert devbox.project_playbook(_project(mods=["rust", "wasm"])) == \
+        [*devbox.PROJECT_BASE_MODS, "rust", "wasm"]
 
 
-def test_effective_mods_base_only_when_no_project_mods():
-    assert devbox.effective_mods(_project()) == list(devbox.DEFAULT_BASE_MODS)
+def test_project_playbook_base_only_when_no_project_mods():
+    assert devbox.project_playbook(_project()) == list(devbox.PROJECT_BASE_MODS)
+
+
+def test_box_playbook_is_fixed():
+    # A box takes no config, so its playbook is not extensible per box; a
+    # project that needs more system state ships a `# runas: root` mod.
+    assert devbox.box_playbook() == list(devbox.BOX_BASE_MODS)
+
+
+def test_the_two_playbooks_split_the_apt_half_from_the_per_user_half():
+    # dotfiles-packages is the one genuinely box-level mod (apt, as root);
+    # everything else in the base installs into somebody's home.
+    assert "dotfiles-packages" in devbox.BOX_BASE_MODS
+    assert "dotfiles-packages" not in devbox.PROJECT_BASE_MODS
+    for per_user in ("jj", "claude-code", "repo-bootstrap"):
+        assert per_user in devbox.PROJECT_BASE_MODS
+        assert per_user not in devbox.BOX_BASE_MODS
+
+
+# ---- scope: which `# runas:` targets run in which playbook -------------------
+@pytest.mark.parametrize("runas,box,project", [
+    # A mod with an agent half: the box runs everything else, the attachment
+    # runs only the agent. This is what stops a second project reinstalling the
+    # privileged account's oh-my-zsh.
+    (["admin", "agent"], ["admin"], ["agent"]),
+    (["agent"], [], ["agent"]),
+    # No agent target at all: pure system work, which runs whole in whichever
+    # playbook lists it - that is how a project ships docker onto a shared box.
+    (["root"], ["root"], ["root"]),
+    (["root", "admin"], ["root", "admin"], ["root", "admin"]),
+])
+def test_scoped_runas(runas, box, project):
+    assert devbox.scoped_runas(runas, devbox.SCOPE_BOX) == box
+    assert devbox.scoped_runas(runas, devbox.SCOPE_PROJECT) == project
 
 
 def test_resolve_mod_precedence_project_over_global_over_builtin(tmp_path):
@@ -807,36 +840,44 @@ def _write_project_mod(marker_dir, name, text):
     (d / f"{name}.sh").write_text(text)
 
 
-def test_validate_mods_base_passes(isolated_mods):
+def test_validate_playbooks_base_passes(isolated_mods):
     # The shipped base playbooks (with their backfilled `# requires:` headers)
     # are correctly ordered - no dep is missing or listed after its dependent.
-    devbox.validate_mods(_project())
+    devbox.validate_playbooks(_project())
 
 
-def test_validate_mods_project_mod_requiring_base_mod_passes(isolated_mods, tmp_path):
+def test_validate_playbooks_project_mod_requiring_base_mod_passes(isolated_mods, tmp_path):
     _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# requires: jj\nset -e\n")
-    devbox.validate_mods(_project(marker_dir=tmp_path, mods=["rust"]))
+    devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["rust"]))
 
 
-def test_validate_mods_missing_dep_dies(isolated_mods, tmp_path):
+def test_validate_playbooks_project_mod_requiring_a_box_mod_passes(isolated_mods, tmp_path):
+    # A box mod always ran earlier - it belongs to the machine, which exists
+    # before any attachment - so it satisfies a dep from the other playbook.
+    _write_project_mod(tmp_path, "rust",
+                       "#!/bin/bash\n# requires: dotfiles-packages\nset -e\n")
+    devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["rust"]))
+
+
+def test_validate_playbooks_missing_dep_dies(isolated_mods, tmp_path):
     _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# requires: nonexistent\nset -e\n")
     with pytest.raises(SystemExit):
-        devbox.validate_mods(_project(marker_dir=tmp_path, mods=["rust"]))
+        devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["rust"]))
 
 
-def test_validate_mods_dep_listed_after_dies(isolated_mods, tmp_path):
+def test_validate_playbooks_dep_listed_after_dies(isolated_mods, tmp_path):
     # `a` requires `b`, but `b` is appended after `a` -> misordered -> die.
     _write_project_mod(tmp_path, "a", "#!/bin/bash\n# requires: b\nset -e\n")
     _write_project_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
     with pytest.raises(SystemExit):
-        devbox.validate_mods(_project(marker_dir=tmp_path, mods=["a", "b"]))
+        devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["a", "b"]))
 
 
-def test_validate_mods_dep_listed_before_passes(isolated_mods, tmp_path):
+def test_validate_playbooks_dep_listed_before_passes(isolated_mods, tmp_path):
     # Same two mods, `b` ahead of `a` -> ordering satisfied.
     _write_project_mod(tmp_path, "a", "#!/bin/bash\n# requires: b\nset -e\n")
     _write_project_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
-    devbox.validate_mods(_project(marker_dir=tmp_path, mods=["b", "a"]))
+    devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["b", "a"]))
 
 
 def test_build_payload_validates_mods(isolated_mods, pubkey, tmp_path):
@@ -877,7 +918,7 @@ def test_parse_header_is_shared_by_every_key():
 def test_load_mod_specs_rejects_an_unknown_runas_target(isolated_mods, tmp_path):
     _write_project_mod(tmp_path, "rust", "#!/bin/bash\n# runas: nobody-special\n")
     with pytest.raises(SystemExit):
-        devbox.load_mod_specs(_project(marker_dir=tmp_path, mods=["rust"]))
+        devbox.load_mod_specs(["rust"], tmp_path)
 
 
 def test_build_payload_validates_runas(isolated_mods, pubkey, tmp_path):
@@ -901,17 +942,26 @@ def _manifest_specs():
 def test_render_manifest_is_tab_separated_with_comma_joined_lists():
     # The driver parses this with plain IFS splitting - it has no YAML/JSON
     # parser and should not grow one.
-    assert devbox.render_manifest(_manifest_specs()) == (
+    assert devbox.render_manifest(_manifest_specs(), devbox.SCOPE_PROJECT) == (
         "jj\tagent\t\n"
-        "dotfiles\tadmin,agent\tjq,unzip\n"
+        "dotfiles\tagent\tjq,unzip\n"
+    )
+
+
+def test_render_manifest_narrows_the_runas_column_to_the_scope():
+    # The scope filter is entirely host-side: what reaches the driver is already
+    # narrowed, so the driver never has to know that scopes exist.
+    assert devbox.render_manifest(_manifest_specs(), devbox.SCOPE_BOX) == (
+        "dotfiles\tadmin\tjq,unzip\n"    # jj is agent-only -> nothing to do here
     )
 
 
 def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
     # Every shipped mod parses, and its `# runas:` targets are known. Guards the
     # headers themselves, which nothing else type-checks.
-    specs = devbox.load_mod_specs(_project())
-    assert [s.name for s in specs] == list(devbox.DEFAULT_BASE_MODS)
+    names = [*devbox.box_playbook(), *devbox.project_playbook(_project())]
+    specs = devbox.load_mod_specs(names, None)
+    assert [s.name for s in specs] == names
     for spec in specs:
         assert spec.runas, f"{spec.name} resolved to no runas target"
         for target in spec.runas:
@@ -921,7 +971,8 @@ def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
 def test_shipped_mods_never_call_sudo(isolated_mods):
     # A mod body runs as an account without sudo. `sudo` in a mod is a bug now:
     # apt goes through `# packages:`, and real privilege through `# runas: root`.
-    for spec in devbox.load_mod_specs(_project()):
+    names = [*devbox.box_playbook(), *devbox.project_playbook(_project())]
+    for spec in devbox.load_mod_specs(names, None):
         for line in spec.path.read_text().splitlines():
             stripped = line.strip()
             if stripped.startswith("#"):
@@ -929,15 +980,21 @@ def test_shipped_mods_never_call_sudo(isolated_mods):
             assert "sudo " not in stripped, f"{spec.name}: {stripped}"
 
 
-def test_dotfiles_runs_for_both_accounts_after_its_root_half(isolated_mods):
-    # The privileged user gets the dotfiles too, so the debugging shell is
-    # usable. The apt half is a separate, root-only mod.
-    specs = {s.name: s for s in devbox.load_mod_specs(_project())}
-    assert specs["dotfiles"].runas == ["admin", "agent"]
-    assert specs["dotfiles-packages"].runas == ["root"]
-    assert "dotfiles-packages" in specs["dotfiles"].requires
-    order = [s.name for s in devbox.load_mod_specs(_project())]
-    assert order.index("dotfiles-packages") < order.index("dotfiles")
+def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_projects(isolated_mods):
+    # The one mod that lives in both playbooks, and the reason scoping exists:
+    # the privileged user gets the dotfiles once per box (so `devbox box ssh`,
+    # the debugging shell, is usable), and each attachment gets them in its own
+    # account - without redoing the admin's on every attach.
+    box = devbox.load_mod_specs(devbox.box_playbook(), None)
+    project = devbox.load_mod_specs(devbox.project_playbook(_project()), None)
+    assert devbox.render_manifest(box, devbox.SCOPE_BOX).splitlines() == [
+        "dotfiles-packages\troot\t",   # the apt half: once, as root, per box
+        "dotfiles\tadmin\t",
+        "vim\tadmin\t",
+    ]
+    by_name = {s.name: s for s in project}
+    assert devbox.scoped_runas(by_name["dotfiles"].runas, devbox.SCOPE_PROJECT) == ["agent"]
+    assert "dotfiles-packages" in by_name["dotfiles"].requires
 
 
 def test_render_env_file_shell_quotes_values():
@@ -1087,6 +1144,7 @@ class _FakeCreateProvider:
 def _patch_create(monkeypatch, provider, pubkey):
     monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: provider)
     monkeypatch.setattr(devbox.cli, "_check_name_unique", lambda gc, name: None)
+    monkeypatch.setattr(devbox.cli, "build_box_payload", lambda admin, gc: [])
     monkeypatch.setattr(devbox.cli, "build_payload", lambda p, gc, admin: [])
     return dataclasses.replace(_global_config(pubkey),
                                aws=devbox.AwsConfig(region="us-east-1"))

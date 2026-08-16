@@ -24,15 +24,16 @@ from .providers import awsauth, base, ec2, libvirt, lightsail  # noqa: F401
 from .cli import main  # noqa: F401
 from .initscript import (INIT_SCRIPT_PATH, render_init_script,  # noqa: F401
                          substitute_tokens)
-from .provision import (BUILTIN_MODS_DIR, DEFAULT_BASE_MODS, DEFAULT_RUNAS,  # noqa: F401
-                        DRIVER_PATH, GLOBAL_MODS_DIR, provision_log,
-                        RUNAS_TARGETS, ModSpec, PayloadFile,
-                        build_payload, build_tarball, effective_mods,
-                        env_for_owner,
+from .provision import (BOX_BASE_MODS, BUILTIN_MODS_DIR, DEFAULT_RUNAS,  # noqa: F401
+                        DRIVER_PATH, GLOBAL_MODS_DIR, PROJECT_BASE_MODS,
+                        RUNAS_TARGETS, SCOPE_BOX, SCOPE_PROJECT, ModSpec,
+                        PayloadFile, box_playbook, build_box_payload,
+                        build_payload, build_tarball, env_for_owner,
                         load_mod_specs, parse_header, parse_packages,
-                        parse_requires, parse_runas, render_env_file,
-                        render_manifest, resolve_env, resolve_jj_identity,
-                        resolve_mod, validate_mods)
+                        parse_requires, parse_runas, project_playbook,
+                        provision_log, render_env_file, render_manifest,
+                        resolve_env, resolve_jj_identity, resolve_mod,
+                        scoped_runas, validate_playbooks)
 from .config import (AwsConfig, BoxSpec, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
                      DEFAULT_CACHE_DIR, DEFAULT_DISK_GB, DEFAULT_LIBVIRT_URI,
                      DEFAULT_LIGHTSAIL_BLUEPRINT, DEFAULT_LIGHTSAIL_BUNDLE,

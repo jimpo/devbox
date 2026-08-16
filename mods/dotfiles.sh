@@ -7,11 +7,12 @@
 # requires: dotfiles-packages
 # runas: admin agent
 #
-# Runs for BOTH accounts on purpose: the agent needs the environment to work in,
-# and the privileged user needs a usable shell for `devbox ssh --admin`, which
-# is the debugging entry point. That means a second clone and a second oh-my-zsh
-# install - a few minutes of provisioning, accepted deliberately. The apt half
-# lives in the `dotfiles-packages` mod, which runs once, as root.
+# In BOTH playbooks on purpose, and the reason `# runas:` scoping exists: the
+# box runs the admin half once (the privileged user needs a usable shell for
+# `devbox box ssh`, the debugging entry point), and each attaching project runs
+# the agent half in its own account. That means one clone and one oh-my-zsh
+# install per account - a few minutes per attach, accepted deliberately. The apt
+# half lives in the `dotfiles-packages` mod, which runs once per box, as root.
 #
 # Idempotency: oh-my-zsh is a no-op when already present; the devbox zsh env
 # block is appended once. (setup.sh's own steps must be re-run-safe - a configenv

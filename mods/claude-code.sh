@@ -5,8 +5,9 @@
 #
 # packages: jq
 #
-# Runs as the agent (the default target): this is the account agents work in,
-# and the only one that needs Claude Code at all.
+# Runs as the agent (the default target): this is the account a project's agents
+# work in, and the only one that needs Claude Code at all. Each attached project
+# gets its own install, in its own home.
 #
 # Idempotency: the installer overwrites in place; `marketplace add` /
 # `plugin install` abort under `set -e` when the marketplace or a plugin is

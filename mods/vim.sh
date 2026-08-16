@@ -7,9 +7,10 @@
 # requires: dotfiles
 # runas: admin agent
 #
-# Both accounts, matching `dotfiles`: the .vimrc it installs calls plug#begin(),
-# so a user with the dotfiles but without plug.vim gets an error on every vim
-# start - which would make `devbox ssh --admin`, the debugging shell, unpleasant.
+# In both playbooks, matching `dotfiles`: the .vimrc it installs calls
+# plug#begin(), so a user with the dotfiles but without plug.vim gets an error on
+# every vim start - which would make `devbox box ssh`, the debugging shell,
+# unpleasant.
 #
 # Idempotency: plug.vim is fetched unconditionally; PlugInstall is a no-op for
 # already-installed plugins.

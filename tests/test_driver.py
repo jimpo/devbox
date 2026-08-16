@@ -100,7 +100,7 @@ class _Box:
     exactly how the driver tells the two kinds of run apart."""
 
     def __init__(self, root, mods, repo_mode="none", repo_dir="", agent=AGENT,
-                 project=PROJECT, host=HOST):
+                 project=PROJECT, scope=None, host=HOST):
         self.root = root
         self.log_dir = root / "log"
         self.homes = root / "homes"
@@ -120,9 +120,10 @@ class _Box:
             path.write_text(body)
             path.chmod(0o755)
 
+        scope = scope or (devbox.SCOPE_PROJECT if agent else devbox.SCOPE_BOX)
         (self.payload / "provision-driver.sh").write_text(devbox.DRIVER_PATH.read_text())
         # Real renderers, so this also pins the Python->bash format agreement.
-        (self.payload / "manifest").write_text(devbox.render_manifest(mods))
+        (self.payload / "manifest").write_text(devbox.render_manifest(mods, scope))
         (self.payload / "context.env").write_text(devbox.render_env_file({
             "DEVBOX_ADMIN_USER": ADMIN,
             "DEVBOX_AGENT_USER": agent,
@@ -275,12 +276,13 @@ def test_runas_root_and_admin_dispatch_to_the_right_accounts(box):
 def test_a_box_run_creates_no_agent_account(box):
     # The box's own playbook: a machine that no project has attached to yet.
     b = box([_spec("dotfiles-packages", runas=["root"]),
-             _spec("motd", runas=["admin"])], agent="")
+             _spec("dotfiles", runas=["admin", "agent"])], agent="")
     r = b.run()
     assert r.returncode == 0, r.stderr
     assert b.log("useradd") == ""
     assert not (b.etc / "projects").exists()
-    assert b.ran() == [("dotfiles-packages", "root"), ("motd", ADMIN)]
+    # `dotfiles` keeps only its admin half - the agent half is an attachment's.
+    assert b.ran() == [("dotfiles-packages", "root"), ("dotfiles", ADMIN)]
 
 
 def test_a_box_run_still_wires_the_privileged_account(box):
@@ -292,7 +294,7 @@ def test_a_box_run_still_wires_the_privileged_account(box):
 def test_a_box_run_refuses_an_agent_target_it_cannot_satisfy(box):
     # Unreachable through the host-side scope filter; a payload that got it
     # wrong anyway must stop rather than run the mod as somebody else.
-    b = box([_spec("jj", runas=["agent"])], agent="")
+    b = box([_spec("jj", runas=["agent"])], agent="", scope=devbox.SCOPE_PROJECT)
     r = b.run()
     assert r.returncode == 2
     assert "no agent account" in r.stderr

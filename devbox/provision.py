@@ -16,13 +16,21 @@ comments (`# requires:`, `# runas:`, `# packages:`). The GitHub PAT goes in a
 mode-0600 env file the driver sources without tracing, so it never lands in a
 script on disk or a log.
 
-**Two accounts.** A box has a privileged user (`user`, the SSH target
-provisioning runs through) and an unprivileged one (`agent_user`, no sudo) that
-AI agents and the repo checkout live under. The driver runs as the privileged
-user and drops to the agent for each mod body, because that is what a mod almost
-always configures: a user's home directory. A mod body therefore CANNOT sudo -
-system packages are declared with `# packages:` and installed by the driver, and
-the rare mod that genuinely needs privilege says `# runas: root`.
+**Accounts.** A box has one privileged user (the SSH target provisioning runs
+through) and one unprivileged `agent_user` per attached project, with no sudo,
+which that project's AI agents and repo checkout live under. The driver runs as
+the privileged user and drops to the agent for each mod body, because that is
+what a mod almost always configures: a user's home directory. A mod body
+therefore CANNOT sudo - system packages are declared with `# packages:` and
+installed by the driver, and the rare mod that genuinely needs privilege says
+`# runas: root`.
+
+**Two scopes.** A box playbook runs once per box (at `devbox box create` /
+`devbox box sync`) and a project playbook runs once per attachment (at `devbox
+create` / `devbox sync --mods`). `# runas:` already says which half of a mod
+belongs where, so scoping is a host-side filter over the targets it declares
+(see `scoped_runas`) rather than anything the driver has to understand: the
+manifest it receives has already been narrowed to the current scope.
 
 This buys containment of *system integrity*, not of *credential exfiltration*:
 the agent still has network egress and still holds every `[env]` cred it owns.
@@ -53,7 +61,8 @@ import tarfile
 from pathlib import Path
 from typing import Optional
 
-from .config import GLOBAL_CONFIG_PATH, GlobalConfig, ProjectConfig, PROJECT_MARKER_DIR
+from .config import (GLOBAL_CONFIG_PATH, BoxSpec, GlobalConfig, ProjectConfig,
+                     PROJECT_MARKER_DIR)
 from .util import die
 
 # The built-in mods (shipped in the package) and the standalone driver.
@@ -64,13 +73,28 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # Project-local mods live under the marker dir: <marker>/.devbox/mods/*.sh.
 PROJECT_MODS_SUBDIR = "mods"
 
-# The default base playbook (built-ins, fixed order). Ordering constraints are
-# encoded here: jj + github-auth must precede repo-bootstrap so a private
-# `jj git clone` can authenticate, and dotfiles-packages (the root half, apt)
-# must precede dotfiles (the per-user half). A project's `mods` are appended
-# after this.
-DEFAULT_BASE_MODS = ("jj", "github-auth", "dotfiles-packages", "dotfiles", "vim",
-                     "neovim", "claude-code", "repo-bootstrap")
+# The box playbook: what a machine needs once, regardless of who lives on it -
+# the apt half of the dotfiles setup, plus a usable shell and editor for the
+# privileged account, which is the box's debugging entry point
+# (`devbox ssh --admin`). Fixed and built-in: there is no box config file, so a
+# box grows beyond this only when an attached project contributes a
+# `# runas: root` mod.
+BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim")
+
+# The project playbook: what one attachment needs inside its own account.
+# Ordering constraints are encoded here: jj + github-auth must precede
+# repo-bootstrap so a private `jj git clone` can authenticate, and dotfiles must
+# precede vim (which installs the plugins ~/.vimrc declares). `dotfiles`/`vim`
+# appear in BOTH playbooks on purpose - each declares `# runas: admin agent`, and
+# each scope runs only its own half. A project's `mods` are appended after this.
+PROJECT_BASE_MODS = ("jj", "github-auth", "dotfiles", "vim", "neovim",
+                     "claude-code", "repo-bootstrap")
+
+# Which playbook a provisioning run is executing. The scope decides which
+# `# runas:` targets of each mod run (see scoped_runas); it is resolved entirely
+# host-side, so the driver just runs the manifest it is handed.
+SCOPE_BOX = "box"
+SCOPE_PROJECT = "project"
 
 def provision_log(agent_user: str = "") -> str:
     """The combined provisioning log for one run, under the privileged user's
@@ -130,30 +154,40 @@ def env_for_owner(env: dict, owner: str) -> dict:
 
 
 # ---- mod resolution ---------------------------------------------------------
-def effective_mods(project: ProjectConfig) -> list:
-    """The ordered playbook for a project: the built-in base plus the project's
-    own `mods`, appended (the 95% case: "just add rust")."""
-    return [*DEFAULT_BASE_MODS, *project.mods]
+def box_playbook() -> list:
+    """The ordered playbook for a box itself. Fixed: a box takes no config."""
+    return list(BOX_BASE_MODS)
 
 
-def resolve_mod(name: str, marker_dir: Path,
+def project_playbook(project: ProjectConfig) -> list:
+    """The ordered playbook for one attachment: the built-in project base plus
+    the project's own `mods`, appended (the 95% case: "just add rust")."""
+    return [*PROJECT_BASE_MODS, *project.mods]
+
+
+def resolve_mod(name: str, marker_dir: Optional[Path],
                 global_mods_dir: Optional[Path] = None,
                 builtin_mods_dir: Optional[Path] = None) -> Path:
     """Locate a mod's script by name, precedence project > global > built-in, so
     a project can shadow a built-in (e.g. its own `dotfiles.sh`). The global /
     built-in dirs default to the module constants, resolved at call time (so
-    tests can monkeypatch them)."""
+    tests can monkeypatch them). `marker_dir` is None for a box-scope run, which
+    has no project to shadow from."""
     global_mods_dir = global_mods_dir or GLOBAL_MODS_DIR
     builtin_mods_dir = builtin_mods_dir or BUILTIN_MODS_DIR
-    project_mods_dir = marker_dir / PROJECT_MARKER_DIR / PROJECT_MODS_SUBDIR
+    project_mods_dir = (marker_dir / PROJECT_MARKER_DIR / PROJECT_MODS_SUBDIR
+                        if marker_dir is not None else None)
     for base in (project_mods_dir, global_mods_dir, builtin_mods_dir):
+        if base is None:
+            continue
         candidate = base / f"{name}.sh"
         if candidate.is_file():
             return candidate
-    die(f"mod '{name}' not found: looked in the project ({project_mods_dir}), "
+    where = (f"the project ({project_mods_dir}), " if project_mods_dir else "")
+    die(f"mod '{name}' not found: looked in {where}"
         f"global ({global_mods_dir}), and built-ins ({builtin_mods_dir}). "
         f"Add {name}.sh to one of them, or fix the `mods` list in "
-        f"{marker_dir / PROJECT_MARKER_DIR / 'config.toml'}.")
+        f"{(marker_dir / PROJECT_MARKER_DIR / 'config.toml') if marker_dir else 'the config'}.")
 
 
 # ---- mod metadata (`# requires:` / `# runas:` / `# packages:` headers) -------
@@ -225,13 +259,12 @@ class ModSpec:
     packages: list
 
 
-def load_mod_specs(project: ProjectConfig) -> list:
-    """Resolve every mod in the project's effective playbook and parse its
-    headers, in playbook order. One read per mod, shared by validation and
-    payload assembly."""
+def load_mod_specs(names: list, marker_dir: Optional[Path]) -> list:
+    """Resolve every named mod and parse its headers, in playbook order. One read
+    per mod, shared by validation and payload assembly."""
     specs = []
-    for name in effective_mods(project):
-        path = resolve_mod(name, project.marker_dir)
+    for name in names:
+        path = resolve_mod(name, marker_dir)
         text = path.read_text()
         runas = parse_runas(text)
         unknown = [r for r in runas if r not in RUNAS_TARGETS]
@@ -244,10 +277,33 @@ def load_mod_specs(project: ProjectConfig) -> list:
     return specs
 
 
-def _validate_ordering(specs: list, project: ProjectConfig) -> None:
-    """Fail fast if a mod is in the effective playbook without its declared
-    dependencies (`# requires:`) ordered ahead of it. Deliberately NOT a resolver:
-    no topo-sort, no auto-insert - just check the parsed headers against order."""
+def scoped_runas(runas: list, scope: str) -> list:
+    """The `# runas:` targets of a mod that actually run in `scope`.
+
+    A mod that names the agent has an agent half, and that half belongs to a
+    project: at box scope it runs everything *except* the agent (so `dotfiles`
+    sets up the privileged account once per box), and at project scope it runs
+    *only* the agent (so attaching a second project doesn't reinstall the admin's
+    oh-my-zsh). A mod that never mentions the agent is pure system work and runs
+    whole in whichever playbook lists it - which is what lets a project ship a
+    `# runas: root` mod (docker, a driver) onto its shared box.
+
+    An empty result means the mod has nothing to do in this scope; the caller
+    leaves it out of the manifest entirely."""
+    if scope == SCOPE_BOX:
+        return [t for t in runas if t != RUNAS_AGENT]
+    if RUNAS_AGENT in runas:
+        return [RUNAS_AGENT]
+    return list(runas)
+
+
+def _validate_ordering(specs: list, config_path, prior: Optional[dict] = None) -> None:
+    """Fail fast if a mod is in the playbook without its declared dependencies
+    (`# requires:`) ordered ahead of it. Deliberately NOT a resolver: no
+    topo-sort, no auto-insert - just check the parsed headers against order.
+
+    `prior` names mods that already ran in an earlier playbook (the box's, for a
+    project run), which therefore satisfy a dependency no matter where they sit."""
     # First index wins on a duplicate; base always precedes project mods, so this
     # doesn't affect the ordering guarantee.
     index = {}
@@ -255,35 +311,57 @@ def _validate_ordering(specs: list, project: ProjectConfig) -> None:
         index.setdefault(spec.name, i)
     for i, spec in enumerate(specs):
         for dep in spec.requires:
+            if prior and dep in prior:
+                continue
             if dep not in index:
                 die(f"mod '{spec.name}' requires '{dep}', which isn't in the playbook: "
-                    f"add '{dep}' to `mods` in "
-                    f"{project.marker_dir / PROJECT_MARKER_DIR / 'config.toml'}.")
+                    f"add '{dep}' to `mods` in {config_path}.")
             if index[dep] > i:
                 die(f"mod '{spec.name}' requires '{dep}', but '{dep}' is listed after it "
                     f"in the playbook: move '{dep}' earlier in `mods`.")
 
 
-def validate_mods(project: ProjectConfig) -> None:
-    """Validate the playbook's metadata: `# runas:` targets (in load_mod_specs)
+def validate_playbooks(project: ProjectConfig) -> None:
+    """Validate both playbooks' metadata: `# runas:` targets (in load_mod_specs)
     and `# requires:` ordering. Runs at playbook-resolution time (static,
     instant, before any boot/SSH).
 
-    Validates the FULL configured `effective_mods(project)` - callers must pass the
-    configured project even for selective runs (`devbox sync <subset>`), since deps
-    are about the box's cumulative state, not the selected subset."""
-    _validate_ordering(load_mod_specs(project), project)
+    The box playbook is indexed first, so a project mod's `# requires:
+    dotfiles-packages` is satisfied by the box having run it - box mods are
+    always "earlier" than any attachment. Validates the FULL configured playbooks:
+    callers must pass the configured project even for selective runs (`devbox
+    sync --mods=a`), since deps are about the box's cumulative state, not the
+    selected subset."""
+    config_path = project.marker_dir / PROJECT_MARKER_DIR / 'config.toml'
+    box_specs = load_mod_specs(box_playbook(), None)
+    _validate_ordering(box_specs, config_path)
+    _validate_ordering(load_mod_specs(project_playbook(project), project.marker_dir),
+                       config_path, prior={s.name for s in box_specs})
 
 
 # ---- environment context (not %TOKEN% substitution) -------------------------
-def _provision_context(project: ProjectConfig, gc: GlobalConfig, admin_user: str) -> dict:
+def _box_context(admin_user: str, gc: GlobalConfig) -> dict:
+    """The DEVBOX_* context for a box-scope run. No agent account (the driver
+    reads an empty DEVBOX_AGENT_USER as "this run has no attachment") and no jj
+    identity or repo, which are an attachment's business, not a machine's."""
+    return {
+        "DEVBOX_ADMIN_USER": admin_user,
+        "DEVBOX_AGENT_USER": "",
+        # The host's public key, so the driver can authorize the same key for the
+        # agent accounts it creates. Public by definition - safe in the payload,
+        # which carries no secrets.
+        "DEVBOX_SSH_PUBKEY": gc.read_ssh_pubkey(),
+    }
+
+
+def _project_context(project: ProjectConfig, gc: GlobalConfig, admin_user: str) -> dict:
     """The DEVBOX_* provisioning context the driver exposes to every mod
     (non-secret, safe to trace). User credentials/vars are delivered separately
-    as the box's [env] file (see sync.run_envvars), not in the payload."""
+    as the account's [env] file (see sync.run_envvars), not in the payload."""
     jj_name, jj_email = resolve_jj_identity(gc)
     return {
         # Both accounts, named explicitly: a bare DEVBOX_USER would be ambiguous
-        # now that a box has a privileged user and an unprivileged agent.
+        # now that a box has a privileged user and one agent per attachment.
         "DEVBOX_ADMIN_USER": admin_user,
         "DEVBOX_AGENT_USER": project.agent_user,
         # Which project owns that account. The driver records it on the box, so a
@@ -293,9 +371,6 @@ def _provision_context(project: ProjectConfig, gc: GlobalConfig, admin_user: str
         # Which workstation attached it. Only used to note that the same project
         # is now being driven from somewhere else - a warning, never a refusal.
         "DEVBOX_ATTACH_HOST": platform.node(),
-        # The host's public key, so the driver can authorize the same key for the
-        # agent account it creates. Public by definition - safe in the payload,
-        # which carries no secrets.
         "DEVBOX_SSH_PUBKEY": gc.read_ssh_pubkey(),
         "DEVBOX_JJ_NAME": jj_name,
         "DEVBOX_JJ_EMAIL": jj_email,
@@ -305,15 +380,22 @@ def _provision_context(project: ProjectConfig, gc: GlobalConfig, admin_user: str
     }
 
 
-def render_manifest(specs: list) -> str:
+def render_manifest(specs: list, scope: str) -> str:
     """The payload's `manifest`: one tab-separated record per mod, in playbook
     order - `<name>\\t<runas,...>\\t<packages,...>`. Tab-separated with
     comma-joined lists so the driver can read it with plain `IFS` splitting; it
-    has no YAML/JSON parser and should not grow one."""
-    return "".join(
-        f"{spec.name}\t{','.join(spec.runas)}\t{','.join(spec.packages)}\n"
-        for spec in specs
-    )
+    has no YAML/JSON parser and should not grow one.
+
+    The runas column is already narrowed to `scope` (see scoped_runas), and a mod
+    with nothing to do in this scope is left out entirely - so the driver never
+    has to know that scopes exist."""
+    lines = []
+    for spec in specs:
+        runas = scoped_runas(spec.runas, scope)
+        if not runas:
+            continue
+        lines.append(f"{spec.name}\t{','.join(runas)}\t{','.join(spec.packages)}\n")
+    return "".join(lines)
 
 
 def render_env_file(env: dict) -> str:
@@ -324,33 +406,47 @@ def render_env_file(env: dict) -> str:
 
 
 # ---- payload assembly -------------------------------------------------------
-def build_payload(project: ProjectConfig, gc: GlobalConfig, admin_user: str) -> list:
-    """The full provisioning payload (driver + manifest + env + resolved mods),
-    as PayloadFiles. Tarred and run over SSH by both `devbox create` and
-    `devbox sync --mods` - the identical set either way."""
+def _assemble(specs: list, context: dict, scope: str) -> list:
+    """The payload files for one run: the driver, the scope-narrowed manifest,
+    the context, and every mod that has something to do in this scope."""
     if not DRIVER_PATH.is_file():
         die(f"devbox internal error: provisioning driver not found at "
             f"{DRIVER_PATH} (broken install?)")
-
-    # Validate the FULL configured playbook's metadata (`# runas:` targets and
-    # `# requires:` ordering). This is the single choke point: build_payload
-    # always builds the whole manifest (even for a selective `devbox sync
-    # <subset>`, which validates the full playbook here and then runs only the
-    # selected subset), so deps are checked against the box's cumulative state,
-    # not the subset.
-    specs = load_mod_specs(project)
-    _validate_ordering(specs, project)
-
-    context = _provision_context(project, gc, admin_user)
-
+    manifest = render_manifest(specs, scope)
     payload = [
         PayloadFile("provision-driver.sh", DRIVER_PATH.read_text(), 0o755),
-        PayloadFile("manifest", render_manifest(specs), 0o644),
+        PayloadFile("manifest", manifest, 0o644),
         PayloadFile("context.env", render_env_file(context), 0o644),
     ]
     for spec in specs:
-        payload.append(PayloadFile(f"mods/{spec.name}.sh", spec.path.read_text(), 0o755))
+        if scoped_runas(spec.runas, scope):
+            payload.append(PayloadFile(f"mods/{spec.name}.sh", spec.path.read_text(), 0o755))
     return payload
+
+
+def build_box_payload(admin_user: str, gc: GlobalConfig) -> list:
+    """The provisioning payload for a box itself: the fixed box playbook, run as
+    the privileged account (and root). No project is involved, so no agent
+    account is created and no jj identity is required. Takes just the account
+    rather than a whole BoxSpec, because that is all a box run needs - the rest
+    of a box's shape only matters at launch."""
+    specs = load_mod_specs(box_playbook(), None)
+    return _assemble(specs, _box_context(admin_user, gc), SCOPE_BOX)
+
+
+def build_payload(project: ProjectConfig, gc: GlobalConfig, admin_user: str) -> list:
+    """The full provisioning payload for one attachment (driver + manifest +
+    context + resolved mods), as PayloadFiles. Tarred and run over SSH by both
+    `devbox create` and `devbox sync --mods` - the identical set either way.
+
+    Validates BOTH configured playbooks' metadata (`# runas:` targets and
+    `# requires:` ordering) first. This is the single choke point: build_payload
+    always builds the whole manifest (even for a selective `devbox sync
+    --mods=a`, which validates here and then runs only the selected subset), so
+    deps are checked against the box's cumulative state, not the subset."""
+    validate_playbooks(project)
+    specs = load_mod_specs(project_playbook(project), project.marker_dir)
+    return _assemble(specs, _project_context(project, gc, admin_user), SCOPE_PROJECT)
 
 
 def build_tarball(payload: list) -> bytes:
