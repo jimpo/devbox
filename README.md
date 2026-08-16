@@ -1,8 +1,8 @@
 # devbox
 
-A tool for launching project-scoped development virtual machines. Its primary
-use cases are sandboxed agentic development, and cross-platform development and
-benchmarking on cloud VMs.
+A tool for launching development virtual machines and attaching projects to
+them. Its primary use cases are sandboxed agentic development, and
+cross-platform development and benchmarking on cloud VMs.
 
 devbox gives you an easy-to-use CLI for creating, managing, and interacting with
 those machines, and ships with an agent skill.
@@ -20,24 +20,84 @@ a project's toolchain — is provisioned by composable, idempotent **mods** run
 **over SSH** after boot, so a box can be reconverged in place (`devbox sync
 --mods`) instead of rebuilt.
 
-### Two accounts per box
+### A box is not a project
 
-A box has two users, and AI agents run as the one without privilege:
+A **box** is a VM. A **project** is a directory on your host with a
+`.devbox/config.toml` in it. Several projects can live on one box, each in its
+own unprivileged account — because the VM is what provides *security* isolation,
+and the accounts are mostly for *organization*.
 
-| | **privileged** (`user`, default `$USER`) | **agent** (`agent_user`, default = the project name) |
+| | **box** | **project** |
 | --- | --- | --- |
+| is | a machine: provider, resources, image, hostname | content: an account, a checkout, creds, mods |
+| named | `dev`, `ec2-dev` (canonical instance name) | the marker directory's basename |
+| owns | the privileged account, system packages | its `agent_user`, `[repo]`, `mods`, `[env]`, `[[sync]]` |
+| created by | `devbox box create dev [flags]` | `devbox create`, which attaches it to its box |
+| configured by | **command-line flags only** — there is no box config file | `.devbox/config.toml` |
+| recorded in | the instance's own tags / libvirt `<metadata>` | `/etc/devbox/projects/<agent_user>` on the box |
+
+A project says which box it lives on with `box = "dev"`. It defaults to the
+project's own name, so a project that never mentions a box gets one to itself —
+which is why the single-box case still needs no configuration at all.
+
+**No box config file.** A box's resources are fixed the moment it is created and
+readable from the provider afterwards, so a persisted spec could only ever
+disagree with the machine. Box flags therefore live on the command line and
+nowhere else. The one fact devbox does record on the instance is the **privileged
+username**, because it needs that to build the box's SSH alias *before* it can
+log in and ask. The cost of this is real but small: recreating a destroyed box
+means retyping the flags.
+
+### Accounts on a box
+
+Every box has one privileged user and one unprivileged account per attached
+project. AI agents run as the latter:
+
+| | **privileged** (`--user`, default `$USER`) | **agent** (`agent_user`, default = the project name) |
+| --- | --- | --- |
+| how many | one per box | one per attached project |
 | sudo | NOPASSWD `ALL` | **none**, and in no group that grants it |
-| home | `/home/<user>`, `0750` | `/home/<agent_user>`, `0750` |
-| holds | the provisioning payload, `~/provision.log` | the repo checkout, `~/.claude`, `~/.local/bin`, the `[env]` creds |
-| SSH | `devbox ssh --admin` | `devbox ssh` (the default) |
-| created by | the init script, at first boot | the provisioning driver, so it reconverges |
+| home | `/home/<user>`, `0750` | `/home/<agent_user>`, `0750`, own group |
+| holds | the provisioning payload, the provision logs | that project's checkout, `~/.claude`, `~/.local/bin`, its `[env]` creds |
+| SSH | `devbox box ssh <box>` | `devbox ssh` (from the project) |
+| created by | the init script, at first boot | the provisioning driver, at attach, so it reconverges |
 
 **What this buys, and what it doesn't.** A sudoless agent still has full network
 egress and still holds `GITHUB_TOKEN` / `LINEAR_API_KEY` — which for most threat
 models *are* the crown jewels. This is containment of **system integrity**, not
 of **credential exfiltration**. What it does gain: the agent can't tamper with
-the provisioner or the system, can't read the privileged user's home, can't
-persist outside its own, and has a crisply defined blast radius.
+the provisioner or the system, can't read the privileged user's home *or any
+other project's*, can't persist outside its own, and has a crisply defined blast
+radius.
+
+**What sharing a box costs.** Worth knowing before you put two projects on one
+machine:
+
+- **One apt namespace.** A `# packages:` line or a `# runas: root` mod from one
+  project upgrades a library every other project builds against. Per-project
+  toolchains belong in `$HOME` (rustup, uv, nvm — which is already how every
+  base mod but `dotfiles-packages` works). devbox warns when a project run
+  includes a privileged mod, since that writes state the whole box shares.
+- **`devbox box destroy` takes everyone's uncommitted work.** The confirm prompt
+  names the attached projects, and the project-level `devbox destroy` refuses
+  outright when anything else is on the box.
+- **Every attached project's tokens are on one machine.** The 0600 per-account
+  env files keep agents out of each other's, but a kernel escape from any one of
+  them yields all of them. Prefer repo-scoped PATs in a project's own `[env]`,
+  and note that a *global* `[env]` `GITHUB_TOKEN` now sits on a box shared with
+  unrelated projects.
+- **`/proc/<pid>/cmdline` is world-readable**, so one agent can read another's
+  argv. (`environ` is 0400, so the env file itself stays private.) A
+  `# runas: root` box mod mounting `/proc` with `hidepid=2` is the fix if that
+  matters to you; devbox doesn't ship one.
+- **Shared CPU, RAM and disk.** N agents running `cargo build` contend, and one
+  can ENOSPC the rest. Box sizing is now an N-project decision.
+- **Duplication, deliberately.** Each account gets its own oh-my-zsh, jj binary,
+  Claude Code install and vim plugins — a few minutes and a few hundred MB per
+  attach, accepted in exchange for accounts that don't share state.
+- **One provisioning run per box at a time.** Concurrent attaches share apt's
+  lock (devbox sets `DPkg::Lock::Timeout=600`) and the ownership markers are
+  written atomically, but nothing serializes two full runs.
 
 > **Never grant the agent partial sudo.** `NOPASSWD: /usr/bin/apt-get` is
 > equivalent to full root — `apt-get install ./evil.deb` runs maintainer scripts
@@ -53,21 +113,20 @@ build dependency mid-task, it now needs a `# packages:` line on a mod and a
 `devbox sync --mods`. First boot installs `build-essential` and `pkg-config` to
 cover the common case.
 
-**Migrating an existing box: recreate it.** There is no in-place upgrade. A
-`devbox sync --mods` against a box built under the old single-user model will
-create the agent account and move the canonical checkout to its home, but
-nothing moves the old tree — it stays in the privileged user's home, orphaned and
-no longer synced or fetched. The driver warns when it sees one. Land any work in
-flight first (`devbox jj fetch`), then `destroy` + `create`.
+**Attaching to an existing box.** An account that already exists but has no
+ownership record — a box built before devbox tracked attachments, or an account
+somebody made by hand — is **refused**, rather than silently moved into. Claim it
+once with `devbox create --adopt`. An account that belongs to a *different*
+project is refused outright; pick another `agent_user`, or detach that project.
 
 Once a box is up, the way you work with it —
-`ssh`/`exec`/`list`/`provision`/`jj fetch`/`sync` — is backend-independent; only
+`ssh`/`list`/`jj fetch`/`sync` — is backend-independent; only
 `create`/`up`/`stop`/`destroy` and address discovery are provider-specific (a
-thin `Provider` seam). All projects share one cached base image (libvirt), one
-global config, and one base provisioning playbook of idempotent "mods" (jj,
-dotfiles, Claude Code, GitHub auth, repo bootstrap) that devbox owns; each
-project appends only what's different via a `mods = [...]` list. `devbox` finds
-"which instance belongs to the project in the current working directory" the way
+thin `Provider` seam). All boxes share one cached base image (libvirt) and one
+global config, and every attachment runs the same base playbook of idempotent
+"mods" (jj, dotfiles, Claude Code, GitHub auth, repo bootstrap) that devbox owns;
+each project appends only what's different via a `mods = [...]` list. `devbox`
+finds "which box the project in the current working directory lives on" the way
 `git`/`direnv`/`mise` locate their own markers.
 
 ## Example Workflow
@@ -86,9 +145,10 @@ url = "https://github.com/<org>/my-project"
 Then, from anywhere inside the project:
 
 ```bash
-devbox create      # download the base image (cached), boot the VM, provision it
-                   #   over SSH (mods + [[sync]] files) — blocks until ready
-devbox ssh         # log into the sandbox
+devbox create      # boot a box named after the project (base image cached),
+                   #   then attach: create its account, inject creds, run the
+                   #   mods, push [[sync]] files — blocks until ready
+devbox ssh         # log into the sandbox as this project's account
 ```
 
 Work in the sandbox (e.g. let an agent make changes), bookmark what should be
@@ -103,58 +163,86 @@ jj new wip@devbox-my-project   # check it out locally
 ```
 
 `devbox stop` shuts the box down (keeping its disk); `devbox destroy` tears it
-down entirely. Launching a cloud box instead is the same flow with `devbox
-create --provider ec2 --name my-project-arm` (or `--provider aws` for
-Lightsail) — see [Per-project setup](#per-project-setup) for the `[ec2]` /
-`[lightsail]` config.
+down entirely.
+
+**Sharing one box between projects.** Create the box once, then point each
+project at it:
+
+```bash
+devbox box create dev --vcpus 8 --memory 32768    # or --provider ec2/aws
+# in each project's .devbox/config.toml:  box = "dev"
+cd ~/src/binius && devbox create                  # attaches as user `binius`
+cd ~/src/web    && devbox create                  # attaches as user `web`
+devbox box list --attached                        # who is on which box
+```
+
+Each project gets its own account, checkout, creds and SSH alias on the shared
+machine. `devbox detach` gives an account up again.
 
 ## Usage
 
+**Box commands** act on a machine and take its name.
+
 | Command | Behavior |
 |---|---|
-| `devbox create` | Launch the project's default libvirt VM (bare-named = the project), or a named cloud instance with `--provider ec2\|aws --name <n>`. Renders the init script and first-boots the instance with it as user-data (libvirt NoCloud seed / EC2 `UserData` / Lightsail `userData`), and stamps the instance (libvirt `<metadata>` / AWS tags). Errors if the name already exists anywhere (global-uniqueness). |
-| `devbox list` | List devbox-managed instances — name, provider, project, state, resources, uptime (cloud rows show the EC2 instance type / Lightsail bundle and a `($)` cost flag while running). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + EC2 + Lightsail (account-wide, by `devbox:managed` tag). |
-| `devbox up` | Start an already-defined, shut-off domain. Errors if undefined — run `create` first. |
-| `devbox stop` | Gracefully shut down (ACPI) a running domain. |
-| `devbox destroy` | Tear down the domain and its overlay disk (the cached base image is left alone). |
-| `devbox ip` | Print the domain's IPv4. |
-| `devbox ssh [-- args...]` | `ssh` into the domain as the **unprivileged agent user** — where the repo checkout and tooling live. `devbox ssh --admin` logs in as the privileged user instead; that's the box's only sudo shell, for debugging the machine itself. |
-| `devbox status` | SSH in (as the privileged user, whose home holds the log) and show `cloud-init status --long` plus the tail of `~/provision.log`. |
-| `devbox sync --envvars` | (Re-)write the box's devbox-managed 0600 `[env]` files — scoped creds/vars (`GITHUB_TOKEN`, API keys) into the shell env of the account each one's `owner` names. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
-| `devbox sync --mods[=a,b,c]` | (Re-)run the provisioning **mods** over SSH against a running box — reconverge (bump jj, add a plugin, re-apply a project's rust mod) without destroy+create. Covers base **and** project mods. Idempotent; tees to `~/provision.log` (per-mod logs in `~/provision/`). No list runs the whole playbook; a comma-separated list runs just those (fast iteration). |
+| `devbox box create NAME [flags]` | Launch a box: bare-named for libvirt, `<provider>-NAME` with `--provider ec2\|aws`. Renders the init script and first-boots the instance with it as user-data (libvirt NoCloud seed / EC2 `UserData` / Lightsail `userData`), stamps it (libvirt `<metadata>` / AWS tags), then runs the **box playbook**. Idempotent: an existing box is left alone. Errors if the name is taken on another provider (global-uniqueness). Flags: `--provider --user --vcpus --memory --disk --instance-type --arch --ami --spot/--on-demand --bundle --blueprint --zone`. |
+| `devbox box list [--attached]` | List devbox-managed boxes — name, provider, state, resources, uptime (cloud rows show the EC2 instance type / Lightsail bundle and a `($)` cost flag while running). `--attached` adds a PROJECTS column, read from each box (one SSH per row, hence opt-in). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + EC2 + Lightsail (account-wide, by `devbox:managed` tag). `devbox list` is the same command. |
+| `devbox box up NAME` | Start an already-defined, shut-off box. Errors if undefined — run `box create` first. |
+| `devbox box stop NAME` | Gracefully shut down (ACPI) a running box; says so when more than one project is attached. |
+| `devbox box ssh NAME [-- args...]` | `ssh` in as the **privileged user** — the box's only sudo shell, for debugging the machine itself. |
+| `devbox box status NAME` | SSH in as the privileged user and show `cloud-init status --long` plus the tail of the box's own `~/provision.log`. |
+| `devbox box sync --mods[=a,b,c]` | Reconverge the **box playbook** (system state and the privileged account) without touching any attachment. |
+| `devbox box destroy NAME` | Tear down the box and its disk (the cached base image is left alone). The confirm prompt names every attached project, since their checkouts go with it. |
+
+**Project commands** act on this project's account on its box, and take no name.
+
+| Command | Behavior |
+|---|---|
+| `devbox create` | Ensure the project's box exists, then **attach**: create its unprivileged account, inject the `[env]` creds, run the project playbook, push `[[sync]]` files. Idempotent — re-running is a reconverge. Boots the box itself when the project owns it (i.e. no `box =` key) or when box-create flags are passed; otherwise says to run `devbox box create` first. `--adopt` claims an account devbox has no record of. |
+| `devbox ssh [-- args...]` | `ssh` in as **this project's** unprivileged account — where its checkout and tooling live. (The box's sudo shell is `devbox box ssh <box>`.) |
+| `devbox status` | cloud-init progress plus the tail of this project's `~/provision-<agent_user>.log`. |
+| `devbox ip` | Print the box's IPv4. |
+| `devbox sync --envvars` | (Re-)write the devbox-managed 0600 `[env]` files — scoped creds/vars (`GITHUB_TOKEN`, API keys) into the shell env of the account each one's `owner` names. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
+| `devbox sync --mods[=a,b,c]` | (Re-)run this project's **mods** over SSH — reconverge (bump jj, add a plugin, re-apply a rust mod) without destroy+create. No list runs the whole project playbook; a comma-separated list runs just those (fast iteration). |
 | `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync — agent skills, git-excluded project files. Re-runnable + incremental. See "Host→box file sync" below. |
-| `devbox jj fetch` | jj-fetch the instance's bookmarked work into your local repo: refreshes the SSH alias (address via the provider — libvirt or EC2), ensures the `devbox-<name>` jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
-| `devbox host` | Refresh the SSH aliases used for `jj fetch` (below); prints the agent alias, and names the `-admin` one. |
+| `devbox jj fetch` | jj-fetch the account's bookmarked work into your local repo: refreshes the SSH alias (address via the provider), ensures the jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
+| `devbox host` | Refresh the SSH aliases used for `jj fetch` (below); prints this project's alias, and names the admin one. |
+| `devbox detach [--purge]` | Give up this project's account: drop its ownership record, its authorized key and its creds, and lock it. The home — and any uncommitted work in it — survives, so `devbox create` re-attaches instantly. `--purge` terminates the account's sessions and `userdel -r`s it, behind the same confirmation as `destroy`. |
+| `devbox destroy` | Tear down the whole box — **refused** when any other project is attached, pointing at `detach` / `box destroy` instead. |
 
 `devbox sync` requires at least one of `--envvars`/`--mods`/`--files` (any
 combination). They run in that order — env before mods (a mod may need a cred,
 e.g. a private clone), files last (dsts can depend on the repo being cloned).
-It's the same steps `devbox create` runs on a fresh box.
+It's the same steps `devbox create` runs when attaching.
 
-Each instance gets **two** SSH aliases: `devbox-<name>` for the agent (the one
-`jj fetch` and `--files` use, and the name every existing jj remote already
-carries) and `devbox-<name>-admin` for the privileged user (`--envvars` and
-`--mods`, both of which need sudo).
+Each box gets a `devbox-<box>-admin` SSH alias for the privileged user
+(`--envvars` and `--mods`, both of which need sudo), and **one alias per
+attachment** for the project's own account: `devbox-<box>-<project>`, which
+collapses to plain `devbox-<box>` when the project owns the box — so the
+single-project case keeps the alias every existing jj remote already carries.
+Each lives alone in its own file under `~/.config/devbox/ssh/`.
 
-Every subcommand accepts `-C/--project-dir PATH` and `--name NAME` (both
+Every subcommand accepts `-C/--project-dir PATH` and `--box NAME` (both
 before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
-resolves a project other than the current directory; `--name` targets a
-specific instance instead of the project's libvirt default.
+resolves a project other than the current directory; `--box` targets a specific
+box instead of the project's own. `--name` is accepted as an alias for `--box`.
 
 **Changing the first-boot init script (the packages/login user/`BASH_ENV` in
-devbox's `init-script.sh`) only takes effect via `destroy` + `create`, never
-`up`** — user-data runs once, on first boot (on libvirt, cloud-init's NoCloud
-seed ISO is only attached then), so an already-created instance never re-runs
+devbox's `init-script.sh`) only takes effect via `box destroy` + `box create`,
+never `up`** — user-data runs once, on first boot (on libvirt, cloud-init's
+NoCloud seed ISO is only attached then), so an already-created box never re-runs
 it. The
 provisioning **mods**, by contrast, reconverge in place: `devbox sync --mods`
-re-delivers the driver + mods + env over SSH and re-runs them on a live box, so
-edits to a mod (or to the context it consumes — jj identity, GitHub token,
-`[repo]`, a project's `mods` list) apply without a rebuild.
+re-delivers the driver + mods + context over SSH and re-runs them on a live box,
+so edits to a mod (or to the context it consumes — jj identity, GitHub token,
+`[repo]`, a project's `mods` list) apply without a rebuild. So does
+`agent_user`: the account is the driver's to create, not first boot's, which is
+why attaching a second project needs no rebuild either.
 
-### Project & instance resolution
+### Project & box resolution
 
-Instance-operating subcommands first find the **project** (except `list`,
-which is global and skips this):
+Project subcommands first find the **project** (box subcommands and `list` are
+global and skip this):
 
 1. Start at `-C PATH` if given, else the current directory.
 2. Walk upward (like `git` searching for `.git`) looking for
@@ -163,9 +251,9 @@ which is global and skips this):
 4. No marker found up to `/` → error telling you to pass `-C` or add a
    `.devbox/config.toml` to the project.
 
-Then they resolve **which instance** within it: an explicit `--name` wins;
-otherwise the project's libvirt default (bare-named = the project). Daily use
-(one local VM per project) never needs `--name`.
+Then they resolve **which box**: an explicit `--box` wins, then the project's
+`box` key, then — for a project that has never mentioned one — its own name.
+Daily use never needs `--box`.
 
 ## Requirements
 
@@ -303,15 +391,17 @@ to other contributors — there's nothing project-shareable in here, it's
 purely this machine's VM config):
 
 ```toml
-# project = "my-project"    # a label on this project's instances
+# project = "my-project"    # this project's name
 #                           # (default: the directory's basename)
-# provider = "libvirt"      # default provider for a bare `devbox create`
-# user = "jimpo"            # the PRIVILEGED account (sudo). Default: host $USER
+# box = "dev"               # the box to attach to, by canonical instance name
+#                           # (default: the project's own name, i.e. a box of
+#                           # its own). Create it with `devbox box create`.
 # agent_user = "my-project" # the UNPRIVILEGED account agents run as (no sudo).
 #                           # Default: the project name. Must be a legal Linux
-#                           # username, differ from `user`, and not be a system
-#                           # or cloud-image account — validated up front.
-# vcpus, memory_mib, disk_gb optionally override the global [defaults]
+#                           # username and not a system or cloud-image account —
+#                           # validated up front. It must also differ from the
+#                           # box's privileged account, which is only knowable
+#                           # at attach time, so that is checked there.
 # mods = ["rust"]           # provisioning mods appended after the base playbook
 #                           # (see "Provisioning: mods" below)
 
@@ -333,78 +423,61 @@ url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
 # [[repo.sync]]
 # src = ".claude/skills"         # -> ~/<repo.dir>/.claude/skills on the box
 
-[ec2]                       # optional; EC2 launch defaults for --provider ec2
-instance_type = "g5.xlarge"  # required if [ec2] is present
-architecture = "x86_64"      # "x86_64" | "arm64" (drives the AMI lookup)
-# ami = "ami-0123..."        # optional: pin an explicit AMI (skips the lookup)
-# ami_name_filter = "..."    # optional: override the Ubuntu AMI name glob
-# spot = true                # optional: override the global [ec2].spot default
-# interruption_behavior = "stop"   # spot only: stop | terminate | hibernate
-# disk_gb (above) doubles as the EBS root volume size on EC2
-
-[lightsail]                 # optional; launch defaults for --provider aws
-                            #   (Lightsail). Every key has a default, so the
-                            #   section can be omitted entirely.
-# bundle = "xlarge_3_0"     # optional: pin an explicit Lightsail bundle id.
-                            #   Default: xlarge_3_0 — 16 GB RAM / 4 vCPU /
-                            #   320 GB SSD (~$84/mo). x86 only: Lightsail has
-                            #   no ARM bundles, so there is no `architecture`.
-# blueprint = "ubuntu_24_04"        # optional: the OS image. Default = the
-                            #   newest Ubuntu LTS blueprint Lightsail offers,
-                            #   which trails the 26.04 libvirt/ec2 userland.
-# availability_zone = "us-east-1b"  # optional; default = <[aws].region> + "a"
-# disk_gb does NOT apply here — a Lightsail bundle fixes CPU/RAM/disk together
 ```
 
-A **project** is a label, not a machine: it can have several instances. The
-default one is a libvirt domain **bare-named = the project**, which `devbox
-create` (no args) makes. Cloud instances always carry an explicit name:
-`devbox create --provider ec2 --name binius-arm`.
+**Hardware is not project config.** `provider`, `user`, `vcpus`, `memory_mib`,
+`disk_gb`, `[ec2]` and `[lightsail]` describe a *box*, so they are flags to
+`devbox box create` and devbox errors if it finds any of them in a project's
+config — silently ignoring `vcpus = 16` would boot the wrong-sized machine.
 
-Instance names encode the provider so every command can route to the right
-backend from the name alone — no API call or credential load just to find an
-instance's owner. The scheme:
+```bash
+devbox box create dev --vcpus 8 --memory 32768 --disk 200
+devbox box create dev --provider ec2 --instance-type g5.xlarge --arch x86_64 [--ami ami-0123... --spot]
+devbox box create dev --provider aws --bundle xlarge_3_0 [--blueprint ubuntu_24_04 --zone us-east-1b]
+```
+
+Anything not given falls back to the global `[defaults]`. `--disk` is ignored on
+Lightsail, whose bundle fixes CPU/RAM/disk together.
+
+Box names encode the provider so every command can route to the right backend
+from the name alone — no API call or credential load just to find a box's owner.
+The scheme:
 
 - **Canonical name** = `<provider>-<name>` for cloud providers, **bare** for
-  libvirt (local is the common case, and "bare = the project's libvirt
-  default" is worth keeping). So `create --provider ec2 --name binius-arm`
-  composes **`ec2-binius-arm`** — that's the identity `devbox list` shows and
-  that every later command references: `devbox --name ec2-binius-arm ssh`
-  queries EC2 even from a libvirt-default project.
-- `--provider` is **create-only**; `project.provider` is purely the
-  bare-`create` default. Per-instance commands (`ip`/`ssh`/`status`/`stop`/
-  `up`/`destroy`/`provision`/`host`/`jj fetch`) derive the provider by parsing the
-  name: the first `-`-delimited segment routes to that provider if it's a known
-  keyword (`ec2`, `aws`, …), else libvirt.
+  libvirt (local is the common case). So `box create binius-arm --provider ec2`
+  composes **`ec2-binius-arm`** — that's the identity `devbox box list` shows,
+  what a project's `box =` key holds, and what every later command references.
+- Commands derive the provider by parsing the name: the first `-`-delimited
+  segment routes to that provider if it's a known keyword (`ec2`, `aws`, …),
+  else libvirt.
 - The `<provider>-` prefix is **added automatically** — pass the bare name to
-  `--name` (`binius-arm`, not `ec2-binius-arm`). devbox rejects a `--name` (or
-  a project name, for the bare libvirt case) that already starts with a known
-  provider prefix, so a name can't misparse.
+  `box create` (`binius-arm`, not `ec2-binius-arm`). devbox rejects a name that
+  already starts with a known provider prefix, so it can't misparse. The same
+  goes for a project name that would double as a bare libvirt box name.
 - Provider-side, the prefix is redundant, so the **AWS-side name drops it**:
   `ec2-binius-arm` shows as `devbox-binius-arm` in the EC2 console, and
   `aws-binius-arm` is created as the Lightsail instance `binius-arm`. devbox's
   own `devbox:name` addressing tag keeps the canonical prefixed name on both.
 
-Instance names are globally unique across providers (the prefix makes that fall
-out for free). Every config key is optional; an empty `config.toml` is a valid
-marker. `name` is no longer a field — devbox errors if it's present, to flag
-the migration.
+Box names are globally unique across providers (the prefix makes that fall out
+for free). Every project config key is optional; an empty `config.toml` is a
+valid marker. `name` is no longer a field — devbox errors if it's present, to
+flag the migration.
 
-cfleet's "instance templates" (`instance_type`/`architecture`/AMI/`spot`) fold
-into this `[ec2]` section; the same re-runnable provisioning (jj, dotfiles,
-Claude Code, `[repo]` bootstrap) runs on EC2 over SSH after boot, so a
-sandbox is identical whether it's a local libvirt VM or an EC2 instance.
+The same re-runnable provisioning (jj, dotfiles, Claude Code, `[repo]`
+bootstrap) runs over SSH after boot on every provider, so a sandbox is identical
+whether it's a local libvirt VM, an EC2 instance or a Lightsail box.
 
 The **aws** provider is AWS **Lightsail**: the same init script as user-data and
 the same provisioning, but flat-rate *bundles* instead of an instance type plus an
 EBS volume. Trade-offs worth knowing:
 
 - **Bundles fix the machine.** A bundle sets CPU, RAM, and disk together, so
-  `disk_gb` is ignored on this provider. The default, `xlarge_3_0`, is 16 GB RAM
-  / 4 vCPU / 320 GB SSD (~$84/mo). Set `bundle` to pin any other tier. There is
-  no `architecture` knob: Lightsail's Linux bundles are **x86-only** (no
-  ARM/Graviton tier), unlike `[ec2]`.
-- **The OS trails a little.** `blueprint` defaults to `ubuntu_24_04`, the newest
+  `--disk` is ignored on this provider. The default, `xlarge_3_0`, is 16 GB RAM
+  / 4 vCPU / 320 GB SSD (~$84/mo). Pass `--bundle` to pin any other tier. There
+  is no architecture knob: Lightsail's Linux bundles are **x86-only** (no
+  ARM/Graviton tier), unlike EC2.
+- **The OS trails a little.** `--blueprint` defaults to `ubuntu_24_04`, the newest
   Ubuntu LTS blueprint Lightsail offers — an older userland than the Ubuntu
   26.04 cloud image the libvirt and ec2 providers boot. The mods provision the
   same way on it; pin `blueprint` if you want something else.
@@ -415,9 +488,8 @@ EBS volume. Trade-offs worth knowing:
   security groups to configure — hence no global `[lightsail]` section.
 - **No spot market:** `--spot`/`--on-demand` are EC2-only and are ignored here.
 
-`devbox create --provider aws --name binius-box` needs nothing but `[aws]`
-creds; a project can select it with `provider = "aws"` and no `[lightsail]`
-section at all.
+`devbox box create binius-box --provider aws` needs nothing but `[aws]` creds and
+no other flag at all; a project then selects it with `box = "aws-binius-box"`.
 
 > **On IMDS and instance roles.** devbox attaches **no** instance profile on
 > either AWS provider, so there are no role credentials to steal at
@@ -451,20 +523,35 @@ the environment, not `%TOKEN%`s.
 
 Provisioning is a list of small, idempotent, composable bash scripts — **mods**
 (inspired by Ansible roles, without Ansible). A mod installs/configures one
-thing (jj, dotfiles, Claude Code, a project's rust toolchain, …). A project's
-effective **playbook** is the built-in base plus the project's own `mods`,
-appended:
+thing (jj, dotfiles, Claude Code, a project's rust toolchain, …). There are **two
+playbooks**, because a box and an attachment need different things:
 
 ```
-base (built-in, fixed order):  jj → github-auth → dotfiles-packages → dotfiles →
-                               vim → neovim → claude-code → repo-bootstrap
-project mods (config.toml):    + rust + wasm-tools + …
+box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim
+                                    # runs once per box, as root / the admin
+
+project playbook (built-in base):   jj → github-auth → dotfiles → vim → neovim →
+                                    claude-code → repo-bootstrap
+project mods (config.toml):         + rust + wasm-tools + …
+                                    # runs once per attachment, in its account
 ```
 
-Base ordering encodes the constraints (jj + github-auth before repo-bootstrap
-so a private `jj git clone` can authenticate; `dotfiles-packages`, the root half,
+Ordering encodes the constraints (jj + github-auth before repo-bootstrap so a
+private `jj git clone` can authenticate; `dotfiles-packages`, the apt half,
 before `dotfiles`, the per-user half). The 95% case is "just add rust":
 `mods = ["rust"]`.
+
+**A box takes no config, so its playbook is fixed** — `dotfiles-packages` is the
+one genuinely box-level mod in the base (apt, as root); everything else installs
+into somebody's home. A project that needs more *system* state ships a
+`# runas: root` mod of its own, which runs on the shared box when it attaches;
+devbox prints a warning naming it, since that writes state every other project
+sees.
+
+**`dotfiles` and `vim` are in both playbooks on purpose** — each declares
+`# runas: admin agent`, and each scope runs only its own half. The box runs the
+admin half once (so `devbox box ssh`, the debugging shell, is usable) and each
+attachment runs the agent half in its own account, without redoing the admin's.
 
 **Resolution** — each mod name resolves to a `<name>.sh` script by precedence
 **project > global > built-in**, so a project can shadow a built-in by name:
@@ -493,26 +580,37 @@ headers below instead. This is also why the payload carries no secrets: it has t
 be readable by the account the driver drops into.
 
 **Who a mod runs as (`# runas:`).** Default `agent`. Also `admin` (the privileged
-account) and `root`. A mod may name more than one and then runs once per target —
-`dotfiles` is `# runas: admin agent`, so `devbox ssh --admin` gets a usable shell
-too. Validated before any boot/SSH; an unknown target is a hard error.
+account) and `root`. A mod may name more than one, and then runs once per target
+that is in scope. That header is also what decides scope, so there is no second,
+drifting `# scope:` key to keep in sync:
+
+| the mod declares | in the **box** playbook it runs | in a **project** playbook |
+|---|---|---|
+| an `agent` target (e.g. `admin agent`) | everything *except* the agent | *only* the agent |
+| no agent target (e.g. `root`) | all of its targets | all of its targets |
+
+The filter is applied entirely host-side — the manifest the driver receives has
+already been narrowed — so the driver itself never reasons about scopes.
+Validated before any boot/SSH; an unknown target is a hard error.
 
 **System packages (`# packages:`).** `# packages: jq unzip` — apt-installed by
 the driver, as the privileged user, before the body runs. This is the sanctioned
-route now that a mod body has no sudo. The index is refreshed once per run.
+route now that a mod body has no sudo. The index is refreshed once per run. Note
+that apt is box-wide: a package one project asks for is installed for everybody.
 
 **Delivered over SSH** (one path). devbox tars the resolved driver + mods +
-context + manifest, pipes it to the box over the `devbox-<name>-admin` SSH alias
+context + manifest, pipes it to the box over the `devbox-<box>-admin` SSH alias
 (the driver needs sudo), extracts it into a per-run temp dir, and runs the
 driver. This is the **only** delivery path — the same for a fresh box and a
 reconverge:
 
-- **`devbox create`** — after boot (once the init script has created the
-  privileged user and installed packages), creates the agent account, injects the
-  `[env]` creds, runs the mods, then pushes `[[sync]]` files. `create` blocks
-  through all of it, so when it returns the box is fully provisioned.
-- **`devbox sync --mods[=a,b,c]`** — reconverge a live box; no list runs the
-  whole playbook, a list runs just those (fast iteration while writing a mod).
+- **`devbox box create`** — after boot, runs the box playbook.
+- **`devbox create`** — attaches: creates this project's account, injects the
+  `[env]` creds, runs the project playbook, then pushes `[[sync]]` files. It
+  blocks through all of it, so when it returns the project is fully provisioned.
+- **`devbox sync --mods[=a,b,c]`** / **`devbox box sync --mods`** — reconverge a
+  live box; no list runs the whole playbook, a list runs just those (fast
+  iteration while writing a mod).
 
 The init script carries **no** provisioning payload — it only does base setup.
 (Trade-off: the host must stay attached during `create`; if it disconnects
@@ -520,18 +618,23 @@ mid-provision, re-run `devbox sync --mods`.)
 
 The driver runs each mod in playbook order, stops at the first failure (naming
 which mod and which account), and tees each mod's output to
-`~/provision/<name>.log` — `~/provision/<name>.<user>.log` for a mod that runs
-for more than one account — plus the combined `~/provision.log` that `devbox
-status` tails. All of these live in the **privileged** user's home, since that
-is where the driver runs.
+`~/provision/<agent_user>/<name>.log` — `<name>.<user>.log` for a mod that runs
+for more than one account — plus the combined `~/provision-<agent_user>.log` that
+`devbox status` tails. Both are **per attachment**, so two projects reconverging
+don't overwrite each other's; a box run uses `~/provision/box/` and
+`~/provision.log`. All of these live in the **privileged** user's home, since
+that is where the driver runs.
 
-Before any mod, on every run, the driver ensures the box's users: it creates the
-agent account if absent (no supplementary groups, `0750` home, locked password,
-your SSH key authorized), locks both homes down, writes each account's
-`~/.bash_env`, and **refuses to continue** if the agent has somehow acquired sudo
-or a root-equivalent group. It is a driver preamble rather than a mod on purpose:
-it must always run, must not be shadowable by a project's `.devbox/mods/`, and
-must not be skippable via `devbox sync --mods=jj`.
+Before any mod, on every run, the driver ensures the accounts it is about to use:
+it wires the privileged user's `~/.bash_env`, then — for a project run — creates
+that project's account if absent (no supplementary groups, `0750` home, locked
+password, your SSH key authorized), records who owns it in
+`/etc/devbox/projects/<agent_user>`, and **refuses to continue** if the account
+belongs to another project, if it exists with no record at all (pass `--adopt`),
+or if the agent has somehow acquired sudo or a root-equivalent group. It is a
+driver preamble rather than a mod on purpose: it must always run, must not be
+shadowable by a project's `.devbox/mods/`, and must not be skippable via
+`devbox sync --mods=jj`.
 
 **Idempotency contract:** every mod either overwrites unconditionally or guards
 on "already done", so `create` and every reconverge are safe. Each built-in
@@ -541,8 +644,9 @@ mod's header documents which pattern it uses.
 first declares it with a header comment — `# requires: jj github-auth` (names
 space/comma-separated; repeat the line to add more, they're unioned). devbox
 parses this statically and, at playbook-resolution time (before any boot/SSH),
-hard-errors if a required mod is missing from the effective playbook or listed
-*after* the mod that needs it. It is **not** a resolver — it never reorders or
+hard-errors if a required mod is missing from either playbook or listed
+*after* the mod that needs it. The box playbook is indexed first, so a project
+mod may depend on a box mod - the machine exists before any attachment does. It is **not** a resolver — it never reorders or
 auto-inserts; it just validates order (so a future reorder can't silently break
 things). The `# requires:` line holds **only** dep names — no trailing inline
 comment (the parse runs to end of line). Built-in examples: `repo-bootstrap`
@@ -584,9 +688,9 @@ libvirt and EC2 (its scripts-user stage); Lightsail executes user-data as a
 shell script natively — it does **not** understand `#cloud-config`, which is
 why devbox has no cloud-config layer at all.
 
-`devbox create` renders it by literal `%TOKEN%` substitution (not `{{...}}`,
+`devbox box create` renders it by literal `%TOKEN%` substitution (not `{{...}}`,
 which collides with cloud-init's jinja): `%DEVBOX_USER%`, `%DEVBOX_SSH_PUBKEY%`
-and `%DEVBOX_HOSTNAME%` (the instance's canonical name). What it does, as root,
+and `%DEVBOX_HOSTNAME%` (the box's canonical name). What it does, as root,
 under `set -euo pipefail`:
 
 1. Creates the **privileged** user — `sudo` group, a `/etc/sudoers.d` NOPASSWD
@@ -600,8 +704,8 @@ under `set -euo pipefail`:
    `BASH_ENV=/etc/devbox/bash_env`, so non-interactive bash (e.g. Claude Code's
    Bash tool) picks up what the mods install. It is a **shared stub** that
    sources `$HOME/.bash_env`, because `/etc/environment` is one system-wide
-   table and the box has two accounts — a per-user path there would make one
-   user source the other's file. (`BASH_ENV=$HOME/…` is not an option: pam_env
+   table and a box has several accounts — a per-user path there would make one
+   user source another's file. (`BASH_ENV=$HOME/…` is not an option: pam_env
    reads `/etc/environment` as plain `KEY=VALUE`, so the expansion has to happen
    in bash.)
 4. Adds the official GitHub CLI apt repo, then installs the baseline the mods
@@ -612,10 +716,12 @@ under `set -euo pipefail`:
    distro upgrade.
 5. Switches the login shell to `zsh` now that it exists.
 
-It deliberately does **not** create the agent user. User-data runs once, at first
-boot, so an account born here could never appear on an existing box and changing
-`agent_user` would need a rebuild — the provisioning driver creates it instead,
-where it reconverges.
+It deliberately creates **no** project accounts. User-data runs once, at first
+boot, so an account born here could never appear on an existing box: attaching a
+second project — or changing an `agent_user` — would need a rebuild. The
+provisioning driver creates them instead, where they reconverge. This is also why
+first boot takes a *box*, not a project: it sets up the machine, and knows
+nothing about who will later live on it.
 
 Every step is idempotent, and the whole thing carries no provisioning payload —
 mods run over SSH afterwards. A project cannot extend this layer (the
@@ -653,9 +759,13 @@ from **both** that user's `~/.zshenv` (interactive zsh) **and** its `~/.bash_env
 *non-interactive bash*, which doesn't read `.zshenv` — so creds only in `.zshenv`
 would be invisible to the agent and anything it runs.
 
-Homes are 0750 and both files 0600, so the agent cannot read the privileged
-user's — which is the whole point of `owner`. The privileged side can read both;
-it is the trusted side of the box.
+Homes are 0750 with a per-user group and every file 0600, so no agent can read
+the privileged user's file — the whole point of `owner` — nor another project's.
+The privileged side can read them all; it is the trusted side of the box.
+
+Note the asymmetry a shared box introduces: the *global* `[env]` applies to every
+box, so a token there now reaches every project's account on a machine it shares
+with unrelated projects. Prefer a project's own `[env]` for anything scoped.
 
 **GitHub auth** is just `GITHUB_TOKEN` in `[env]`: `gh` reads it natively (no
 `gh auth login`, so nothing lands in `~/.config/gh/hosts.yml`), and the
@@ -712,7 +822,7 @@ include = ["jujutsu"]                   # only this child of src, not every skil
   `--delete`s box-installed skills outside the list. Without `include`, the whole
   `src` is one mirror of `src → dst`.
 
-**Mechanism:** `rsync` over the same `devbox-<name>` SSH alias, idempotent and
+**Mechanism:** `rsync` over this project's own SSH alias, idempotent and
 incremental (cheap to run often). **Host wins** — a mirror deletes host-removed
 files within a synced subtree, so an agent's box-side edits to a synced skill
 are clobbered on the next sync (acceptable for host-authored skills).
@@ -729,25 +839,30 @@ ships in the box's base packages.)
 The sandbox is a plain SSH-reachable git remote for the host, in both
 directions: the host **fetches** the agent's work to view/test it, and, for
 projects with no git server yet (`[repo] mode = "push"`), the host **pushes**
-to seed the sandbox with an initial commit. This is **identical whether the
-instance is libvirt, EC2, or Lightsail** — the address is resolved through the
+to seed the sandbox with an initial commit. This is **identical whether the box
+is libvirt, EC2, or Lightsail** — the address is resolved through the
 provider (libvirt DHCP lease, or the cloud instance's public IP); everything
 above that is the same
-jj-remote model. `[repo]` is project-level, so any instance in the project
-(`--name` to pick one) is fetched the same way.
+jj-remote model. The remote points at this project's own account, so two
+projects on one box fetch from two different homes over two different aliases.
 
-Both directions go through the `devbox-<name>` SSH alias, which `devbox jj fetch`
+Both directions go through this project's SSH alias, which `devbox jj fetch`
 and `devbox host` set up/refresh:
 
-- A dedicated known-hosts file, `~/.config/devbox/ssh/known_hosts`,
-  **truncated on every `devbox create`** (a freshly created instance has a
-  brand-new SSH host key, so stale entries can only cause false mismatches).
-- A `Host devbox-<name>` block in `~/.config/devbox/ssh/<name>.conf` with the
-  instance's current IP (from the provider), SSH user, and
-  `StrictHostKeyChecking accept-new` scoped to that dedicated known-hosts file
-  — regenerated on every call since the address can change across `stop`/`up`
+- A per-box known-hosts file, `~/.config/devbox/ssh/known_hosts.<box>`,
+  **truncated when that box is created** (a freshly created box has a brand-new
+  SSH host key, so stale entries can only cause false mismatches). Per box, not
+  shared: creating a *different* box must not invalidate this one's pinned key
+  for every project attached to it.
+- A `Host devbox-<box>-<project>` block — collapsing to `devbox-<box>` when the
+  project owns the box — alone in `~/.config/devbox/ssh/<box>.<project>.conf`,
+  with the box's current IP (from the provider), the project's account, and
+  `StrictHostKeyChecking accept-new` scoped to that box's known-hosts file. It is
+  regenerated on every call since the address can change across `stop`/`up`
   cycles (a libvirt DHCP lease, or a new public IP after stop/start — Lightsail
   boxes use a dynamic IPv4, so this is expected there rather than exceptional).
+  One stanza per file is what keeps attachments independent: a single shared file
+  per box would have each project's refresh overwrite the last one's account.
 - A one-time, idempotent `Include ~/.config/devbox/ssh/*.conf` line in
   `~/.ssh/config`.
 
@@ -768,8 +883,8 @@ jj new wip@devbox-my-project         # check out the fetched bookmark
 ```
 
 `devbox jj fetch` refreshes the SSH alias (address via the provider), ensures a jj
-git remote named after the alias (`devbox-<name>`) points at the instance's
-colocated repo (`ssh://devbox-<name>/home/<agent_user>/<dir>`), and runs `jj git
+git remote named after the alias points at this project's
+colocated repo (`ssh://<alias>/home/<agent_user>/<dir>`), and runs `jj git
 fetch`. It's equivalent to the manual flow:
 
 ```bash
@@ -812,11 +927,11 @@ uv sync              # create .venv with dev dependencies (pytest)
 uv run pytest        # run the test suite
 ```
 
-The code is a `devbox/` package: `config` (global/project config), `provision`
-(modular mods — resolution, env context, payload/driver assembly), `initscript`
-(first-boot user-data script render), `sync` (host→box rsync file sync),
-`cli` (subcommands + argparse), and a `providers/` package — a `Provider` seam
-(`providers/base.py`) with `libvirt`, `ec2`, and `lightsail` (the `aws`
-provider) implementations. Data files
+The code is a `devbox/` package: `config` (global/project config, `BoxSpec`),
+`provision` (modular mods — resolution, scope, env context, payload/driver
+assembly), `initscript` (first-boot user-data script render), `sync` (host→box
+rsync file sync), `cli` (subcommands + argparse), and a `providers/` package — a
+`Provider` seam (`providers/base.py`) with `libvirt`, `ec2`, and `lightsail` (the
+`aws` provider) implementations. Data files
 (`init-script.sh`, `provision-driver.sh`) live inside the package; the built-in
 `mods/*.sh` live at the repo root.
