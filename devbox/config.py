@@ -72,8 +72,15 @@ DEFAULT_ENV_OWNER = "agent"
 
 GLOBAL_CONFIG_PATH = Path.home() / ".config" / "devbox" / "config.toml"
 SSH_DIR = Path.home() / ".config" / "devbox" / "ssh"
-KNOWN_HOSTS_PATH = SSH_DIR / "known_hosts"
 SSH_USER_CONFIG = Path.home() / ".ssh" / "config"
+
+
+def known_hosts_path(box: str) -> Path:
+    """The known-hosts file for one box. Per box, not shared: several projects
+    now point at the same machine, and creating a *different* box must not
+    invalidate this one's pinned key for all of them."""
+    return SSH_DIR / f"known_hosts.{box}"
+
 
 # Built-in fallbacks for any key not set in the (optional) global config, so
 # `devbox` works with zero global setup. Override via ~/.config/devbox/config.toml.

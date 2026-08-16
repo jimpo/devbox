@@ -33,9 +33,10 @@ from .util import die
 # tool and a human at a shell.
 #
 # Each entry lands in exactly one of the two files, per its `owner` (see
-# config.EnvVar): the agent's by default, the privileged user's for a cred that
-# only a `# runas: admin|root` mod needs. Homes are 0750 and the files 0600, so
-# the agent cannot read the admin's; the privileged side can read both.
+# config.EnvVar): this project's agent by default, the box's privileged user for
+# a cred that only a `# runas: admin|root` mod needs. Homes are 0750 with a
+# per-user group and the files 0600, so no agent can read another project's
+# creds, nor the admin's; the privileged side can read them all.
 GUEST_ENV_REL = ".config/devbox/env"
 _ENV_SOURCE_LINE = '[ -f "$HOME/.config/devbox/env" ] && . "$HOME/.config/devbox/env"'
 
@@ -50,7 +51,7 @@ def run_envvars(alias: str, env: dict, agent_user: str) -> None:
 
     `alias` is the PRIVILEGED user's alias: it owns one of the files, and reaches
     the other's home with sudo. The agent's home must already exist - `devbox
-    create` and `devbox sync` run the driver's `--ensure-users` preamble first."""
+    create` and `devbox sync` run the driver's `--ensure-agent` preamble first."""
     user = shlex.quote(agent_user)
     home = shlex.quote(f"/home/{agent_user}")
     line = shlex.quote(_ENV_SOURCE_LINE)

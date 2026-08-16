@@ -641,6 +641,9 @@ def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubke
     assert "export DEVBOX_ADMIN_USER=alice" in ctx
     assert "export DEVBOX_AGENT_USER=agentbot" in ctx
     assert "export DEVBOX_USER=" not in ctx
+    # Which project owns the account, so the driver can refuse to hand it to a
+    # second one rather than silently sharing a home.
+    assert "export DEVBOX_PROJECT=test-project" in ctx
     # The host's public key, so the driver can authorize it for the agent account
     # it creates. Public by definition, so it belongs in the payload.
     assert "export DEVBOX_SSH_PUBKEY='ssh-ed25519 AAAAtest user@host'" in ctx
@@ -1599,8 +1602,7 @@ def test_run_driver_makes_the_payload_readable_by_the_agent(monkeypatch):
     # has to be readable by it. mktemp -d is always 0700 whatever the umask, and
     # tar applies the umask to what it creates - including the `mods/` directory,
     # which the archive only implies. Both need pinning or every mod EACCESes.
-    c = _captured_driver_run(monkeypatch, "devbox-foo-admin", b"tar", [],
-                             log=devbox.PROVISION_LOG)
+    c = _captured_driver_run(monkeypatch, "devbox-foo-admin", b"tar", [], log=True)
     remote = c["remote"]
     assert "umask 022" in remote
     assert 'chmod 0755 "$d"' in remote
@@ -1612,62 +1614,109 @@ def test_run_driver_tees_only_when_asked(monkeypatch):
     # The full run's log is what `devbox status` tails; the --ensure-agent
     # preamble must not clobber it with its own two lines of output.
     with_log = _captured_driver_run(monkeypatch, "a", b"", [],
-                                    log=devbox.PROVISION_LOG)["remote"]
-    without = _captured_driver_run(monkeypatch, "a", b"", ["--ensure-users"])["remote"]
-    assert "provision.log" in with_log
+                                    log=devbox.provision_log("botty"))["remote"]
+    without = _captured_driver_run(monkeypatch, "a", b"", ["--ensure-agent"])["remote"]
+    assert "provision-botty.log" in with_log
     assert "tee" not in without                # nothing tee'd, so nothing clobbered
-    assert "--ensure-users" in without
+    assert "--ensure-agent" in without
+
+
+def test_provision_log_is_per_attachment():
+    # Two projects reconverging on one box must not overwrite each other's log.
+    assert devbox.provision_log("botty") == "provision-botty.log"
+    assert devbox.provision_log("webbot") == "provision-webbot.log"
+    assert devbox.provision_log() == "provision.log"      # the box's own
+
+
+def test_run_driver_passes_adopt_through_the_environment(monkeypatch):
+    # Not argv: the driver's own argv is "which mods to run", and nothing else.
+    remote = _captured_driver_run(monkeypatch, "a", b"", ["--ensure-agent"],
+                                  env={"DEVBOX_ATTACH_ADOPT": "1"})["remote"]
+    assert "export DEVBOX_ATTACH_ADOPT=1" in remote
+    assert remote.index("export DEVBOX_ATTACH_ADOPT=1") < remote.index("provision-driver.sh")
 
 
 def test_run_driver_quotes_mod_names(monkeypatch):
-    remote = _captured_driver_run(monkeypatch, "a", b"", ["rust", "a b"],
-                                  log=devbox.PROVISION_LOG)["remote"]
+    remote = _captured_driver_run(monkeypatch, "a", b"", ["rust", "a b"], log=True)["remote"]
     assert "rust 'a b'" in remote
 
 
-# ---- SSH aliases -------------------------------------------------------------
-def test_alias_names_agent_keeps_the_bare_name():
-    # `devbox-<box>` must keep pointing at the agent: it is the alias every
-    # existing jj remote already names, and the checkout is in the agent's home.
-    assert devbox.cli._alias_names("binius") == ("devbox-binius", "devbox-binius-admin")
+# ---- SSH aliases (one per attachment) ---------------------------------------
+def test_alias_names_collapse_when_the_project_owns_the_box():
+    # The one-project case keeps the exact alias every existing jj remote, doc
+    # and finger already names - the box and the project are the same word.
+    assert devbox.cli._alias_names("binius", _project(project="binius")) == \
+        ("devbox-binius", "devbox-binius-admin")
+
+
+def test_alias_names_are_per_attachment_on_a_shared_box():
+    assert devbox.cli._alias_names("dev", _project(project="binius", box="dev")) == \
+        ("devbox-dev-binius", "devbox-dev-admin")
+
+
+def test_alias_names_without_a_project_are_admin_only():
+    assert devbox.cli._alias_names("dev") == (None, "devbox-dev-admin")
 
 
 @pytest.fixture
 def ssh_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(devbox.cli, "SSH_DIR", tmp_path / "ssh")
-    monkeypatch.setattr(devbox.cli, "KNOWN_HOSTS_PATH", tmp_path / "ssh" / "known_hosts")
+    monkeypatch.setattr(devbox.config, "SSH_DIR", tmp_path / "ssh")
     monkeypatch.setattr(devbox.cli, "SSH_USER_CONFIG", tmp_path / "user_ssh_config")
     return tmp_path / "ssh"
 
 
-def test_refresh_ssh_aliases_writes_both_stanzas(ssh_dir):
-    # The privileged user now comes from the box (its instance stamp) and the
-    # agent from the project - the two have different sources.
-    aliases = devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", "alice", _project())
+def test_refresh_ssh_aliases_writes_one_stanza_per_file(ssh_dir):
+    aliases = devbox.cli._refresh_ssh_aliases(
+        "binius", "10.0.0.5", "alice", _project(project="binius"))
     assert aliases == ("devbox-binius", "devbox-binius-admin")
 
-    conf = (ssh_dir / "binius.conf").read_text()
-    assert "Host devbox-binius\n    HostName 10.0.0.5\n    User agentbot\n" in conf
-    assert "Host devbox-binius-admin\n    HostName 10.0.0.5\n    User alice\n" in conf
-    assert conf.count("UserKnownHostsFile") == 2
+    agent = (ssh_dir / "binius.binius.conf").read_text()
+    admin = (ssh_dir / "binius.admin.conf").read_text()
+    assert "Host devbox-binius\n    HostName 10.0.0.5\n    User agentbot\n" in agent
+    assert "Host devbox-binius-admin\n    HostName 10.0.0.5\n    User alice\n" in admin
+    # Each points at the box's own known-hosts file.
+    assert f"UserKnownHostsFile {ssh_dir}/known_hosts.binius" in agent
+    assert f"UserKnownHostsFile {ssh_dir}/known_hosts.binius" in admin
 
 
-def test_refresh_ssh_aliases_without_a_project_is_admin_only(ssh_dir):
-    # A box command has no project to write an agent stanza for.
-    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", "alice")
-    conf = (ssh_dir / "binius.conf").read_text()
-    assert "Host devbox-binius-admin\n" in conf
-    assert conf.count("Host ") == 1
+def test_refresh_ssh_aliases_keeps_attachments_independent(ssh_dir):
+    # The regression that makes sharing a box safe: one file per box would have
+    # each project's refresh overwrite the last one's account, pointing you at
+    # the wrong home without ever erroring.
+    first = _project(project="binius", box="dev", agent_user="biniusbot")
+    second = _project(project="web", box="dev", agent_user="webbot")
+    devbox.cli._refresh_ssh_aliases("dev", "10.0.0.5", "alice", first)
+    before = (ssh_dir / "dev.binius.conf").read_text()
+    devbox.cli._refresh_ssh_aliases("dev", "10.0.0.5", "alice", second)
+
+    assert (ssh_dir / "dev.binius.conf").read_text() == before   # untouched
+    assert "User webbot" in (ssh_dir / "dev.web.conf").read_text()
+    # ...and exactly one admin stanza between them. `Include .../*.conf` is
+    # first-match-wins, so a second copy could shadow the current address.
+    assert sorted(p.name for p in ssh_dir.glob("*.conf")) == [
+        "dev.admin.conf", "dev.binius.conf", "dev.web.conf"]
 
 
 def test_refresh_ssh_aliases_rewrites_cleanly_on_a_new_address(ssh_dir):
     # Written whole each time, so a re-created box can't leave a stale duplicate
     # stanza behind.
-    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", "alice", _project())
-    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.9", "alice", _project())
-    conf = (ssh_dir / "binius.conf").read_text()
+    project = _project(project="binius")
+    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", "alice", project)
+    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.9", "alice", project)
+    conf = (ssh_dir / "binius.binius.conf").read_text()
     assert conf.count("Host devbox-binius\n") == 1
     assert "10.0.0.5" not in conf
+
+
+def test_truncate_known_hosts_is_scoped_to_one_box(ssh_dir):
+    # Creating box B must not invalidate box A's pinned key - which, on a shared
+    # box, would be every project attached to it.
+    devbox.cli._refresh_ssh_aliases("a", "10.0.0.5", "alice")
+    devbox.config.known_hosts_path("a").write_text("10.0.0.5 ssh-ed25519 AAAA\n")
+    devbox.cli.truncate_known_hosts("b")
+    assert devbox.config.known_hosts_path("a").read_text() != ""
+    assert devbox.config.known_hosts_path("b").read_text() == ""
 
 
 def test_plan_sync_defaults_the_guest_home_to_the_agent(tmp_path):
@@ -2371,8 +2420,10 @@ def _destroy_args(name=None, yes=False):
     return argparse.Namespace(name=name, box=name, yes=yes)
 
 
-def _patch_destroy(monkeypatch, provider, ssh_dir):
+def _patch_destroy(monkeypatch, provider, ssh_dir, attached=()):
     monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: provider)
+    monkeypatch.setattr(devbox.cli, "_attached_projects",
+                        lambda provider, name: list(attached))
 
 
 def test_cmd_destroy_yes_flag_destroys(monkeypatch, capsys, ssh_dir):
@@ -2394,6 +2445,35 @@ def test_cmd_destroy_declined_leaves_untouched(monkeypatch, capsys, ssh_dir):
     devbox.cli.cmd_destroy(_destroy_args(yes=False), gc, _project())
     assert provider.destroyed == []
     assert "Aborted" in capsys.readouterr().out
+
+
+def test_cmd_destroy_refuses_while_other_projects_are_attached(monkeypatch, ssh_dir):
+    # A shared box is somebody else's machine too: destroying it would take
+    # their checkouts with it, so the blast radius has to be spelled out.
+    provider = _RecordingProvider()
+    _patch_destroy(monkeypatch, provider, ssh_dir, attached=["test-project", "web"])
+    gc = _global_config(devbox.Path("/nonexistent"))
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_destroy(_destroy_args(yes=True), gc, _project())
+    assert provider.destroyed == []
+
+
+def test_cmd_destroy_proceeds_when_this_project_is_the_only_one(monkeypatch, ssh_dir):
+    provider = _RecordingProvider()
+    _patch_destroy(monkeypatch, provider, ssh_dir, attached=["test-project"])
+    gc = _global_config(devbox.Path("/nonexistent"))
+    devbox.cli.cmd_destroy(_destroy_args(yes=True), gc, _project())
+    assert provider.destroyed == ["test-project"]
+
+
+def test_confirm_destroy_names_the_attached_projects(monkeypatch, capsys):
+    # What is about to be deleted, in the prompt: `destroy` now takes N
+    # projects' uncommitted work with it, not one.
+    monkeypatch.setattr(devbox.cli.sys, "stdin", _FakeStdin(isatty=True))
+    monkeypatch.setattr("builtins.input", lambda *a: "no")
+    devbox.cli._confirm_destroy("dev", "libvirt", False, attached=["binius", "web"])
+    out = capsys.readouterr().out
+    assert "binius, web" in out
 
 
 # ---- AWS credential handling (JIM-97) ---------------------------------------

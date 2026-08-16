@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import platform
 import re
 import shlex
 import shutil
@@ -71,10 +72,13 @@ PROJECT_MODS_SUBDIR = "mods"
 DEFAULT_BASE_MODS = ("jj", "github-auth", "dotfiles-packages", "dotfiles", "vim",
                      "neovim", "claude-code", "repo-bootstrap")
 
-# Provisioning output log, under the dev user's $HOME - written (tee'd) when the
-# driver runs over SSH, and tailed by `devbox status`. The driver additionally
-# keeps a per-mod log at ~/provision/<name>.log.
-PROVISION_LOG = "provision.log"
+def provision_log(agent_user: str = "") -> str:
+    """The combined provisioning log for one run, under the privileged user's
+    $HOME - written (tee'd) when the driver runs over SSH, and tailed by
+    `devbox status`. Per attachment (the driver keeps its per-mod logs in a
+    matching `provision/<agent|box>/` directory), so two projects reconverging
+    on one box don't overwrite each other's."""
+    return f"provision-{agent_user}.log" if agent_user else "provision.log"
 
 
 @dataclasses.dataclass
@@ -282,6 +286,13 @@ def _provision_context(project: ProjectConfig, gc: GlobalConfig, admin_user: str
         # now that a box has a privileged user and an unprivileged agent.
         "DEVBOX_ADMIN_USER": admin_user,
         "DEVBOX_AGENT_USER": project.agent_user,
+        # Which project owns that account. The driver records it on the box, so a
+        # second project can be refused the account rather than silently sharing
+        # a home with the first.
+        "DEVBOX_PROJECT": project.project,
+        # Which workstation attached it. Only used to note that the same project
+        # is now being driven from somewhere else - a warning, never a refusal.
+        "DEVBOX_ATTACH_HOST": platform.node(),
         # The host's public key, so the driver can authorize the same key for the
         # agent account it creates. Public by definition - safe in the payload,
         # which carries no secrets.

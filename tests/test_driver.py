@@ -29,6 +29,8 @@ pytestmark = pytest.mark.skipif(
 
 ADMIN = "alice"
 AGENT = "agentbot"
+PROJECT = "binius"
+HOST = "laptop"
 
 # Each fake logs to $FAKE_LOG/<tool>.log and otherwise does the least it can.
 _FAKES = {
@@ -42,7 +44,6 @@ if [ "$1" = "-u" ]; then
   user="$2"; shift 2
   if [ "${1:-}" = "-H" ]; then shift; export HOME="$FAKE_HOMES/$user"; fi
   export FAKE_RUNAS="$user"
-  exec "$@"
 fi
 exec "$@"
 """,
@@ -93,19 +94,25 @@ echo "{name} ran as ${{FAKE_RUNAS:-none}}"
 
 
 class _Box:
-    """One fake box: the payload dir, the fake $HOME, and the run() entry point."""
+    """One fake box: the payload dir, the fake $HOME, and the run() entry point.
 
-    def __init__(self, root, mods, repo_mode="none", repo_dir=""):
+    `agent=""` builds a BOX run (the box's own playbook, no attachment), which is
+    exactly how the driver tells the two kinds of run apart."""
+
+    def __init__(self, root, mods, repo_mode="none", repo_dir="", agent=AGENT,
+                 project=PROJECT, host=HOST):
         self.root = root
         self.log_dir = root / "log"
         self.homes = root / "homes"
         self.payload = root / "payload"
         self.bin = root / "bin"
-        for d in (self.log_dir, self.homes, self.payload, self.bin,
+        self.etc = root / "etc"
+        self.agent = agent
+        for d in (self.log_dir, self.homes, self.payload, self.bin, self.etc,
                   self.payload / "mods"):
             d.mkdir(parents=True, exist_ok=True)
         # The privileged user already exists (the init script made it at boot);
-        # the agent does not - the driver's preamble is what creates it.
+        # an agent does not - the driver's preamble is what creates it.
         (self.homes / ADMIN).mkdir(exist_ok=True)
 
         for name, body in _FAKES.items():
@@ -118,7 +125,9 @@ class _Box:
         (self.payload / "manifest").write_text(devbox.render_manifest(mods))
         (self.payload / "context.env").write_text(devbox.render_env_file({
             "DEVBOX_ADMIN_USER": ADMIN,
-            "DEVBOX_AGENT_USER": AGENT,
+            "DEVBOX_AGENT_USER": agent,
+            "DEVBOX_PROJECT": project,
+            "DEVBOX_ATTACH_HOST": host,
             "DEVBOX_SSH_PUBKEY": "ssh-ed25519 AAAAtest user@host",
             "DEVBOX_REPO_MODE": repo_mode,
             "DEVBOX_REPO_DIR": repo_dir,
@@ -136,6 +145,9 @@ class _Box:
             "HOME": str(self.homes / ADMIN),
             "FAKE_HOMES": str(self.homes),
             "FAKE_LOG": str(self.log_dir),
+            # The real markers are root-owned under /etc; point them at the fake
+            # box so the driver's own writes and reads can run unprivileged.
+            "DEVBOX_PROJECTS_DIR": str(self.etc / "projects"),
             **env_overrides,
         }
         return subprocess.run(
@@ -144,6 +156,15 @@ class _Box:
 
     def log(self, name):
         path = self.log_dir / f"{name}.log"
+        return path.read_text() if path.exists() else ""
+
+    def provision_logs(self, agent=None):
+        """The driver's per-mod log directory for one attachment."""
+        return self.homes / ADMIN / "provision" / (agent or self.agent or "box")
+
+    def marker(self, agent=None):
+        """The ownership record the driver wrote for one account."""
+        path = self.etc / "projects" / (agent or self.agent)
         return path.read_text() if path.exists() else ""
 
     def ran(self):
@@ -250,19 +271,140 @@ def test_runas_root_and_admin_dispatch_to_the_right_accounts(box):
                        ("something-admin", ADMIN)]
 
 
-def test_a_multi_target_mod_runs_once_per_account_with_separate_logs(box):
-    b = box([_spec("dotfiles", runas=["admin", "agent"])])
+# ---- box runs (no attachment) -----------------------------------------------
+def test_a_box_run_creates_no_agent_account(box):
+    # The box's own playbook: a machine that no project has attached to yet.
+    b = box([_spec("dotfiles-packages", runas=["root"]),
+             _spec("motd", runas=["admin"])], agent="")
+    r = b.run()
+    assert r.returncode == 0, r.stderr
+    assert b.log("useradd") == ""
+    assert not (b.etc / "projects").exists()
+    assert b.ran() == [("dotfiles-packages", "root"), ("motd", ADMIN)]
+
+
+def test_a_box_run_still_wires_the_privileged_account(box):
+    b = box([_spec("dotfiles", runas=["admin"])], agent="")
     assert b.run().returncode == 0
-    assert b.ran() == [("dotfiles", ADMIN), ("dotfiles", AGENT)]
-    provision = b.homes / ADMIN / "provision"
-    assert (provision / f"dotfiles.{ADMIN}.log").exists()
-    assert (provision / f"dotfiles.{AGENT}.log").exists()
+    assert ".local/bin" in (b.homes / ADMIN / ".bash_env").read_text()
+
+
+def test_a_box_run_refuses_an_agent_target_it_cannot_satisfy(box):
+    # Unreachable through the host-side scope filter; a payload that got it
+    # wrong anyway must stop rather than run the mod as somebody else.
+    b = box([_spec("jj", runas=["agent"])], agent="")
+    r = b.run()
+    assert r.returncode == 2
+    assert "no agent account" in r.stderr
+    assert b.ran() == []
+
+
+# ---- attachment ownership ---------------------------------------------------
+def test_attaching_records_which_project_owns_the_account(box):
+    b = box([_spec("jj")], repo_dir="binius64", repo_mode="clone")
+    assert b.run("--ensure-agent").returncode == 0
+    marker = b.marker()
+    assert f"project={PROJECT}" in marker
+    assert f"agent_user={AGENT}" in marker
+    assert "repo_dir=binius64" in marker
+    assert f"host={HOST}" in marker
+
+
+def test_re_attaching_the_same_project_is_a_no_op(box):
+    b = box([_spec("jj")])
+    assert b.run("--ensure-agent").returncode == 0
+    first = b.log("useradd")
+    r = b.run("--ensure-agent")
+    assert r.returncode == 0, r.stderr
+    assert b.log("useradd") == first          # no second useradd
+    assert f"project={PROJECT}" in b.marker()
+
+
+def test_attaching_refuses_an_account_owned_by_another_project(box):
+    # Two projects sharing one home would share a checkout and a creds file, so
+    # "someone already lives here" has to be an error, not silent co-tenancy.
+    b = box([_spec("jj")])
+    assert b.run("--ensure-agent").returncode == 0
+    other = box([_spec("jj")], project="other-project")
+    r = other.run("--ensure-agent")
+    assert r.returncode != 0
+    assert PROJECT in r.stderr          # names the project that already has it
+    assert "agent_user" in r.stderr     # and says how to resolve it
+
+
+def test_attaching_refuses_an_unclaimed_pre_existing_account(box):
+    # A box built before devbox tracked attachments, or an account made by hand.
+    b = box([_spec("jj")])
+    (b.homes / AGENT).mkdir()           # exists, but no ownership marker
+    r = b.run("--ensure-agent")
+    assert r.returncode != 0
+    assert "--adopt" in r.stderr
+
+
+def test_adopt_claims_an_unclaimed_pre_existing_account(box):
+    b = box([_spec("jj")])
+    (b.homes / AGENT).mkdir()
+    r = b.run("--ensure-agent", DEVBOX_ATTACH_ADOPT="1")
+    assert r.returncode == 0, r.stderr
+    assert f"project={PROJECT}" in b.marker()
+
+
+def test_re_attaching_from_another_workstation_is_noted_not_refused(box):
+    b = box([_spec("jj")])
+    assert b.run("--ensure-agent").returncode == 0
+    elsewhere = box([_spec("jj")], host="desktop")
+    r = elsewhere.run("--ensure-agent")
+    assert r.returncode == 0, r.stderr
+    assert "laptop" in r.stderr
+
+
+def test_two_projects_can_share_one_box(box, tmp_path):
+    # The whole point: the preamble touches only its own accounts, so attaching
+    # a second project leaves the first's home, key and marker intact.
+    first = _Box(tmp_path, [_spec("jj")])
+    assert first.run().returncode == 0
+    second = _Box(tmp_path, [_spec("jj")], agent="webbot", project="web")
+    r = second.run()
+    assert r.returncode == 0, r.stderr
+
+    for agent in (AGENT, "webbot"):
+        assert (first.homes / agent).is_dir()
+        assert "ssh-ed25519" in (first.homes / agent / ".ssh" / "authorized_keys").read_text()
+        assert ".local/bin" in (first.homes / agent / ".bash_env").read_text()
+    assert f"project={PROJECT}" in first.marker(AGENT)
+    assert "project=web" in first.marker("webbot")
+    # The second attach must not have re-created the first project's account.
+    assert first.log("useradd").count(AGENT) == 1
+
+
+def test_ensure_admin_alone_touches_no_agent_account(box):
+    b = box([_spec("jj")])
+    assert b.run("--ensure-admin").returncode == 0
+    assert not (b.homes / AGENT).exists()
+    assert ".local/bin" in (b.homes / ADMIN / ".bash_env").read_text()
+
+
+def test_a_multi_target_mod_runs_once_per_account_with_separate_logs(box):
+    # A mod that names no agent target keeps all of them in either scope - a
+    # project mod that has both root and privileged-user work, say.
+    b = box([_spec("cuda", runas=["root", "admin"])])
+    assert b.run().returncode == 0
+    assert b.ran() == [("cuda", "root"), ("cuda", ADMIN)]
+    assert (b.provision_logs() / "cuda.root.log").exists()
+    assert (b.provision_logs() / f"cuda.{ADMIN}.log").exists()
 
 
 def test_a_single_target_mod_keeps_the_familiar_log_path(box):
     b = box([_spec("jj")])
     assert b.run().returncode == 0
-    assert (b.homes / ADMIN / "provision" / "jj.log").exists()
+    assert (b.provision_logs() / "jj.log").exists()
+
+
+def test_per_mod_logs_are_scoped_to_the_attachment(box):
+    # Two projects reconverging on one box must not overwrite each other's logs.
+    b = box([_spec("jj")])
+    assert b.run().returncode == 0
+    assert (b.homes / ADMIN / "provision" / AGENT / "jj.log").exists()
 
 
 def test_the_mod_body_runs_with_the_target_users_home(box):

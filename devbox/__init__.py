@@ -25,7 +25,7 @@ from .cli import main  # noqa: F401
 from .initscript import (INIT_SCRIPT_PATH, render_init_script,  # noqa: F401
                          substitute_tokens)
 from .provision import (BUILTIN_MODS_DIR, DEFAULT_BASE_MODS, DEFAULT_RUNAS,  # noqa: F401
-                        DRIVER_PATH, GLOBAL_MODS_DIR, PROVISION_LOG,
+                        DRIVER_PATH, GLOBAL_MODS_DIR, provision_log,
                         RUNAS_TARGETS, ModSpec, PayloadFile,
                         build_payload, build_tarball, effective_mods,
                         env_for_owner,
@@ -42,7 +42,7 @@ from .config import (AwsConfig, BoxSpec, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
                      GlobalConfig, LightsailBoxConfig, PREFIXED_PROVIDERS,
                      PROJECT_CONFIG_FILE, PROJECT_MARKER_DIR,
                      PROVIDERS, ProjectConfig, RepoConfig, SyncEntry, compose_instance_name,
-                     find_project_dir, parse_instance_name,
+                     find_project_dir, known_hosts_path, parse_instance_name,
                      resolve_box_spec, resolve_instance, resolve_project)
 from .sync import RsyncJob, plan_sync, run_envvars, run_sync  # noqa: F401
 from .providers import (AwsAuthError, Ec2Provider, Instance, InstanceSpec,  # noqa: F401

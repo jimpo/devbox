@@ -10,13 +10,21 @@
 # ([env] creds are delivered separately as the agent's ~/.config/devbox/env.)
 #
 # THE DRIVER RUNS AS THE PRIVILEGED USER and drops privilege per mod. A box has
-# two accounts: the privileged one (created at first boot by the init script,
-# the SSH target this arrives on) and the unprivileged `agent` (created HERE, in
-# the preamble below - not at first boot, so that changing it reconverges).
-# Almost every mod configures a user's home directory, and the user it should
-# configure is the agent, so `# runas:` defaults to the agent and a mod body
-# runs WITHOUT sudo. System packages are declared `# packages:` and installed by
-# this driver; the rare mod that truly needs privilege says `# runas: root`.
+# one privileged account (created at first boot by the init script, the SSH
+# target this arrives on) and one unprivileged `agent` per attached project,
+# created HERE, in the preamble below - not at first boot, so that attaching a
+# project reconverges an existing box instead of needing a new one. Almost every
+# mod configures a user's home directory, and the user it should configure is the
+# agent, so `# runas:` defaults to the agent and a mod body runs WITHOUT sudo.
+# System packages are declared `# packages:` and installed by this driver; the
+# rare mod that truly needs privilege says `# runas: root`.
+#
+# TWO KINDS OF RUN, distinguished by whether DEVBOX_AGENT_USER is set:
+#   attachment run - one project's playbook, in its own account (the usual case)
+#   box run        - the box's own playbook (empty DEVBOX_AGENT_USER); no agent
+#                    account is created or touched
+# Which mod runs in which is decided host-side: the manifest that arrives has
+# already been narrowed to one scope, so this script never reasons about scopes.
 #
 # Each mod body sources the `[env]` creds of the account that owns them: its own
 # target user's ~/.config/devbox/env, except a `root` mod, which reads the
@@ -24,33 +32,46 @@
 # privileged alter ego). Which creds an account gets is the `owner` of each
 # `[env]` entry, host-side.
 #
-# Usage: provision-driver.sh [--ensure-users | <mod-name> ...]
+# Usage: provision-driver.sh [--ensure-users|--ensure-admin|--ensure-agent | <mod-name> ...]
 #   no args        - run the whole playbook (manifest order)
-#   --ensure-users - run only the user preamble and exit (the CLI calls this
-#                    before writing the agent's [env] file, which needs the home
-#                    directory to exist)
+#   --ensure-*     - run only that half of the user preamble and exit (the CLI
+#                    calls --ensure-agent before writing the agent's [env] file,
+#                    which needs the home directory to exist); --ensure-users
+#                    means both.
 #   mod names      - run only those (fast iteration while writing one mod); each
 #                    must be in the playbook.
 #
 # Runs each mod in order, stops at the first failure and reports which mod, and
-# tees each mod's output to ~/provision/<name>.log (the combined ~/provision.log
-# that `devbox status` tails is produced by the outer tee in the caller).
+# tees each mod's output to ~/provision/<agent>/<name>.log - one directory per
+# attachment, so two projects reconverging don't overwrite each other's logs.
+# (The combined ~/provision-<agent>.log that `devbox status` tails is produced by
+# the outer tee in the caller.)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODS_DIR="$HERE/mods"
-LOG_DIR="$HOME/provision"
-mkdir -p "$LOG_DIR"
 
 fail() { echo "devbox: $*" >&2; exit 1; }
 
-# Provisioning context for the mods (DEVBOX_*), safe to trace. Carries both
+# Provisioning context for the mods (DEVBOX_*), safe to trace. Carries the
 # usernames and the host's public key, which the preamble authorizes for the
 # agent account. No secrets - that is what lets the payload be agent-readable.
 # shellcheck source=/dev/null
 [ -f "$HERE/context.env" ] && . "$HERE/context.env"
 : "${DEVBOX_ADMIN_USER:?context.env did not define DEVBOX_ADMIN_USER}"
-: "${DEVBOX_AGENT_USER:?context.env did not define DEVBOX_AGENT_USER}"
+# Empty on a box run - the one signal that this run has no attachment.
+DEVBOX_AGENT_USER="${DEVBOX_AGENT_USER:-}"
+
+LOG_DIR="$HOME/provision/${DEVBOX_AGENT_USER:-box}"
+mkdir -p "$LOG_DIR"
+
+# Who owns which unprivileged account, written by the preamble and read by
+# `devbox box list --attached` / `devbox box destroy`. Root-owned and in /etc
+# rather than in the account's home, because homes are 0750 and this has to stay
+# enumerable by the privileged user. Root-owned but world-READABLE: only writing
+# a claim needs privilege, and checking one has to work without it.
+# (Overridable so the test harness can run the real script without root.)
+PROJECTS_DIR="${DEVBOX_PROJECTS_DIR:-/etc/devbox/projects}"
 
 # The mod bodies run as another user, so they must be able to read the payload.
 # `mktemp -d` gives 0700; the payload carries no secrets (see provision.py).
@@ -85,19 +106,82 @@ esac
 BENV
 }
 
-ensure_users() {
+# The box's own account work: idempotent, and the only preamble a box run does.
+ensure_admin() {
+  local admin="$DEVBOX_ADMIN_USER" home
+  home="$(user_home "$admin")"
+  [ -n "$home" ] && sudo chmod 0750 "$home"
+  install_bash_env "$admin"
+}
+
+# Refuse to take over an account that is not ours. An agent account is a
+# project's home on a shared machine, so "someone already lives here" has to be
+# an error rather than a silent co-tenancy: two projects sharing one home would
+# share a checkout and a credentials file.
+marker_field() { sed -n "s/^$2=//p" "$1" | head -n1; }
+
+check_account_claim() {
+  local agent="$1" marker="$PROJECTS_DIR/$agent" owner prev_host
+
+  if [ ! -f "$marker" ]; then
+    [ "${DEVBOX_ATTACH_ADOPT:-0}" = "1" ] && return 0
+    fail "the account '$agent' already exists on this box but devbox has no record
+  of which project it belongs to (a box created before attachments were tracked,
+  or an account somebody made by hand). Re-run with --adopt to claim it for
+  '${DEVBOX_PROJECT:-this project}', or pick a different agent_user."
+  fi
+
+  owner="$(marker_field "$marker" project)"
+  if [ -n "$owner" ] && [ -n "${DEVBOX_PROJECT:-}" ] && [ "$owner" != "$DEVBOX_PROJECT" ]; then
+    fail "the account '$agent' on this box belongs to project '$owner'
+  (attached $(marker_field "$marker" attached_at) from $(marker_field "$marker" host)).
+  Set a different \`agent_user\` in .devbox/config.toml, or detach '$owner' first."
+  fi
+
+  # Same project from a different workstation is fine - say so, since it means
+  # two people (or two checkouts) are driving one account.
+  prev_host="$(marker_field "$marker" host)"
+  if [ -n "$prev_host" ] && [ -n "${DEVBOX_ATTACH_HOST:-}" ] \
+     && [ "$prev_host" != "$DEVBOX_ATTACH_HOST" ]; then
+    echo "devbox: note: '$agent' was last attached from '$prev_host'." >&2
+  fi
+}
+
+# Record which project owns this account. Written via a temp file in the same
+# directory + mv, so a reader never sees a half-written marker.
+write_marker() {
+  local agent="$1" marker="$PROJECTS_DIR/$agent"
+  sudo install -d -m 0755 "$PROJECTS_DIR"
+  sudo install -m 0644 /dev/stdin "$marker.tmp" <<EOF
+project=${DEVBOX_PROJECT:-}
+agent_user=$agent
+repo_dir=${DEVBOX_REPO_DIR:-}
+attached_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+host=${DEVBOX_ATTACH_HOST:-}
+EOF
+  sudo mv "$marker.tmp" "$marker"
+}
+
+ensure_agent() {
   local agent="$DEVBOX_AGENT_USER" admin="$DEVBOX_ADMIN_USER" shell=/bin/bash home groups g
 
-  [ "$agent" != "$admin" ] || fail "agent and privileged user are both '$agent'"
+  # A box run has no agent account at all - nothing to do here.
+  [ -n "$agent" ] || return 0
+
+  [ "$agent" != "$admin" ] || fail "the agent account and the box's privileged
+  user are both '$agent'; the whole point of the split is that agents run
+  without sudo. Set \`agent_user\` in .devbox/config.toml."
 
   # zsh is installed by the init script, so it exists by the time the driver
   # first runs - but never point a login shell at a binary that isn't there.
   [ -x /usr/bin/zsh ] && shell=/usr/bin/zsh
 
-  if ! id -u "$agent" >/dev/null 2>&1; then
+  if id -u "$agent" >/dev/null 2>&1; then
+    check_account_claim "$agent"
+  else
     echo "==> creating the unprivileged agent user '$agent'"
     # No --groups: the agent is in no supplementary group at all, and above all
-    # not sudo. HOME_MODE 0750 so the two accounts cannot read each other.
+    # not sudo. HOME_MODE 0750 so accounts cannot read each other.
     sudo useradd --create-home --user-group --key HOME_MODE=0750 \
                  --shell "$shell" "$agent" \
       || fail "useradd '$agent' failed"
@@ -143,15 +227,14 @@ ensure_users() {
     fi
   fi
 
-  # Homes 0750 both ways. useradd only applies HOME_MODE to a home it creates,
-  # so a pre-existing account (or a box created before this) still needs it.
-  for u in "$agent" "$admin"; do
-    home="$(user_home "$u")"
-    [ -n "$home" ] && sudo chmod 0750 "$home"
-  done
+  # Home 0750. useradd only applies HOME_MODE to a home it creates, so a
+  # pre-existing account (or a box created before this) still needs it - and it
+  # is what keeps one project's agent out of another's home.
+  home="$(user_home "$agent")"
+  [ -n "$home" ] && sudo chmod 0750 "$home"
 
   install_bash_env "$agent"
-  install_bash_env "$admin"
+  write_marker "$agent"
 
   # A repo checkout in the privileged user's home means this box was provisioned
   # under the old single-user model. Nothing is migrated - the canonical checkout
@@ -187,7 +270,11 @@ install_packages() {
 # ---- mod execution ----------------------------------------------------------
 target_user() {
   case "$1" in
-    agent) printf '%s' "$DEVBOX_AGENT_USER" ;;
+    # An `agent` target in a box run has no account to run as. The host narrows
+    # the manifest by scope so this should be unreachable; treat it as a bug in
+    # the payload rather than silently running the mod as somebody else.
+    agent) [ -n "$DEVBOX_AGENT_USER" ] || return 1
+           printf '%s' "$DEVBOX_AGENT_USER" ;;
     admin) printf '%s' "$DEVBOX_ADMIN_USER" ;;
     root)  printf '%s' root ;;
     *)     return 1 ;;
@@ -232,8 +319,13 @@ while IFS=$'\t' read -r m_name m_runas m_packages; do
 done < "$HERE/manifest"
 
 SELECTED=()
-if [ "$#" -gt 0 ] && [ "$1" = "--ensure-users" ]; then
-  ensure_users
+if [ "$#" -gt 0 ] && [ "${1#--ensure-}" != "$1" ]; then
+  case "$1" in
+    --ensure-admin) ensure_admin ;;
+    --ensure-agent) ensure_agent ;;
+    --ensure-users) ensure_admin; ensure_agent ;;
+    *) fail "unknown option '$1'" ;;
+  esac
   exit 0
 elif [ "$#" -gt 0 ]; then
   # Selective run: every requested name must be in this project's playbook.
@@ -253,8 +345,10 @@ else
   for i in "${!MOD_NAMES[@]}"; do SELECTED+=("$i"); done
 fi
 
-# Always, before any mod: the agent account a mod body is about to drop into.
-ensure_users
+# Always, before any mod: the accounts a mod body is about to drop into.
+# ensure_agent is a no-op on a box run.
+ensure_admin
+ensure_agent
 
 for i in "${SELECTED[@]}"; do
   name="${MOD_NAMES[$i]}"
@@ -272,7 +366,8 @@ for i in "${SELECTED[@]}"; do
   IFS=',' read -r -a targets <<< "${MOD_RUNAS[$i]}"
   for target in "${targets[@]}"; do
     if ! user="$(target_user "$target")"; then
-      echo "devbox: mod '$name' has an unknown '# runas:' target '$target'" >&2
+      echo "devbox: mod '$name' has an unusable '# runas:' target '$target'" \
+           "(this run has no agent account)" >&2
       exit 2
     fi
     # One log per (mod, user) only when a mod actually runs more than once, so
