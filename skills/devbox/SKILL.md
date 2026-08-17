@@ -153,7 +153,8 @@ src = ".claude/skills"
 There are two built-in playbooks: the **box** one (`dotfiles-packages → dotfiles
 → vim`), which runs once per box as root/the privileged user, and the **project**
 one (`jj → github-auth → dotfiles → vim → neovim → claude-code →
-repo-bootstrap`), which runs once per attachment in that project's account. Add a
+cargo-binstall → repo-bootstrap`), which runs once per attachment in that
+project's account. Add a
 project mod only for extra tooling (`Cargo.toml` → a rust mod, `package.json` →
 a node mod):
 

@@ -90,7 +90,7 @@ BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim")
 # appear in BOTH playbooks on purpose - each declares `runas = ["admin", "agent"]`, and
 # each scope runs only its own half. A project's `mods` are appended after this.
 PROJECT_BASE_MODS = ("jj", "github-auth", "dotfiles", "vim", "neovim",
-                     "claude-code", "repo-bootstrap")
+                     "claude-code", "cargo-binstall", "repo-bootstrap")
 
 # Which playbook a provisioning run is executing. The scope decides which
 # `runas` targets of each mod run (see scoped_runas); it is resolved entirely

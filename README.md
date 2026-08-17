@@ -531,7 +531,7 @@ box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim
                                     # runs once per box, as root / the admin
 
 project playbook (built-in base):   jj → github-auth → dotfiles → vim → neovim →
-                                    claude-code → repo-bootstrap
+                                    claude-code → cargo-binstall → repo-bootstrap
 project mods (config.toml):         + rust + wasm-tools + …
                                     # runs once per attachment, in its account
 ```
