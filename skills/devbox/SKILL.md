@@ -50,6 +50,7 @@ dir) and `--box NAME` go *before* the subcommand.
 | `devbox sync --mods[=a,b]` | Run this project's provisioning mods over SSH on a live box (reconverge, no rebuild). No list = whole playbook; else just those. |
 | `devbox sync --files` | Push host-local non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync (agent skills, git-excluded files). |
 | `devbox host` | Refresh/print this project's SSH alias, used for `jj fetch`. |
+| `devbox herdr [-- args]` | Launch a herdr session on the box as this project's account (`herdr --remote <alias>`). Replaces `herdr --remote $(devbox host)`; trailing args pass through. Needs herdr on the **host**. |
 | `devbox detach [--purge]` | Give up this project's account (its record, key and creds go; the home survives unless `--purge`). |
 | `devbox destroy` | Tear down the whole box — refused if any other project is attached. |
 

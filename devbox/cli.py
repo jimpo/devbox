@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -611,6 +612,28 @@ def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
     print(f"(privileged: {admin_alias})")
 
 
+def cmd_herdr(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+    """Launch a herdr session against this project's account on its box -
+    `herdr --remote <alias>`, replacing `herdr --remote $(devbox host)`.
+
+    The agent alias, for the same reason `devbox ssh` uses it: herdr drives a
+    shell in the account the checkout and the agents live in, not the box's
+    privileged one. Refreshing the alias first is what makes this work after the
+    box's address has changed, which is the whole reason the `$(devbox host)`
+    form existed."""
+    name, _, provider = _resolve_target(args, project, gc)
+    ip = provider.address(name)
+    if not ip:
+        die(f"no address for '{name}' yet (still booting?).")
+    agent_alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), project)
+    if not shutil.which("herdr"):
+        die("herdr is not installed on this host (it drives the session from "
+            "here, over SSH; the box needs nothing). Install it, or use "
+            "`devbox ssh`.")
+    # exec, not run: herdr takes over the terminal, exactly as `devbox ssh` does.
+    os.execvp("herdr", ["herdr", "--remote", agent_alias, *args.herdr_args])
+
+
 def _ensure_jj_remote(repo_dir: Path, remote: str, url: str) -> None:
     """Idempotently point a jj git remote named `remote` at `url` in the host's
     local repo - add it if missing, re-point it if the URL drifted (a new IP =>
@@ -881,6 +904,9 @@ def main() -> None:
                     help="claim an existing account that devbox has no record of")
     sy.set_defaults(func=cmd_sync)
     sub.add_parser("host", help="refresh the SSH alias used for jj-fetch, print the alias name").set_defaults(func=cmd_host)
+    hd = sub.add_parser("herdr", help="launch a herdr session on the box, as this project's agent user")
+    hd.add_argument("herdr_args", nargs=argparse.REMAINDER, help="extra args passed to herdr (e.g. --session NAME)")
+    hd.set_defaults(func=cmd_herdr)
     # `devbox list` stays as the familiar spelling of `devbox box list`.
     ls = sub.add_parser("list", help="list devbox-managed boxes")
     ls.add_argument("--attached", action="store_true",

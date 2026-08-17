@@ -207,6 +207,7 @@ machine. `devbox detach` gives an account up again.
 | `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync — agent skills, git-excluded project files. Re-runnable + incremental. See "Host→box file sync" below. |
 | `devbox jj fetch` | jj-fetch the account's bookmarked work into your local repo: refreshes the SSH alias (address via the provider), ensures the jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
 | `devbox host` | Refresh the SSH aliases used for `jj fetch` (below); prints this project's alias, and names the admin one. |
+| `devbox herdr [-- args]` | Launch a herdr session on the box as this project's agent user — refreshes the alias, then `herdr --remote <alias>`. Replaces `herdr --remote $(devbox host)`. Trailing args pass through (e.g. `--session NAME`). herdr runs on the **host**, so it has to be installed here; the box needs nothing. |
 | `devbox detach [--purge]` | Give up this project's account: drop its ownership record, its authorized key and its creds, and lock it. The home — and any uncommitted work in it — survives, so `devbox create` re-attaches instantly. `--purge` terminates the account's sessions and `userdel -r`s it, behind the same confirmation as `destroy`. |
 | `devbox destroy` | Tear down the whole box — **refused** when any other project is attached, pointing at `detach` / `box destroy` instead. |
 

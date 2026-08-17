@@ -1446,6 +1446,66 @@ def _cp(argv, code=0, out="", err=""):
     return subprocess.CompletedProcess(argv, code, out, err)
 
 
+# ---- cmd_herdr (argv construction; the exec itself is stubbed) --------------
+def _herdr_env(monkeypatch, execs, which=lambda p: f"/usr/bin/{p}"):
+    """Stub everything cmd_herdr touches outside the process: target resolution,
+    the provider address, the alias refresh, `which`, and the exec."""
+    monkeypatch.setattr(devbox.cli, "_resolve_target",
+                        lambda args, project, gc: ("box1", None, _FakeAddr()))
+    monkeypatch.setattr(devbox.cli, "_admin_user", lambda provider, name: "admin")
+    monkeypatch.setattr(devbox.cli, "_refresh_ssh_aliases",
+                        lambda *a, **kw: ("devbox-proj", "devbox-box1-admin"))
+    monkeypatch.setattr(devbox.cli.shutil, "which", which)
+    monkeypatch.setattr(devbox.cli.os, "execvp",
+                        lambda file, argv: execs.append((file, argv)))
+
+
+class _FakeAddr:
+    def address(self, name):
+        return "10.0.0.5"
+
+
+def test_cmd_herdr_execs_against_the_agent_alias(monkeypatch):
+    # The agent alias, not the admin one: herdr drives a shell in the account the
+    # checkout and the agents live in. This is what `herdr --remote $(devbox
+    # host)` did by hand.
+    execs = []
+    _herdr_env(monkeypatch, execs)
+    devbox.cli.cmd_herdr(argparse.Namespace(herdr_args=[]), None, None)
+    assert execs == [("herdr", ["herdr", "--remote", "devbox-proj"])]
+
+
+def test_cmd_herdr_forwards_trailing_args(monkeypatch):
+    execs = []
+    _herdr_env(monkeypatch, execs)
+    devbox.cli.cmd_herdr(argparse.Namespace(herdr_args=["--session", "work"]), None, None)
+    assert execs == [("herdr", ["herdr", "--remote", "devbox-proj", "--session", "work"])]
+
+
+def test_cmd_herdr_dies_when_herdr_is_not_installed(monkeypatch):
+    # herdr runs on the HOST, so a missing binary is a host problem and has to
+    # say so - the box is provisioned either way.
+    execs = []
+    _herdr_env(monkeypatch, execs, which=lambda p: None)
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_herdr(argparse.Namespace(herdr_args=[]), None, None)
+    assert execs == []
+
+
+def test_cmd_herdr_dies_without_an_address(monkeypatch):
+    class NoAddr:
+        def address(self, name):
+            return ""
+
+    execs = []
+    _herdr_env(monkeypatch, execs)
+    monkeypatch.setattr(devbox.cli, "_resolve_target",
+                        lambda args, project, gc: ("box1", None, NoAddr()))
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_herdr(argparse.Namespace(herdr_args=[]), None, None)
+    assert execs == []
+
+
 def test_ensure_jj_remote_adds_when_missing(monkeypatch, tmp_path):
     calls = []
 

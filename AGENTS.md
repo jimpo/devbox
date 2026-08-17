@@ -40,6 +40,8 @@ create-instances request shape incl. bundle/blueprint/AZ defaults, client-side
 tag discovery + paging, the bare-name collision guard, list/state/address,
 lifecycle), the jj-remote wiring for `devbox jj
 fetch` (`_ensure_jj_remote` add/set-url/noop with a monkeypatched `subprocess`),
+`cmd_herdr`'s argv construction (agent alias, trailing-arg pass-through, and the
+missing-`herdr` / no-address exits, with `os.execvp` stubbed),
 and the **AWS credential handling** (`providers/awsauth.py`: auth-error
 duck-typing, the up-front `credential_problem` check against a fake session, the
 `aws sso login` command derived from a temp `~/.aws/config`, the TTY/non-TTY/
