@@ -34,12 +34,21 @@ HOST = "laptop"
 
 # Each fake logs to $FAKE_LOG/<tool>.log and otherwise does the least it can.
 _FAKES = {
-    # `sudo -l -U <user>` answers "does this user have sudo privileges?" - exit 0
-    # means yes, which the driver treats as fatal. Everything else is executed
+    # `sudo -l -U <user>` answers "does this user have sudo privileges?" in its
+    # listing, and exits 0 either way - as sudo-rs does. A listing of granted
+    # commands is what the driver treats as fatal. Everything else is executed
     # for real, with HOME/FAKE_RUNAS set as `sudo -u <user> -H` would.
     "sudo": r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_LOG/sudo.log"
-if [ "$1" = "-l" ]; then exit "${FAKE_AGENT_HAS_SUDO:-1}"; fi
+if [ "$1" = "-l" ] || [ "$2" = "-l" ]; then
+  user="${@: -1}"
+  if [ "${FAKE_AGENT_HAS_SUDO:-1}" = "0" ]; then
+    printf 'User %s may run the following commands on box:\n    (ALL) ALL\n' "$user"
+  else
+    printf 'User %s is not allowed to run sudo on box.\n' "$user"
+  fi
+  exit 0
+fi
 if [ "$1" = "-u" ]; then
   user="$2"; shift 2
   if [ "${1:-}" = "-H" ]; then shift; export HOME="$FAKE_HOMES/$user"; fi

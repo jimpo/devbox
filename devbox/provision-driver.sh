@@ -102,7 +102,14 @@ install_bash_env() {
   home="$(user_home "$user")"
   group="$(id -gn "$user")"
   [ -n "$home" ] || fail "could not resolve the home directory of '$user'"
-  sudo install -d -o "$user" -g "$group" -m 0755 "$home/.local/bin"
+  # Both paths, not just the leaf: install(1) gives a directory it creates as a
+  # parent the default root ownership, and an agent that cannot write ~/.local
+  # cannot install anything into it.
+  sudo install -d -o "$user" -g "$group" -m 0755 "$home/.local" "$home/.local/bin"
+  # install(1) on Ubuntu (uutils coreutils) fails to overwrite an existing file
+  # when the source is /dev/stdin, so clear the destination first. install still
+  # creates it with the final mode, so it is never briefly world-readable.
+  sudo rm -f "$home/.bash_env"
   sudo install -o "$user" -g "$group" -m 0644 /dev/stdin "$home/.bash_env" <<'BENV'
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 [ -f "$HOME/.config/devbox/env" ] && . "$HOME/.config/devbox/env"
@@ -159,6 +166,9 @@ check_account_claim() {
 write_marker() {
   local agent="$1" marker="$PROJECTS_DIR/$agent"
   sudo install -d -m 0755 "$PROJECTS_DIR"
+  # A leftover .tmp from a crashed run would defeat the install (see .bash_env
+  # above) and then be promoted by the mv below as if it were this run's marker.
+  sudo rm -f "$marker.tmp"
   sudo install -m 0644 /dev/stdin "$marker.tmp" <<EOF
 project=${DEVBOX_PROJECT:-}
 agent_user=$agent
@@ -207,7 +217,10 @@ ensure_agent() {
   'sudo deluser $agent $g', or pick a different agent_user." ;;
     esac
   done
-  if sudo -l -U "$agent" >/dev/null 2>&1; then
+  # The listing is the answer, not the exit status: sudo-rs (Ubuntu's default
+  # sudo) exits 0 whether or not the user is allowed. LC_ALL=C so the phrase
+  # classic sudo prints is not translated out from under the match.
+  if LC_ALL=C sudo -n -l -U "$agent" 2>/dev/null | grep -q 'may run the following commands'; then
     fail "agent user '$agent' has sudo privileges (check /etc/sudoers.d); the point
   of the split is that agents run without privilege."
   fi

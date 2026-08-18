@@ -56,8 +56,15 @@ def run_envvars(alias: str, env: dict, agent_user: str) -> None:
     home = shlex.quote(f"/home/{agent_user}")
     line = shlex.quote(_ENV_SOURCE_LINE)
     _write_env_file(alias, env_for_owner(env, "agent"), agent_user, (
-        f'sudo install -d -o {user} -g {user} -m 0700 {home}/.config/devbox; '
+        # Both paths: install(1) gives a directory it creates as a parent the
+        # default root ownership, and ~/.config has to belong to the account
+        # whose tools write into it.
+        f'sudo install -d -o {user} -g {user} -m 0700 {home}/.config {home}/.config/devbox; '
         # /dev/stdin is the piped content: the creds never touch a command line.
+        # install(1) on Ubuntu (uutils coreutils) fails to overwrite an existing
+        # file from /dev/stdin, hence the rm; install still creates the file
+        # 0600, so the creds are never briefly world-readable.
+        f'sudo rm -f {home}/.config/devbox/env; '
         f'sudo install -o {user} -g {user} -m 0600 /dev/stdin {home}/.config/devbox/env; '
         f'sudo touch {home}/.zshenv; sudo chown {user}:{user} {home}/.zshenv; '
         f'sudo grep -qxF {line} {home}/.zshenv || '
@@ -66,6 +73,7 @@ def run_envvars(alias: str, env: dict, agent_user: str) -> None:
     # The privileged user is the SSH user here, writing its own home: no sudo.
     _write_env_file(alias, env_for_owner(env, "admin"), "the privileged user", (
         'install -d -m 0700 "$HOME/.config/devbox"; '
+        'rm -f "$HOME/.config/devbox/env"; '
         'install -m 0600 /dev/stdin "$HOME/.config/devbox/env"; '
         'touch "$HOME/.zshenv"; '
         f'grep -qxF {line} "$HOME/.zshenv" || '
