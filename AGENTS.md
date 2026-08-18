@@ -91,9 +91,10 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 `devbox/` is a package split by concern:
 
 - `config.py` — global (`GlobalConfig`, incl. `[aws]` shared AWS creds, `[ec2]`
-  EC2 globals, `[env]`) + per-project (`ProjectConfig`: `box`, `agent_user`,
-  `[repo]`, `mods`, `sync`, `env`, `marker_dir`) config, marker resolution,
-  `resolve_instance`/`parse_instance_name`, and `resolve_box_spec` — a box's
+  EC2 globals, `[env]`, `[[sync]]` defaults) + per-project (`ProjectConfig`:
+  `box`, `agent_user`, `[repo]`, `mods`, `sync`, `env`, `marker_dir`) config,
+  marker resolution, `resolve_instance`/`parse_instance_name`, and
+  `resolve_box_spec` — a box's
   shape assembled from `devbox box create` flags plus the global `[defaults]`,
   and **deliberately never persisted** (resources are immutable after create and
   readable from the provider, so a stored copy could only disagree). Hardware

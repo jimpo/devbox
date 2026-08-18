@@ -35,6 +35,7 @@ def test_global_config_defaults_when_missing(tmp_path):
     assert gc.jj_name is None
     assert gc.jj_email is None
     assert gc.env == {}
+    assert gc.sync == []
 
 
 def test_global_config_overrides(tmp_path):
@@ -76,6 +77,30 @@ SOME_API_KEY = "sk-123"
     assert gc.jj_email == "alice@example.com"
     assert gc.env == {"GITHUB_TOKEN": devbox.EnvVar("github_pat_example"),
                       "SOME_API_KEY": devbox.EnvVar("sk-123")}
+
+
+def test_global_config_parses_sync_entries(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[[sync]]\n'
+        'src = "$HOME/.claude/skills"\n'
+        'include = ["jujutsu"]\n'
+    )
+    gc = devbox.GlobalConfig.load(path)
+    assert gc.sync == [
+        devbox.SyncEntry(src="$HOME/.claude/skills", dst="$HOME/.claude/skills",
+                         include=["jujutsu"], repo_relative=False),
+    ]
+
+
+def test_global_config_sync_rejects_repo_relative_paths(tmp_path):
+    # There is no [repo] at global scope, so a bare-relative src (the shape
+    # [[repo.sync]] takes) is rejected the same way a project's own [[sync]]
+    # rejects it.
+    path = tmp_path / "config.toml"
+    path.write_text('[[sync]]\nsrc = "relative/skills"\n')
+    with pytest.raises(SystemExit):
+        devbox.GlobalConfig.load(path)
 
 
 def test_global_config_partial_override_keeps_other_defaults(tmp_path):
@@ -1615,6 +1640,25 @@ def test_resolve_project_repo_sync_anchored_path_dies(tmp_path, global_config):
 def _sync(src, dst=None, include=None, repo_relative=False):
     return devbox.SyncEntry(src=src, dst=dst if dst is not None else src,
                             include=include or [], repo_relative=repo_relative)
+
+
+def test_resolve_project_prepends_global_sync_defaults(tmp_path, global_config):
+    # The global [[sync]] defaults apply to every project, ahead of that
+    # project's own entries - the same order mods use for the built-in base.
+    global_config.sync = [_sync("$HOME/.claude/skills")]
+    _write_marker(tmp_path, '[[sync]]\nsrc = "$HOME/.ssh/config"\n')
+    assert devbox.resolve_project(tmp_path, global_config).sync == [
+        _sync("$HOME/.claude/skills"),
+        _sync("$HOME/.ssh/config"),
+    ]
+
+
+def test_resolve_project_with_no_own_sync_keeps_only_global_defaults(tmp_path, global_config):
+    global_config.sync = [_sync("$HOME/.claude/skills")]
+    _write_marker(tmp_path, 'project = "p"\n')
+    assert devbox.resolve_project(tmp_path, global_config).sync == [
+        _sync("$HOME/.claude/skills"),
+    ]
 
 
 def test_plan_sync_home_expansion_per_side(tmp_path):

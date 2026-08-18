@@ -193,6 +193,10 @@ class GlobalConfig:
     env: dict = dataclasses.field(default_factory=dict)
     aws: Optional[AwsConfig] = None      # shared AWS account creds
     ec2: Optional[Ec2Config] = None      # EC2-specific globals
+    # [[sync]]: default host->box file-sync rules (see sync.py), applied ahead of
+    # every project's own [[sync]] - the $HOME/~/absolute-anchored shape only,
+    # since there is no repo to anchor [[repo.sync]] against at this scope.
+    sync: list = dataclasses.field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path = GLOBAL_CONFIG_PATH) -> "GlobalConfig":
@@ -211,6 +215,7 @@ class GlobalConfig:
                 "env": _ANY_KEYS,  # arbitrary user-defined credentials/vars
                 "aws": {"region", "profile"},
                 "ec2": {"default_security_groups", "default_subnets", "spot"},
+                "sync": _ANY_KEYS,  # array-of-tables, validated by _parse_sync_entry
             },
             config_path=path,
         )
@@ -237,6 +242,7 @@ class GlobalConfig:
             jj_email=jj.get("email"),
             aws=_load_aws_config(data.get("aws"), path),
             ec2=_load_ec2_config(data.get("ec2"), path),
+            sync=_resolve_global_sync(data, path),
         )
 
     def read_ssh_pubkey(self) -> str:
@@ -299,6 +305,14 @@ def _load_ec2_config(ec2_data: Optional[dict], path: Path) -> Optional[Ec2Config
         subnets=ec2_data.get("default_subnets", []),
         spot=ec2_data.get("spot", False),
     )
+
+
+def _resolve_global_sync(data: dict, path: Path) -> list:
+    """Parse the global `[[sync]]` - the same $HOME/~/absolute-anchored shape a
+    project's own `[[sync]]` uses (see config.SyncEntry), applied ahead of every
+    project's own entries. There is no global `[[repo.sync]]`: that shape anchors
+    at a project's own checkout, which doesn't exist at this scope."""
+    return [_parse_sync_entry(raw, path, repo_relative=False) for raw in data.get("sync", [])]
 
 
 # ---- project config / resolution --------------------------------------------
@@ -390,7 +404,9 @@ class ProjectConfig:
     # Ordered provisioning mods appended after the built-in base playbook (see
     # provision.py). Resolved by name project > global > built-in.
     mods: list = dataclasses.field(default_factory=list)
-    # Host->box file-sync rules from [[sync]] / [[repo.sync]] (see sync.py).
+    # Host->box file-sync rules: the global [[sync]] defaults (see
+    # GlobalConfig.sync), followed by this project's own [[sync]] / [[repo.sync]]
+    # (see sync.py).
     sync: list = dataclasses.field(default_factory=list)
     # Project-level [env]: {KEY: EnvVar} shell-env creds/vars injected into the
     # box, overriding the global [env] per-key (see sync.py). .devbox/config.toml
@@ -533,7 +549,7 @@ def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
         repo=repo,
         marker_dir=marker_dir,
         mods=_resolve_mods(data, config_path),
-        sync=_resolve_sync(data, config_path, repo),
+        sync=[*global_config.sync, *_resolve_sync(data, config_path, repo)],
         env=_resolve_env(data, config_path),
     )
 
