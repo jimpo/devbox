@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
 # /// mod
-# requires = ["dotfiles-packages"]
+# requires = ["dotfiles-packages", "tree-sitter-cli"]
 # runas = ["admin", "agent"]
 # ///
 #
 # mod: dotfiles - the per-user half of the configenv setup from
 # github.com/jimpo/configenv: its setup.sh (oh-my-zsh + jimpo theme/plugins,
 # editor configs, dotfiles), so the box stays DRY with the host environment.
+# `tree-sitter-cli` is a dependency because the nvim config's treesitter
+# plugin builds parsers with it.
 #
 # In BOTH playbooks on purpose, and the reason `runas` scoping exists: the
 # box runs the admin half once (the privileged user needs a usable shell for

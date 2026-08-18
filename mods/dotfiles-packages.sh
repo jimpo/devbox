@@ -11,8 +11,8 @@
 # Split out of the `dotfiles` mod because it is the one piece that genuinely
 # needs privilege and cannot be expressed as `packages` - install.sh is an
 # arbitrary script from a clone, not a package list. Being system-wide, it is
-# also the one genuinely box-level mod in the base: it runs once per box, while
-# its partner runs setup.sh per account, unprivileged.
+# also a genuinely box-level mod in the base: it runs once per box, while its
+# partner runs setup.sh per account, unprivileged.
 #
 # Idempotency: apt install is a no-op when the packages are already present, so
 # a reconverge is fast.

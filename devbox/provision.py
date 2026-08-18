@@ -78,10 +78,11 @@ PROJECT_MODS_SUBDIR = "mods"
 # The box playbook: what a machine needs once, regardless of who lives on it -
 # the apt half of the dotfiles setup, plus a usable shell and editor for the
 # privileged account, which is the box's debugging entry point
-# (`devbox ssh --admin`). Fixed and built-in: there is no box config file, so a
-# box grows beyond this only when an attached project contributes a
-# `runas = ["root"]` mod.
-BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim")
+# (`devbox ssh --admin`). `tree-sitter-cli` precedes `dotfiles` because the
+# latter's nvim config needs it to build parsers. Fixed and built-in: there is
+# no box config file, so a box grows beyond this only when an attached project
+# contributes a `runas = ["root"]` mod.
+BOX_BASE_MODS = ("dotfiles-packages", "tree-sitter-cli", "dotfiles", "vim")
 
 # The project playbook: what one attachment needs inside its own account.
 # Ordering constraints are encoded here: jj + github-auth must precede

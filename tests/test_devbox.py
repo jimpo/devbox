@@ -747,8 +747,8 @@ def test_box_playbook_is_fixed():
 
 
 def test_the_two_playbooks_split_the_apt_half_from_the_per_user_half():
-    # dotfiles-packages is the one genuinely box-level mod (apt, as root);
-    # everything else in the base installs into somebody's home.
+    # dotfiles-packages and tree-sitter-cli are box-level mods (root, system-
+    # wide); everything else in the base installs into somebody's home.
     assert "dotfiles-packages" in devbox.BOX_BASE_MODS
     assert "dotfiles-packages" not in devbox.PROJECT_BASE_MODS
     for per_user in ("jj", "claude-code", "repo-bootstrap"):
@@ -1034,12 +1034,14 @@ def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_projects(isolate
     project = devbox.load_mod_specs(devbox.project_playbook(_project()), None)
     assert devbox.render_manifest(box, devbox.SCOPE_BOX).splitlines() == [
         "dotfiles-packages\troot\t",   # the apt half: once, as root, per box
+        "tree-sitter-cli\troot\tunzip",
         "dotfiles\tadmin\t",
         "vim\tadmin\t",
     ]
     by_name = {s.name: s for s in project}
     assert devbox.scoped_runas(by_name["dotfiles"].runas, devbox.SCOPE_PROJECT) == ["agent"]
     assert "dotfiles-packages" in by_name["dotfiles"].requires
+    assert "tree-sitter-cli" in by_name["dotfiles"].requires
 
 
 def test_render_env_file_shell_quotes_values():
