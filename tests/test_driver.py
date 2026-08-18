@@ -121,8 +121,10 @@ class _Box:
                   self.payload / "mods"):
             d.mkdir(parents=True, exist_ok=True)
         # The privileged user already exists (the init script made it at boot);
-        # an agent does not - the driver's preamble is what creates it.
+        # an agent does not - the driver's preamble is what creates it. root has
+        # a home on any real box, and a root-target mod runs from it.
         (self.homes / ADMIN).mkdir(exist_ok=True)
+        (self.homes / "root").mkdir(exist_ok=True)
 
         for name, body in _FAKES.items():
             path = self.bin / name
@@ -422,6 +424,16 @@ def test_the_mod_body_runs_with_the_target_users_home(box):
     b = box([_spec("jj", extra='echo "home=$HOME" >> "$FAKE_LOG/homes.log"')])
     b.run()
     assert f"home={b.homes / AGENT}" in b.log("homes")
+
+
+def test_the_mod_body_runs_from_the_target_users_home(box):
+    # sudo hands the caller's working directory to the target shell, and the
+    # driver's is the privileged user's home - which the agent cannot enter. A
+    # mod whose tools forward their own cwd (sccache -> rustc) fails there, so
+    # the drop has to land in the account's own home.
+    b = box([_spec("jj", extra='echo "pwd=$PWD" >> "$FAKE_LOG/cwd.log"')])
+    b.run()
+    assert f"pwd={b.homes / AGENT}" in b.log("cwd")
 
 
 def test_each_mod_reads_the_creds_of_the_account_that_owns_them(box):

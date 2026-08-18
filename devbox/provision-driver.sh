@@ -316,9 +316,15 @@ env_owner() {
 # INSIDE the target shell by sourcing files - never passed as `sudo env VAR=...`,
 # which would put secrets in the process argv where any user on the box could
 # read them out of `ps`.
+#
+# The body runs from the target account's own home: sudo carries the caller's
+# working directory across, and this driver's is the privileged user's home,
+# which an agent account has no permission to enter. A mod that only uses
+# absolute paths does not care, but one whose tools forward their cwd does.
 run_mod_as() {
   local file="$1" user="$2" env_home="$3"
   sudo -u "$user" -H bash -c '
+    cd "$HOME" || exit 1
     if [ -f "$3/.config/devbox/env" ]; then . "$3/.config/devbox/env"; fi
     . "$1/context.env"
     exec bash "$2"
