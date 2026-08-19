@@ -4,21 +4,16 @@
 # runas = ["root"]
 # ///
 #
-# mod: cloudflared - Cloudflare's `cloudflared` daemon from their apt repo. When
-# CLOUDFLARE_TOKEN is set, also installs it as a systemd service running that
-# tunnel. No-op service setup when CLOUDFLARE_TOKEN is unset.
+# mod: cloudflared - Cloudflare's `cloudflared` binary, from their apt repo.
+# Installs it and nothing else; `cloudflared-tunnel` is the mod that runs a
+# tunnel, once per attached project, in that project's own account.
 #
-# Root because it adds an apt repo, installs from it and registers a systemd
-# unit. The package cannot be a `packages` entry: it lives in Cloudflare's
-# own repo, which does not exist until this mod adds it.
+# Root because it adds an apt repo and installs from it. The package cannot be
+# a `packages` entry: it lives in Cloudflare's own repo, which does not exist
+# until this mod adds it.
 #
-# Idempotency: the keyring/repo files and apt install overwrite/reconcile
-# unconditionally. The service install is skipped once its unit already exists
-# (`cloudflared service install` errors on a second run).
-#
-# Context (from the environment): CLOUDFLARE_TOKEN, which a root mod sees when
-# its [env] entry is the privileged user's:
-#   CLOUDFLARE_TOKEN = { value = "...", owner = "admin" }
+# Idempotency: the keyring/repo files and the apt install overwrite/reconcile
+# unconditionally.
 set -euo pipefail
 
 # Already root (runas: root), so no sudo here - a mod body has none anyway.
@@ -32,7 +27,3 @@ echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudf
 # can still be holding the dpkg lock in an unattended upgrade.
 apt-get -o DPkg::Lock::Timeout=600 update
 DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y cloudflared
-
-if [ -n "${CLOUDFLARE_TOKEN:-}" ] && [ ! -f /etc/systemd/system/cloudflared.service ]; then
-  cloudflared service install "$CLOUDFLARE_TOKEN"
-fi

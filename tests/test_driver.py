@@ -443,7 +443,7 @@ def test_each_mod_reads_the_creds_of_the_account_that_owns_them(box):
     # privileged mod needs lives.
     echo = 'echo "{name}:agent=${{AGENT_CRED:-}}:admin=${{ADMIN_CRED:-}}" >> "$FAKE_LOG/creds.log"'
     b = box([_spec("claude-code", extra=echo.format(name="claude-code")),
-             _spec("cloudflared", runas=["root"], extra=echo.format(name="cloudflared"))])
+             _spec("docker", runas=["root"], extra=echo.format(name="docker"))])
     b.run("--ensure-users")           # creates the agent home the file goes in
     for user, var, value in ((AGENT, "AGENT_CRED", "a_tok"), (ADMIN, "ADMIN_CRED", "x_tok")):
         env_dir = b.homes / user / ".config" / "devbox"
@@ -451,7 +451,7 @@ def test_each_mod_reads_the_creds_of_the_account_that_owns_them(box):
         (env_dir / "env").write_text(f"export {var}={value}\n")
     assert b.run().returncode == 0
     assert "claude-code:agent=a_tok:admin=" in b.log("creds")
-    assert "cloudflared:agent=:admin=x_tok" in b.log("creds")
+    assert "docker:agent=:admin=x_tok" in b.log("creds")
 
 
 def test_context_env_reaches_the_mod_across_the_privilege_drop(box):

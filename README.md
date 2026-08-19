@@ -571,8 +571,8 @@ comments, so the shebang stays on line 1) and receive context via the **environm
 the account that owns them (see [Credentials](#credentials-env)) — its target
 user's, or the privileged user's for a `runas = ["root"]` mod — so a mod that needs
 a secret (`repo-bootstrap` cloning a private repo with `GITHUB_TOKEN`,
-`cloudflared` registering a tunnel) has it, and it never lands in a script on
-disk, in a command line, or in a log.
+`cloudflared-tunnel` running a tunnel with `CLOUDFLARE_TOKEN`) has it, and it
+never lands in a script on disk, in a command line, or in a log.
 
 **A mod body runs without sudo.** The driver runs as the privileged user and
 drops to the agent for each mod, because configuring a user's home directory is
@@ -769,7 +769,7 @@ per-key**.
 [env]
 GITHUB_TOKEN = "github_pat_..."                          # the agent's
 SOME_API_KEY = "..."
-CLOUDFLARE_TOKEN = { value = "...", owner = "admin" }    # the privileged user's
+REGISTRY_TOKEN = { value = "...", owner = "admin" }      # the privileged user's
 ```
 
 **Each entry belongs to exactly one account.** A bare string goes to the agent —
@@ -778,8 +778,8 @@ mod configuring its home needs. The table form with `owner = "admin"` **moves**
 the entry to the privileged user instead: it never enters the agent's
 environment, and a privileged mod (`runas = ["admin"]`, or `["root"]`, which
 reads the privileged user's file) gets it. That is for creds an agent has no use
-for — `cloudflared`'s tunnel token, say. `owner = "agent"` is the default and
-spells out the common case.
+for — what a `runas = ["root"]` mod needs to reach a private package repo, say.
+`owner = "agent"` is the default and spells out the common case.
 
 **In the guest**, devbox writes one managed 0600 file per account, in that
 account's home — `~/.config/devbox/env` (`export KEY=val` lines) — and sources it
