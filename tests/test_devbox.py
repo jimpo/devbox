@@ -2727,10 +2727,20 @@ class _FakeSession:
         return f"{service}-client"
 
 
+class LoginRefreshRequired(Exception):
+    """Stands in for botocore.exceptions.LoginRefreshRequired - the IAM Identity
+    Center `aws login` refresh-token-expired error, raised straight from
+    get_frozen_credentials rather than as an SSOError subclass (JIM-97)."""
+
+
 _EXPIRED_SSO = UnauthorizedSSOTokenError(
     "The SSO session associated with this profile has expired or is otherwise "
     "invalid. To refresh this SSO session run aws sso login with the "
     "corresponding profile.")
+
+_LOGIN_REFRESH_REQUIRED = LoginRefreshRequired(
+    "Your session has expired or credentials have changed. Please reauthenticate "
+    "using 'aws login'.")
 
 
 def _ok_session():
@@ -2781,6 +2791,11 @@ def test_is_auth_error_ignores_other_failures():
     assert not devbox.is_auth_error(RuntimeError("boom"))
 
 
+def test_is_auth_error_matches_login_refresh_required():
+    # Not an SSOError subclass, so it needs its own name in the set (JIM-97).
+    assert devbox.is_auth_error(_LOGIN_REFRESH_REQUIRED)
+
+
 # -- credential_problem (the up-front check) --
 def test_credential_problem_none_when_credentials_resolve():
     assert devbox.credential_problem(_ok_session()) is None
@@ -2800,6 +2815,14 @@ def test_credential_problem_reports_missing_credentials():
 def test_credential_problem_reports_load_time_failure():
     session = _FakeSession(get_error=SSOError("token file is unreadable"))
     assert devbox.credential_problem(session) == "token file is unreadable"
+
+
+def test_credential_problem_reports_login_refresh_required():
+    # Regression (JIM-97): get_frozen_credentials raising LoginRefreshRequired
+    # used to be re-raised as a non-auth error instead of caught here.
+    session = _FakeSession(credentials=_FakeCredentials(frozen_error=_LOGIN_REFRESH_REQUIRED))
+    assert devbox.credential_problem(session) == (
+        "Your session has expired or credentials have changed")
 
 
 def test_credential_problem_reraises_non_auth_errors():

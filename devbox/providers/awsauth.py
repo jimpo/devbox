@@ -30,13 +30,16 @@ from ..util import die
 # botocore exception classes that mean "no usable credentials". Matched against
 # the whole MRO, so the SSO subclasses (SSOTokenLoadError,
 # UnauthorizedSSOTokenError - the expired-SSO-session one) come along with
-# SSOError, and TokenRetrievalError covers the OIDC refresh failing.
+# SSOError, TokenRetrievalError covers the OIDC refresh failing, and
+# LoginRefreshRequired covers the IAM Identity Center `aws login` flow's
+# refresh token expiring (raised by get_frozen_credentials, not SSOError-derived).
 AUTH_EXCEPTION_NAMES = {
     "NoCredentialsError",
     "PartialCredentialsError",
     "CredentialRetrievalError",
     "TokenRetrievalError",
     "SSOError",
+    "LoginRefreshRequired",
 }
 
 # ClientError codes meaning the request was rejected for *who we are*, not what
