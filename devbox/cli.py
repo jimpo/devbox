@@ -12,20 +12,25 @@ Provider seam.
     devbox box sync --mods     # reconverge the box playbook
     devbox box destroy NAME    # tear down, removing the disk
 
-**Project commands** act on this project's account on its box, and take none:
+**Workspace commands** act on this workspace's account on its box, and take none:
 
-    devbox create              # ensure the box exists, then attach this project
-    devbox ssh [args...]       # ssh in as this project's unprivileged agent user
+    devbox create              # ensure the box exists, then attach this workspace
+    devbox ssh [args...]       # ssh in as this workspace's unprivileged agent user
     devbox sync --envvars      # inject [env] creds into that account's shell env
     devbox sync --mods[=a,b]   # (re)run provisioning mods over SSH (reconverge)
     devbox sync --files        # rsync host-local files ([[sync]]) onto the box
-    devbox jj fetch            # jj git fetch the account's work into the host repo
+    devbox jj fetch [repo]     # jj git fetch the account's work into a host repo
     devbox host                # refresh the SSH alias used for jj fetch
-    devbox detach              # give up this project's account on the box
+    devbox detach              # give up this workspace's account on the box
 
-A box is not a project: several projects can share one machine, each in its own
-unprivileged account. Which box a project lives on comes from `box` in its
-config (default: the project's own name), overridable with `--box`.
+A box is not a workspace: several workspaces can share one machine, each in its
+own unprivileged account. Which box a workspace lives on comes from `box` in its
+config (default: the workspace's own name), overridable with `--box`.
+
+A workspace holds as many checkouts as it lists under `[[repos]]`, all in that
+one account - which is what lets them share its git/jj credentials. It is marked
+either by `devbox.toml` at a directory that holds repos, or by
+`.devbox/config.toml` inside a single repo (see config.Marker).
 """
 from __future__ import annotations
 
@@ -42,9 +47,9 @@ from typing import Optional
 
 from .initscript import render_init_script
 from .config import (BoxSpec, DEFAULT_PROVIDER, GlobalConfig, PROVIDERS,
-                     ProjectConfig, SSH_DIR, SSH_USER_CONFIG, find_project_dir,
+                     WorkspaceConfig, SSH_DIR, SSH_USER_CONFIG, find_workspace,
                      known_hosts_path, parse_instance_name, resolve_box_spec,
-                     resolve_instance, resolve_project)
+                     resolve_instance, resolve_workspace)
 from .provision import (build_box_payload, build_payload, build_tarball,
                         provision_log, resolve_env)
 from .sync import run_envvars, run_sync
@@ -83,7 +88,7 @@ def _print_table(rows: list) -> None:
 def truncate_known_hosts(box: str) -> None:
     """A freshly created box has a brand-new SSH host key; stale entries from a
     previous box of the same name can only cause false mismatches. Scoped to the
-    one box: several projects now point at the same machine, and creating a
+    one box: several workspaces now point at the same machine, and creating a
     *different* box must not invalidate this one's key for all of them."""
     SSH_DIR.mkdir(parents=True, exist_ok=True)
     path = known_hosts_path(box)
@@ -100,10 +105,10 @@ def _resolve_box(name: str, gc: GlobalConfig):
     return name, provider_name, get_provider(provider_name, gc)
 
 
-def _resolve_target(args: argparse.Namespace, project: ProjectConfig, gc: GlobalConfig):
-    """The box a project command acts on: `--box`, else the project's `box` key,
+def _resolve_target(args: argparse.Namespace, workspace: WorkspaceConfig, gc: GlobalConfig):
+    """The box a workspace command acts on: `--box`, else the workspace's `box` key,
     else its own name."""
-    return _resolve_box(resolve_instance(args, project), gc)
+    return _resolve_box(resolve_instance(args, workspace), gc)
 
 
 def _admin_user(provider, name: str) -> str:
@@ -132,7 +137,7 @@ def _check_name_unique(gc: GlobalConfig, name: str) -> None:
 
 # ---- box lifecycle --------------------------------------------------------------
 def _boot_box(box: BoxSpec, gc: GlobalConfig, provider) -> None:
-    """Launch a box and run its own playbook. The box playbook needs no project:
+    """Launch a box and run its own playbook. The box playbook needs no workspace:
     it is the apt half of the dotfiles setup plus a usable shell for the
     privileged account, which is the box's debugging entry point."""
     _check_name_unique(gc, box.name)
@@ -158,7 +163,7 @@ def _boot_box(box: BoxSpec, gc: GlobalConfig, provider) -> None:
     _run_mods(admin_alias, tarball, [], log=provision_log())
 
 
-def cmd_box_create(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+def cmd_box_create(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
     box = resolve_box_spec(args, gc, args.name)
     _, _, provider = _resolve_box(box.name, gc)
     if provider.state(box.name) is not None:
@@ -166,25 +171,25 @@ def cmd_box_create(args: argparse.Namespace, gc: GlobalConfig, project=None) -> 
         return
     _boot_box(box, gc, provider)
     print(f"\n==> box '{box.name}' is ready.\n\n"
-          f"  Attach a project:  box = \"{box.name}\" in its .devbox/config.toml, "
+          f"  Attach a workspace:  box = \"{box.name}\" in its devbox.toml, "
           f"then `devbox create`\n"
           f"  Admin shell:       devbox box ssh {box.name}\n")
 
 
-def _ensure_box(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig):
-    """The box this project attaches to, booting it first if it doesn't exist.
+def _ensure_box(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig):
+    """The box this workspace attaches to, booting it first if it doesn't exist.
 
-    A project that never named a box owns one called after itself, and `devbox
-    create` boots it on the global `[defaults]` - the zero-config path. A project
+    A workspace that never named a box owns one called after itself, and `devbox
+    create` boots it on the global `[defaults]` - the zero-config path. A workspace
     that points at a *shared* box is a different matter: if that box is missing,
     guessing its shape would be worse than saying so, unless the user passed
     box-create flags on this very command line."""
-    name, provider_name, provider = _resolve_target(args, project, gc)
+    name, provider_name, provider = _resolve_target(args, workspace, gc)
     state = provider.state(name)
     if state is not None:
         return name, provider, state
 
-    owns_box = name == project.project
+    owns_box = name == workspace.workspace
     if not owns_box and not _box_flags_given(args):
         die(f"box '{name}' does not exist. Create it first:\n"
             f"  devbox box create {parse_instance_name(name)[1]}"
@@ -202,44 +207,45 @@ def _box_flags_given(args: argparse.Namespace) -> bool:
                 "ami", "spot", "bundle", "blueprint", "zone", "user"))
 
 
-def cmd_create(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    """Ensure this project's box exists, then attach the project to it.
-    Idempotent: on a box that already has this project, it is a reconverge."""
-    name, provider, state = _ensure_box(args, gc, project)
+def cmd_create(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
+    """Ensure this workspace's box exists, then attach the workspace to it.
+    Idempotent: on a box that already has this workspace, it is a reconverge."""
+    name, provider, state = _ensure_box(args, gc, workspace)
     if state != "running":
         print(f"==> starting '{name}' ...")
         provider.start(name)
 
     admin_user = _admin_user(provider, name)
-    if admin_user == project.agent_user:
-        die(f"this project's agent_user '{project.agent_user}' is also the "
+    if admin_user == workspace.agent_user:
+        die(f"this workspace's agent_user '{workspace.agent_user}' is also the "
             f"privileged account on box '{name}'; the whole point is that agents "
-            f"run without sudo. Set `agent_user = \"...\"` in .devbox/config.toml.")
+            f"run without sudo. Set `agent_user = \"...\"` in "
+            f"{workspace.marker.config_path}.")
 
     # Built up front so a bad jj identity / missing mod surfaces before we touch
     # the box (build_payload resolves both).
-    tarball = build_tarball(build_payload(project, gc, admin_user))
-    agent_alias, admin_alias = _wait_ready(provider, name, admin_user, project)
+    tarball = build_tarball(build_payload(workspace, gc, admin_user))
+    agent_alias, admin_alias = _wait_ready(provider, name, admin_user, workspace)
 
     # Order: account -> env -> mods -> files. The agent account has to exist
     # before its [env] file can be written into its home; env precedes the mods
     # because a mod may need a cred (repo-bootstrap's private clone); files come
-    # last because their destinations need the repo checkout. `create` blocks
+    # last because their destinations need the checkouts. `create` blocks
     # through all of it. Everything but the files goes over the PRIVILEGED alias:
     # creating an account and writing into another user's home both need sudo.
-    print(f"==> attaching '{project.project}' to '{name}' as user "
-          f"'{project.agent_user}' ...")
+    print(f"==> attaching '{workspace.workspace}' to '{name}' as user "
+          f"'{workspace.agent_user}' ...")
     _ensure_agent_account(admin_alias, tarball, adopt=args.adopt)
     print("==> injecting [env] credentials ...")
-    run_envvars(admin_alias, resolve_env(project, gc), project.agent_user)
+    run_envvars(admin_alias, resolve_env(workspace, gc), workspace.agent_user)
     print("==> provisioning (running mods over SSH; several minutes) ...")
-    _run_mods(admin_alias, tarball, [], log=provision_log(project.agent_user))
-    if project.sync:
+    _run_mods(admin_alias, tarball, [], log=provision_log(workspace.agent_user))
+    if workspace.sync:
         print("==> syncing host-local files onto the box ...")
-        run_sync(project, agent_alias)
+        run_sync(workspace, agent_alias)
 
-    d = args.project_dir or "."
-    print(f"\n==> '{project.project}' is ready on '{name}'.\n\n"
+    d = args.workspace_dir or "."
+    print(f"\n==> '{workspace.workspace}' is ready on '{name}'.\n\n"
           f"  SSH:  devbox -C {d} ssh\n")
 
 
@@ -263,20 +269,20 @@ def _ssh_ok(alias: str) -> bool:
 
 
 def _wait_ready(provider, name: str, admin_user: str,
-                project: Optional[ProjectConfig] = None):
+                workspace: Optional[WorkspaceConfig] = None):
     """Block until a box has an address, accepts SSH as the privileged user, and
     its base cloud-init (that user + packages the mods lean on) has finished.
-    Returns the admin alias, or the (agent, admin) pair when a project is given.
+    Returns the admin alias, or the (agent, admin) pair when a workspace is given.
     Times out pointing at `devbox box status`.
 
-    Readiness is checked over the PRIVILEGED alias: a project's agent account is
+    Readiness is checked over the PRIVILEGED alias: a workspace's agent account is
     created later, by the provisioning driver, so its alias cannot connect yet."""
     print("==> waiting for the box to get an address ...")
     ip = _poll(lambda: provider.address(name), timeout=300)
     if not ip:
         die(f"timed out waiting for '{name}' to get an address; "
             f"check `devbox box status {name}`")
-    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, admin_user, project)
+    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, admin_user, workspace)
 
     print("==> waiting for SSH ...")
     if not _poll(lambda: _ssh_ok(admin_alias), timeout=300):
@@ -289,7 +295,7 @@ def _wait_ready(provider, name: str, admin_user: str,
     if r.returncode not in (0, 2):
         die(f"base cloud-init did not finish cleanly on '{name}' "
             f"(exit {r.returncode}); check `devbox box status {name}`")
-    return (agent_alias, admin_alias) if project is not None else admin_alias
+    return (agent_alias, admin_alias) if workspace is not None else admin_alias
 
 
 def _run_driver(alias: str, tarball: bytes, driver_args: list, log: str = "",
@@ -332,7 +338,7 @@ def _ensure_agent_account(alias: str, tarball: bytes, adopt: bool = False) -> No
     rc = _run_driver(alias, tarball, ["--ensure-agent"],
                      env={"DEVBOX_ATTACH_ADOPT": "1"} if adopt else None)
     if rc != 0:
-        die(f"could not set up the project's account (exit {rc}); "
+        die(f"could not set up the workspace's account (exit {rc}); "
             f"see the output above")
 
 
@@ -345,7 +351,7 @@ def _run_mods(alias: str, tarball: bytes, mods: list, log: str) -> None:
             f"or ~/{log} on the box")
 
 
-def cmd_box_up(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+def cmd_box_up(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
     name, _, provider = _resolve_box(args.name, gc)
     state = provider.state(name)
     if state is None:
@@ -357,7 +363,7 @@ def cmd_box_up(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None
     provider.start(name)
 
 
-def cmd_box_stop(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+def cmd_box_stop(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
     name, _, provider = _resolve_box(args.name, gc)
     state = provider.state(name)
     if state is None:
@@ -365,15 +371,22 @@ def cmd_box_stop(args: argparse.Namespace, gc: GlobalConfig, project=None) -> No
     if state not in ("running",):
         print(f"box '{name}' is already stopped ({state}).")
         return
-    attached = _attached_projects(provider, name)
+    attached = _attached_workspaces(provider, name)
     if len(attached) > 1:
-        print(f"note: {len(attached)} projects are attached ({', '.join(attached)}).")
+        print(f"note: {len(attached)} workspaces are attached ({', '.join(attached)}).")
     print(f"==> stopping '{name}' ...")
     provider.stop(name)
 
 
-def _attached_projects(provider, name: str) -> list:
-    """The projects currently attached to a box, read from the box itself. The
+# Where a box records which workspace owns each unprivileged account (written by
+# the provisioning driver). The legacy path is read-only, for a box last attached
+# by a devbox that called a workspace a project.
+MARKERS_DIR = "/etc/devbox/workspaces"
+LEGACY_MARKERS_DIR = "/etc/devbox/projects"
+
+
+def _attached_workspaces(provider, name: str) -> list:
+    """The workspaces currently attached to a box, read from the box itself. The
     markers are the only record - there is no host-side registry to go stale -
     so this needs the box up; a box that can't be reached reports nothing rather
     than failing the command it was called from."""
@@ -385,18 +398,24 @@ def _attached_projects(provider, name: str) -> list:
                       _admin_user(provider, name))
     r = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", admin_alias,
-         "cat /etc/devbox/projects/* 2>/dev/null"],
+         f"cat {MARKERS_DIR}/* {LEGACY_MARKERS_DIR}/* 2>/dev/null"],
         capture_output=True, text=True)
     if r.returncode != 0:
         return []
-    return sorted(line.split("=", 1)[1] for line in r.stdout.splitlines()
-                  if line.startswith("project=") and line.split("=", 1)[1])
+    # `project=` is the same field under the name it had before an attachment was
+    # a workspace; a box migrates its markers the next time devbox attaches to it.
+    names = set()
+    for line in r.stdout.splitlines():
+        field, _, value = line.partition("=")
+        if field in ("workspace", "project") and value:
+            names.add(value)
+    return sorted(names)
 
 
 def _confirm_destroy(name: str, provider_name: str, assume_yes: bool,
                      attached: list = (), stdin=None) -> bool:
     """Decide whether a destroy may proceed. `destroy` deletes the disk
-    irreversibly - and with it every attached project's uncommitted work - so
+    irreversibly - and with it every attached workspace's uncommitted work - so
     guard it: --yes (assume_yes) skips the prompt outright; otherwise a non-TTY
     stdin can't be prompted safely (would hang or silently proceed) so we die
     pointing at --yes; on a TTY we require the full word 'yes'. Anything else ->
@@ -413,15 +432,15 @@ def _confirm_destroy(name: str, provider_name: str, assume_yes: bool,
     print(f"About to destroy '{name}' ({provider_name}) and DELETE its disk. "
           f"This is irreversible.")
     if attached:
-        print(f"  {len(attached)} project(s) attached, with their checkouts: "
+        print(f"  {len(attached)} workspace(s) attached, with their checkouts: "
               f"{', '.join(attached)}")
     return input("Type 'yes' to confirm: ").strip() == "yes"
 
 
-def cmd_box_destroy(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+def cmd_box_destroy(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
     name, provider_name, provider = _resolve_box(args.name, gc)
     if not _confirm_destroy(name, provider_name, args.yes,
-                            _attached_projects(provider, name)):
+                            _attached_workspaces(provider, name)):
         print(f"Aborted; '{name}' left untouched.")
         return
     provider.destroy(name)
@@ -433,33 +452,33 @@ def cmd_box_destroy(args: argparse.Namespace, gc: GlobalConfig, project=None) ->
     print(f"Destroyed '{name}'{tail}.")
 
 
-def cmd_destroy(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    """Destroy this project's box - but only when this project is the only thing
+def cmd_destroy(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
+    """Destroy this workspace's box - but only when this workspace is the only thing
     on it. A shared box is somebody else's machine too, so the blast radius has
     to be spelled rather than inferred."""
-    name, provider_name, provider = _resolve_target(args, project, gc)
-    attached = _attached_projects(provider, name)
-    others = [p for p in attached if p != project.project]
+    name, provider_name, provider = _resolve_target(args, workspace, gc)
+    attached = _attached_workspaces(provider, name)
+    others = [p for p in attached if p != workspace.workspace]
     if others:
         die(f"box '{name}' also hosts {', '.join(others)}. Destroying it would "
             f"take their checkouts with it.\n"
-            f"  Give up just this project's account:  devbox detach\n"
+            f"  Give up just this workspace's account:  devbox detach\n"
             f"  Destroy the whole box anyway:         devbox box destroy {name}")
     args = argparse.Namespace(name=name, yes=args.yes)
     cmd_box_destroy(args, gc)
 
 
-def cmd_ip(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name, _, provider = _resolve_target(args, project, gc)
+def cmd_ip(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
+    name, _, provider = _resolve_target(args, workspace, gc)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?). Try again shortly.")
     print(ip)
 
 
-def cmd_box_ssh(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+def cmd_box_ssh(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
     """The privileged shell - the box's only sudo account. For debugging the
-    machine itself; a project's own shell is `devbox ssh`."""
+    machine itself; a workspace's own shell is `devbox ssh`."""
     name, _, provider = _resolve_box(args.name, gc)
     ip = provider.address(name)
     if not ip:
@@ -468,14 +487,14 @@ def cmd_box_ssh(args: argparse.Namespace, gc: GlobalConfig, project=None) -> Non
     os.execvp("ssh", ["ssh", admin_alias, *args.ssh_args])
 
 
-def cmd_ssh(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name, _, provider = _resolve_target(args, project, gc)
+def cmd_ssh(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
+    name, _, provider = _resolve_target(args, workspace, gc)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    # This project's unprivileged account - that's where its repo checkout and
+    # This workspace's unprivileged account - that's where its checkouts and
     # tooling live. The box's privileged shell is `devbox box ssh <box>`.
-    agent_alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), project)
+    agent_alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), workspace)
     os.execvp("ssh", ["ssh", agent_alias, *args.ssh_args])
 
 
@@ -492,17 +511,17 @@ def _tail_provision_log(provider, name: str, log: str) -> None:
     ], check=False)
 
 
-def cmd_box_status(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+def cmd_box_status(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
     name, _, provider = _resolve_box(args.name, gc)
     _tail_provision_log(provider, name, provision_log())
 
 
-def cmd_status(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name, _, provider = _resolve_target(args, project, gc)
-    _tail_provision_log(provider, name, provision_log(project.agent_user))
+def cmd_status(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
+    name, _, provider = _resolve_target(args, workspace, gc)
+    _tail_provision_log(provider, name, provision_log(workspace.agent_user))
 
 
-def cmd_box_list(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+def cmd_box_list(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
     # Global view: every devbox-managed box, unioned across providers. EC2 is
     # account-wide; libvirt is this-host-only.
     boxes = [inst for provider in all_providers(gc) for inst in provider.list()]
@@ -515,7 +534,7 @@ def cmd_box_list(args: argparse.Namespace, gc: GlobalConfig, project=None) -> No
     if getattr(args, "attached", False):
         for provider in all_providers(gc):
             for box in provider.list():
-                attached[box.name] = _attached_projects(provider, box.name)
+                attached[box.name] = _attached_workspaces(provider, box.name)
 
     header = ["NAME", "PROVIDER", "STATE", "RESOURCES", "UP"]
     if attached:
@@ -534,19 +553,19 @@ def cmd_box_list(args: argparse.Namespace, gc: GlobalConfig, project=None) -> No
     _print_table(rows)
 
 
-def _alias_names(box: str, project: Optional[ProjectConfig] = None) -> tuple:
+def _alias_names(box: str, workspace: Optional[WorkspaceConfig] = None) -> tuple:
     """The SSH aliases for a box: (agent, admin). The agent alias is per
-    attachment - `devbox-<box>-<project>` - because several projects now share
+    attachment - `devbox-<box>-<workspace>` - because several workspaces now share
     one machine and each needs its own account.
 
-    It collapses to plain `devbox-<box>` when the project owns the box (the name
-    is the same either way), which is the one-project case: that keeps the alias
+    It collapses to plain `devbox-<box>` when the workspace owns the box (the name
+    is the same either way), which is the one-workspace case: that keeps the alias
     every existing jj remote, doc and finger already names."""
     admin = f"devbox-{box}-admin"
-    if project is None:
+    if workspace is None:
         return None, admin
-    agent = (f"devbox-{box}" if project.project == box
-             else f"devbox-{box}-{project.project}")
+    agent = (f"devbox-{box}" if workspace.workspace == box
+             else f"devbox-{box}-{workspace.workspace}")
     return agent, admin
 
 
@@ -554,7 +573,7 @@ def _write_alias_conf(filename: str, alias: str, box: str, ip: str, user: str) -
     """One alias, alone in its own file under SSH_DIR.
 
     One stanza per file is what makes attaching safe: a single shared file per
-    box would have each project's refresh overwrite the last one's account, and
+    box would have each workspace's refresh overwrite the last one's account, and
     `Include .../*.conf` is first-match-wins, so a stale duplicate stanza would
     quietly shadow the current address."""
     SSH_DIR.mkdir(parents=True, exist_ok=True)
@@ -572,16 +591,16 @@ def _write_alias_conf(filename: str, alias: str, box: str, ip: str, user: str) -
 
 
 def _refresh_ssh_aliases(box: str, ip: str, admin_user: str,
-                         project: Optional[ProjectConfig] = None) -> tuple:
+                         workspace: Optional[WorkspaceConfig] = None) -> tuple:
     """Write/refresh the SSH aliases for a box (host, user, dedicated
     known-hosts) and return them as (agent_alias, admin_alias); the agent one is
-    None when no project was given. Provider-agnostic - `ip` is whatever the
+    None when no workspace was given. Provider-agnostic - `ip` is whatever the
     provider resolved (libvirt DHCP lease or EC2 public IP)."""
-    agent_alias, admin_alias = _alias_names(box, project)
+    agent_alias, admin_alias = _alias_names(box, workspace)
     _write_alias_conf(f"{box}.admin.conf", admin_alias, box, ip, admin_user)
-    if project is not None:
-        _write_alias_conf(f"{box}.{project.project}.conf", agent_alias, box, ip,
-                          project.agent_user)
+    if workspace is not None:
+        _write_alias_conf(f"{box}.{workspace.workspace}.conf", agent_alias, box, ip,
+                          workspace.agent_user)
 
     include_line = f"Include {SSH_DIR}/*.conf"
     if SSH_USER_CONFIG.is_file():
@@ -599,21 +618,21 @@ def _refresh_ssh_aliases(box: str, ip: str, admin_user: str,
     return agent_alias, admin_alias
 
 
-def cmd_host(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    name, _, provider = _resolve_target(args, project, gc)
+def cmd_host(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
+    name, _, provider = _resolve_target(args, workspace, gc)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
     agent_alias, admin_alias = _refresh_ssh_aliases(
-        name, ip, _admin_user(provider, name), project)
+        name, ip, _admin_user(provider, name), workspace)
     # The agent alias is the one `jj fetch` uses and the one worth printing; the
     # admin alias is refreshed alongside it and named for completeness.
     print(agent_alias)
     print(f"(privileged: {admin_alias})")
 
 
-def cmd_herdr(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    """Launch a herdr session against this project's account on its box -
+def cmd_herdr(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
+    """Launch a herdr session against this workspace's account on its box -
     `herdr --remote <alias>`, replacing `herdr --remote $(devbox host)`.
 
     The agent alias, for the same reason `devbox ssh` uses it: herdr drives a
@@ -621,11 +640,11 @@ def cmd_herdr(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig
     privileged one. Refreshing the alias first is what makes this work after the
     box's address has changed, which is the whole reason the `$(devbox host)`
     form existed."""
-    name, _, provider = _resolve_target(args, project, gc)
+    name, _, provider = _resolve_target(args, workspace, gc)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    agent_alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), project)
+    agent_alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), workspace)
     if not shutil.which("herdr"):
         die("herdr is not installed on this host (it drives the session from "
             "here, over SSH; the box needs nothing). Install it, or use "
@@ -638,12 +657,12 @@ def _ensure_jj_remote(repo_dir: Path, remote: str, url: str) -> None:
     """Idempotently point a jj git remote named `remote` at `url` in the host's
     local repo - add it if missing, re-point it if the URL drifted (a new IP =>
     a new alias target isn't at play here since we key on the stable alias, but
-    the repo path can change if [repo] dir changes)."""
+    the repo path can change if the entry's `dir` changes)."""
     listing = subprocess.run(["jj", "git", "remote", "list"], cwd=repo_dir,
                              capture_output=True, text=True)
     if listing.returncode != 0:
         die(f"`jj git remote list` failed in {repo_dir} - is this a jj repo? "
-            f"Run `devbox jj fetch` from your project's jj checkout (or pass -C).")
+            f"Run `devbox jj fetch` from your workspace's jj checkout (or pass -C).")
     current = None
     for line in listing.stdout.splitlines():
         parts = line.split()
@@ -656,28 +675,57 @@ def _ensure_jj_remote(repo_dir: Path, remote: str, url: str) -> None:
         subprocess.run(["jj", "git", "remote", "set-url", remote, url], cwd=repo_dir, check=True)
 
 
-def cmd_jj_fetch(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    # jj git fetch (box->host): refresh the SSH alias (address via the provider,
-    # so this is identical for libvirt or AWS), ensure the local jj remote points
-    # at this project's colocated repo on its box, and fetch.
-    if project.repo.mode == "none" or not project.repo.dir:
-        die("this project has no [repo] configured (set [repo] mode/dir); nothing to fetch")
-    name, _, provider = _resolve_target(args, project, gc)
+def _select_repo(workspace: WorkspaceConfig, wanted: Optional[str], start: Path):
+    """Which of the workspace's checkouts a repo-scoped command acts on.
+
+    An explicit name wins. Otherwise the cwd decides, by walking up for the repo
+    whose host path contains it - which is what makes `devbox jj fetch` work the
+    way `jj` itself does, from anywhere inside a checkout. A workspace holding
+    exactly one repo needs neither: there is nothing to disambiguate."""
+    if not workspace.repos:
+        die("this workspace has no [[repos]]; nothing to fetch")
+    if wanted:
+        repo = workspace.repo(wanted)
+        if repo is None:
+            die(f"this workspace has no repo named '{wanted}' "
+                f"(it has: {', '.join(r.name for r in workspace.repos)})")
+        return repo
+    cur = start.resolve()
+    while True:
+        for repo in workspace.repos:
+            if repo.host == cur:
+                return repo
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    if len(workspace.repos) == 1:
+        return workspace.repos[0]
+    die(f"{start} is not inside any of this workspace's checkouts "
+        f"({', '.join(r.name for r in workspace.repos)}); run this from one of "
+        f"them, or name it: `devbox jj fetch <repo>`")
+
+
+def cmd_jj_fetch(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
+    # jj git fetch (box->host): pick which checkout this is about, refresh the SSH
+    # alias (address via the provider, so this is identical for libvirt or AWS),
+    # ensure the local jj remote points at that repo on the box, and fetch.
+    start = args.workspace_dir or Path.cwd()
+    repo = _select_repo(workspace, args.repo, start)
+    name, _, provider = _resolve_target(args, workspace, gc)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
 
-    # The agent alias: the checkout is in this project's own account, and `jj git
+    # The agent alias: the checkout is in this workspace's own account, and `jj git
     # fetch` runs git-upload-pack as the login user - there is no sudo-ing through
     # that. An existing remote pointing at an older home is re-pointed by
     # _ensure_jj_remote, so old checkouts self-heal.
-    alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), project)
-    remote_url = f"ssh://{alias}/home/{project.agent_user}/{project.repo.dir}"
-    repo_dir = find_project_dir(args.project_dir or Path.cwd())
-    _ensure_jj_remote(repo_dir, alias, remote_url)
+    alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), workspace)
+    remote_url = f"ssh://{alias}/home/{workspace.agent_user}/{repo.dir}"
+    _ensure_jj_remote(repo.host, alias, remote_url)
 
     print(f"==> jj git fetch from '{alias}' ({remote_url}) ...")
-    result = subprocess.run(["jj", "git", "fetch", "--remote", alias], cwd=repo_dir)
+    result = subprocess.run(["jj", "git", "fetch", "--remote", alias], cwd=repo.host)
     if result.returncode != 0:
         die("jj git fetch failed")
     print(f"fetched. Check out an agent bookmark with e.g. `jj new <bookmark>@{alias}`.")
@@ -689,7 +737,7 @@ def _split_mods(value: str) -> list:
     return [m.strip() for m in value.split(",") if m.strip()]
 
 
-def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
+def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
     # Reconverge a live box: inject [env] creds (--envvars), run provisioning
     # mods (--mods), and/or push host-local files (--files), over the
     # provider-resolved SSH alias. `devbox create` runs the same steps on a
@@ -700,40 +748,40 @@ def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig)
     if not (do_envvars or do_mods or do_files):
         die("nothing to do: pass --envvars (inject [env] creds), --mods (run "
             "provisioning mods), and/or --files (push host-local [[sync]] files)")
-    if do_files and not project.sync:
-        die("this project has no [[sync]]/[[repo.sync]] entries; drop --files")
+    if do_files and not workspace.sync:
+        die("this workspace has no [[sync]]/[[repos.sync]] entries; drop --files")
 
-    name, _, provider = _resolve_target(args, project, gc)
+    name, _, provider = _resolve_target(args, workspace, gc)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
     admin_user = _admin_user(provider, name)
-    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, admin_user, project)
+    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, admin_user, workspace)
 
     # Order: env -> mods -> files. Mods may need a cred (e.g. repo-bootstrap's
     # private clone); file dsts (e.g. ~/<repo>/.claude/skills) need the repo clone.
     # env and mods go over the privileged alias (writing another user's home /
-    # running the driver both need sudo); files go over this project's own.
-    tarball = (build_tarball(build_payload(project, gc, admin_user))
+    # running the driver both need sudo); files go over this workspace's own.
+    tarball = (build_tarball(build_payload(workspace, gc, admin_user))
                if (do_envvars or do_mods) else None)
     if do_envvars:
         # The account's home has to exist before its [env] file can land in it -
-        # true on a box this project has never attached to, not just a new one.
+        # true on a box this workspace has never attached to, not just a new one.
         _ensure_agent_account(admin_alias, tarball, adopt=args.adopt)
         print(f"==> injecting [env] credentials into '{name}' ...")
-        run_envvars(admin_alias, resolve_env(project, gc), project.agent_user)
+        run_envvars(admin_alias, resolve_env(workspace, gc), workspace.agent_user)
     if do_mods:
         mods = _split_mods(args.mods)
         subset = f" (mods: {', '.join(mods)})" if mods else ""
         print(f"==> provisioning '{name}' over SSH{subset} ...")
-        _run_mods(admin_alias, tarball, mods, log=provision_log(project.agent_user))
+        _run_mods(admin_alias, tarball, mods, log=provision_log(workspace.agent_user))
     if do_files:
         print(f"==> syncing host-local files to '{name}' ...")
-        run_sync(project, agent_alias)
+        run_sync(workspace, agent_alias)
     print("done.")
 
 
-def cmd_box_sync(args: argparse.Namespace, gc: GlobalConfig, project=None) -> None:
+def cmd_box_sync(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
     """Reconverge the box's own playbook - the machine, not any attachment."""
     name, _, provider = _resolve_box(args.name, gc)
     ip = provider.address(name)
@@ -749,27 +797,27 @@ def cmd_box_sync(args: argparse.Namespace, gc: GlobalConfig, project=None) -> No
     print("done.")
 
 
-def cmd_detach(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfig) -> None:
-    """Give up this project's account on its box.
+def cmd_detach(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
+    """Give up this workspace's account on its box.
 
     Non-destructive by default: the ownership record, the authorized key and the
     credentials go, so nothing can reach the account any more - but the home, and
     with it any uncommitted work, stays, so re-attaching is instant. `--purge` is
     the one that deletes; `userdel` refuses while a session is alive, hence the
     terminate first."""
-    name, provider_name, provider = _resolve_target(args, project, gc)
+    name, provider_name, provider = _resolve_target(args, workspace, gc)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    agent = shlex.quote(project.agent_user)
+    agent = shlex.quote(workspace.agent_user)
     _, admin_alias = _refresh_ssh_aliases(name, ip, _admin_user(provider, name))
 
     if args.purge and not _confirm_destroy(
-            f"{project.agent_user}@{name}", provider_name, args.yes):
+            f"{workspace.agent_user}@{name}", provider_name, args.yes):
         print("Aborted; nothing removed.")
         return
     remote = (
-        f'set -e; sudo rm -f /etc/devbox/projects/{agent}; '
+        f'set -e; sudo rm -f {MARKERS_DIR}/{agent} {LEGACY_MARKERS_DIR}/{agent}; '
         f'h="$(getent passwd {agent} | cut -d: -f6)"; '
         f'[ -n "$h" ] || exit 0; '
         f'sudo truncate -s 0 "$h/.ssh/authorized_keys" 2>/dev/null || true; '
@@ -784,14 +832,14 @@ def cmd_detach(args: argparse.Namespace, gc: GlobalConfig, project: ProjectConfi
         )
     r = subprocess.run(["ssh", admin_alias, "bash", "-c", shlex.quote(remote)])
     if r.returncode != 0:
-        die(f"detaching '{project.agent_user}' from '{name}' failed "
+        die(f"detaching '{workspace.agent_user}' from '{name}' failed "
             f"(exit {r.returncode})")
 
-    conf = SSH_DIR / f"{name}.{project.project}.conf"
+    conf = SSH_DIR / f"{name}.{workspace.workspace}.conf"
     conf.unlink(missing_ok=True)
     kept = ("" if args.purge else
             f"\nIts home is untouched; `devbox create` re-attaches it.")
-    print(f"Detached '{project.project}' from '{name}'.{kept}")
+    print(f"Detached '{workspace.workspace}' from '{name}'.{kept}")
 
 
 def _add_box_create_flags(parser: argparse.ArgumentParser) -> None:
@@ -823,26 +871,26 @@ def _add_box_create_flags(parser: argparse.ArgumentParser) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Manage shared dev-sandbox VMs (libvirt or AWS) and the "
-                    "projects attached to them.")
+                    "workspaces attached to them.")
     # Defined before add_subparsers so they can't be swallowed by ssh's
     # argparse.REMAINDER: `devbox --box foo ssh -- -v`.
-    p.add_argument("-C", "--project-dir", type=Path, default=None,
-                    help="project directory to resolve the devbox marker from (default: cwd)")
+    p.add_argument("-C", "--workspace-dir", "--project-dir", type=Path, default=None,
+                    help="workspace directory to resolve the devbox marker from (default: cwd)")
     p.add_argument("--box", "--name", dest="box", default=None,
-                    help="target a specific box by name (default: the project's `box`)")
+                    help="target a specific box by name (default: the workspace's `box`)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # ---- box commands: the machine itself, addressed by name ----------------
-    box = sub.add_parser("box", help="create and manage boxes (the VMs projects attach to)")
+    box = sub.add_parser("box", help="create and manage boxes (the VMs workspaces attach to)")
     box_sub = box.add_subparsers(dest="box_cmd", required=True)
     bc = box_sub.add_parser("create", help="download image, define + first-boot a box")
     bc.add_argument("name", help="the box's name (a provider prefix is added for cloud boxes)")
     _add_box_create_flags(bc)
-    bc.set_defaults(func=cmd_box_create, needs_project=False)
+    bc.set_defaults(func=cmd_box_create, needs_workspace=False)
     bl = box_sub.add_parser("list", help="list devbox-managed boxes")
     bl.add_argument("--attached", action="store_true",
-                    help="also show which projects are attached (one SSH per box)")
-    bl.set_defaults(func=cmd_box_list, needs_project=False)
+                    help="also show which workspaces are attached (one SSH per box)")
+    bl.set_defaults(func=cmd_box_list, needs_workspace=False)
     for verb, fn, helptext in (
             ("up", cmd_box_up, "start an already-defined, shut-off box"),
             ("stop", cmd_box_stop, "gracefully shut down a running box"),
@@ -850,79 +898,83 @@ def main() -> None:
     ):
         bp = box_sub.add_parser(verb, help=helptext)
         bp.add_argument("name", help="the box's canonical name")
-        bp.set_defaults(func=fn, needs_project=False)
+        bp.set_defaults(func=fn, needs_workspace=False)
     bs = box_sub.add_parser("ssh", help="ssh into the box as the privileged user (its only sudo shell)")
     bs.add_argument("name", help="the box's canonical name")
     bs.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
-    bs.set_defaults(func=cmd_box_ssh, needs_project=False)
+    bs.set_defaults(func=cmd_box_ssh, needs_workspace=False)
     bsy = box_sub.add_parser("sync", help="reconverge the box's own playbook")
     bsy.add_argument("name", help="the box's canonical name")
     bsy.add_argument("--mods", nargs="?", const="", default=None, metavar="a,b,c",
                      help="run box mods over SSH (all if no list; else comma-separated)")
-    bsy.set_defaults(func=cmd_box_sync, needs_project=False)
+    bsy.set_defaults(func=cmd_box_sync, needs_workspace=False)
     bd = box_sub.add_parser("destroy", help="tear down the box and its disk")
     bd.add_argument("name", help="the box's canonical name")
     bd.add_argument("-y", "--yes", "--force", action="store_true", dest="yes",
                     help="skip the confirmation prompt (for scripts)")
-    bd.set_defaults(func=cmd_box_destroy, needs_project=False)
+    bd.set_defaults(func=cmd_box_destroy, needs_workspace=False)
 
-    # ---- project commands: this project's account on its box ----------------
-    c = sub.add_parser("create", help="ensure this project's box exists, then attach to it")
+    # ---- workspace commands: this workspace's account on its box ----------------
+    c = sub.add_parser("create", help="ensure this workspace's box exists, then attach to it")
     c.add_argument("--adopt", action="store_true",
                    help="claim an existing account that devbox has no record of")
     _add_box_create_flags(c)
     c.set_defaults(func=cmd_create)
-    d = sub.add_parser("destroy", help="tear down this project's box (only if nothing else is on it)")
+    d = sub.add_parser("destroy", help="tear down this workspace's box (only if nothing else is on it)")
     d.add_argument("-y", "--yes", "--force", action="store_true", dest="yes",
                    help="skip the confirmation prompt (for scripts)")
     d.set_defaults(func=cmd_destroy)
-    dt = sub.add_parser("detach", help="give up this project's account on its box")
+    dt = sub.add_parser("detach", help="give up this workspace's account on its box")
     dt.add_argument("--purge", action="store_true",
                     help="also delete the account's home directory and its work")
     dt.add_argument("-y", "--yes", "--force", action="store_true", dest="yes",
                     help="skip the confirmation prompt (for scripts)")
     dt.set_defaults(func=cmd_detach)
     sub.add_parser("ip", help="print the box's IPv4").set_defaults(func=cmd_ip)
-    s = sub.add_parser("ssh", help="ssh into the box as this project's agent user")
+    s = sub.add_parser("ssh", help="ssh into the box as this workspace's agent user")
     s.add_argument("ssh_args", nargs=argparse.REMAINDER, help="extra args passed to ssh")
     s.set_defaults(func=cmd_ssh)
-    sub.add_parser("status", help="show cloud-init progress + this project's provision log").set_defaults(func=cmd_status)
+    sub.add_parser("status", help="show cloud-init progress + this workspace's provision log").set_defaults(func=cmd_status)
     # `jj` groups jj-specific operations; `jj fetch` pulls the account's
     # bookmarked work box->host (the global -C/--box still go before `jj`).
     jj = sub.add_parser("jj", help="jj operations against the box")
     jj_sub = jj.add_subparsers(dest="jj_cmd", required=True)
-    jj_sub.add_parser("fetch", help="jj git fetch the account's bookmarked work into the host repo").set_defaults(func=cmd_jj_fetch)
+    jf = jj_sub.add_parser("fetch", help="jj git fetch the account's bookmarked work into the host repo")
+    jf.add_argument("repo", nargs="?", default=None,
+                    help="which of the workspace's [[repos]] to fetch "
+                         "(default: the one the cwd is in)")
+    jf.set_defaults(func=cmd_jj_fetch)
     # `sync` reconverges a live attachment: [env] creds, mods, host-local files.
-    sy = sub.add_parser("sync", help="reconverge this project on its box: --envvars / --mods / --files")
+    sy = sub.add_parser("sync", help="reconverge this workspace on its box: --envvars / --mods / --files")
     sy.add_argument("--envvars", action="store_true",
                     help="inject the [env] creds/vars into the account's shell env")
     sy.add_argument("--mods", nargs="?", const="", default=None, metavar="a,b,c",
                     help="run provisioning mods over SSH (all if no list; else comma-separated)")
     sy.add_argument("--files", action="store_true",
-                    help="push host-local files ([[sync]]/[[repo.sync]]) to the box via rsync")
+                    help="push host-local files ([[sync]]/[[repos.sync]]) to the box via rsync")
     sy.add_argument("--adopt", action="store_true",
                     help="claim an existing account that devbox has no record of")
     sy.set_defaults(func=cmd_sync)
     sub.add_parser("host", help="refresh the SSH alias used for jj-fetch, print the alias name").set_defaults(func=cmd_host)
-    hd = sub.add_parser("herdr", help="launch a herdr session on the box, as this project's agent user")
+    hd = sub.add_parser("herdr", help="launch a herdr session on the box, as this workspace's agent user")
     hd.add_argument("herdr_args", nargs=argparse.REMAINDER, help="extra args passed to herdr (e.g. --session NAME)")
     hd.set_defaults(func=cmd_herdr)
     # `devbox list` stays as the familiar spelling of `devbox box list`.
     ls = sub.add_parser("list", help="list devbox-managed boxes")
     ls.add_argument("--attached", action="store_true",
-                    help="also show which projects are attached (one SSH per box)")
-    ls.set_defaults(func=cmd_box_list, needs_project=False)
+                    help="also show which workspaces are attached (one SSH per box)")
+    ls.set_defaults(func=cmd_box_list, needs_workspace=False)
 
     args = p.parse_args()
     global_config = GlobalConfig.load()
-    # Most commands operate within a project; `list` is global and skips it.
-    project = None
-    if getattr(args, "needs_project", True):
-        project = resolve_project(args.project_dir or Path.cwd(), global_config)
-    _run(args, global_config, project)
+    # Most commands operate within a workspace; `list` is global and skips it.
+    workspace = None
+    if getattr(args, "needs_workspace", True):
+        workspace = resolve_workspace(args.workspace_dir or Path.cwd(), global_config)
+    _run(args, global_config, workspace)
 
 
-def _run(args: argparse.Namespace, gc: GlobalConfig, project: Optional[ProjectConfig]) -> None:
+def _run(args: argparse.Namespace, gc: GlobalConfig, workspace: Optional[WorkspaceConfig]) -> None:
     """Dispatch, turning AWS credential failures into one-line errors instead of
     a boto stack trace. Credentials that can be checked up front are handled at
     client construction (providers/awsauth.py), which offers to log in and then
@@ -930,7 +982,7 @@ def _run(args: argparse.Namespace, gc: GlobalConfig, project: Optional[ProjectCo
     message already written) or a token that only the server rejected - too late
     to resume, so we say what to run."""
     try:
-        args.func(args, gc, project)
+        args.func(args, gc, workspace)
     except AwsAuthError as err:
         die(str(err))
     except Exception as err:  # noqa: BLE001 - re-raised unless it's an auth failure

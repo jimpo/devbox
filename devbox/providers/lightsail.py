@@ -12,7 +12,7 @@ instance's dynamic public IPv4 (no static IP is allocated or released),
 re-resolved on each command. Port 22 is open by default on a Lightsail instance,
 so there are no firewall calls at create.
 
-Config: the shared global `[aws]` section (account creds) plus a project's
+Config: the shared global `[aws]` section (account creds) plus a workspace's
 optional `[lightsail]` section (bundle / blueprint / availability_zone). There
 is no global `[lightsail]` section.
 
@@ -175,7 +175,7 @@ class LightsailProvider(Provider):
 
         bundle = cfg.bundle or DEFAULT_LIGHTSAIL_BUNDLE
         # The region only carries a letter suffix at the AZ level; default to the
-        # region's first AZ rather than making every project spell one out.
+        # region's first AZ rather than making every workspace spell one out.
         az = cfg.availability_zone or (self.aws.region + "a")
 
         print(f"==> Launching Lightsail {bundle} instance '{spec.name}' ...")

@@ -5,13 +5,13 @@
 # ///
 #
 # mod: cloudflared-tunnel - runs this account's own `cloudflared tunnel run` as
-# a detached background process. One tunnel per attachment, so several projects
+# a detached background process. One tunnel per attachment, so several workspaces
 # on one box each hold their own, with their own token. No-op when
 # CLOUDFLARE_TOKEN is unset.
 #
-# Runs as the agent (the default target): the process belongs to the project,
+# Runs as the agent (the default target): the process belongs to the workspace,
 # and needs no privilege. `cloudflared` itself does - hence `requires`, which
-# also means a project has to list BOTH mods, in that order:
+# also means a workspace has to list BOTH mods, in that order:
 #   mods = ["cloudflared", "cloudflared-tunnel"]
 #
 # The token is this account's own, so a bare string in [env] (owner defaults to

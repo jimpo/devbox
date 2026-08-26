@@ -5,10 +5,10 @@
 # ///
 #
 # mod: claude-code - Claude Code (native installer -> ~/.local/bin/claude) plus
-# the github/linear plugins common to every project.
+# the github/linear plugins common to every workspace.
 #
-# Runs as the agent (the default target): this is the account a project's agents
-# work in, and the only one that needs Claude Code at all. Each attached project
+# Runs as the agent (the default target): this is the account a workspace's agents
+# work in, and the only one that needs Claude Code at all. Each attached workspace
 # gets its own install, in its own home.
 #
 # Idempotency: the installer overwrites in place; `marketplace add` /

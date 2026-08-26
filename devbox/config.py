@@ -1,19 +1,23 @@
-"""Global + per-project configuration, marker resolution, and box targeting.
+"""Global + per-workspace configuration, marker resolution, and box targeting.
 
 Provider-agnostic. `GlobalConfig` is `~/.config/devbox/config.toml`;
-`ProjectConfig` is a project's `.devbox/config.toml`.
+`WorkspaceConfig` is one workspace's own marker file.
 
-**A box is not a project.** A box is a VM - provider, resources, image, and one
-privileged account - and several projects can share one. A project is content:
-its unprivileged account, its checkout, its creds, its mods. So a project's
-config carries no hardware at all: a box's shape is given as CLI flags to
-`devbox box create` (`BoxSpec`), and the box itself is the record of what it is
-(provider tags / libvirt <metadata>), since hardware can't change after create
-and the live values are readable from the provider anyway.
+**A box is not a workspace.** A box is a VM - provider, resources, image, and one
+privileged account - and several workspaces can share one. A workspace is
+content: its unprivileged account, its checkouts, its creds, its mods. So a
+workspace's config carries no hardware at all: a box's shape is given as CLI
+flags to `devbox box create` (`BoxSpec`), and the box itself is the record of
+what it is (provider tags / libvirt <metadata>), since hardware can't change
+after create and the live values are readable from the provider anyway.
 
-A project says which box it lives on with `box = "<name>"`, defaulting to its
-own name - which is why the one-box-per-project case still needs no config at
+A workspace says which box it lives on with `box = "<name>"`, defaulting to its
+own name - which is why the one-box-per-workspace case still needs no config at
 all. `resolve_instance` picks which box a command targets.
+
+**A workspace holds repos, not a repo.** Every checkout in one workspace lives
+in one account, so they share one set of git/jj credentials - which is the point:
+a change that spans a client and its server is one agent's job, not two accounts'.
 """
 from __future__ import annotations
 
@@ -26,28 +30,54 @@ from typing import Optional
 
 from .util import die, warn
 
-PROJECT_MARKER_DIR = ".devbox"
-PROJECT_CONFIG_FILE = "config.toml"                # .devbox/config.toml
-REPO_MODES = ("none", "clone", "push")
+# A workspace is marked one of two ways, and the spelling says which shape the
+# directory has:
+#
+#   <repo>/.devbox/config.toml   the workspace IS one repo; the marker hides
+#                                inside it, out of that repo's tree
+#   <root>/devbox.toml           the workspace HOLDS repos as children; there is
+#                                no repo to hide from, so the marker is visible
+#
+# Mods sit beside their config file either way (`.devbox/mods/` / `mods/`), so
+# the two shapes stay symmetric. Which one was found is the `root_is_repo` bit,
+# and it is what supplies each repo's default host path (see `_resolve_repos`).
+WORKSPACE_MARKER_FILE = "devbox.toml"       # <root>/devbox.toml
+REPO_MARKER_DIR = ".devbox"                 # <repo>/.devbox/
+REPO_MARKER_CONFIG = "config.toml"          # <repo>/.devbox/config.toml
+MODS_SUBDIR = "mods"
 
-# Providers a project can launch instances on. Validated against `provider` in a
-# project's config and the `--provider` flag.
+# How a repo gets onto the box. There is no "none": a workspace with nothing to
+# check out simply lists no repos.
+REPO_MODES = ("clone", "push")
+
+# Where a sync entry's two ends are anchored (see sync.py).
+#   home       $HOME/~/absolute, resolved per side - the only shape the global
+#              config can use, since it has no workspace to anchor against
+#   workspace  host <root>/p -> guest ~/p. Symmetric only when the root HOLDS
+#              repos, so it is refused under a `.devbox/` marker, where the root
+#              is itself a repo and the guest home is not.
+#   repo       host <repo.host>/p -> guest ~/<repo.dir>/p, for one named repo
+ANCHOR_HOME = "home"
+ANCHOR_WORKSPACE = "workspace"
+ANCHOR_REPO = "repo"
+
+# Providers a box can be launched on. Validated against the `--provider` flag.
 DEFAULT_PROVIDER = "libvirt"
 PROVIDERS = ("libvirt", "ec2", "aws")
 
 # Providers whose instances carry a "<provider>-" prefix in their canonical
 # name. libvirt (the default) stays bare - local is the common case, and
-# "bare = the project's libvirt default" is worth keeping. The prefix lets every
+# "bare = the libvirt default" is worth keeping. The prefix lets every
 # per-instance command derive the provider from the name alone (offline string
 # routing), instead of an API call per `ssh`/`ip`/... to find the owner.
 PREFIXED_PROVIDERS = tuple(p for p in PROVIDERS if p != DEFAULT_PROVIDER)
 
 # A box has a privileged account (`admin_user`, the SSH target devbox
 # provisions through, sudo-enabled; a box property, set at `devbox box create`)
-# and one unprivileged `agent_user` per attached project, which that project's
-# AI agents and repo checkout live under. `agent_user` defaults to the project
-# name, which is a directory basename by default - so it is validated here
-# rather than trusted, since plenty of legal project names ('MyProject',
+# and one unprivileged `agent_user` per attached workspace, which that
+# workspace's AI agents and checkouts live under. `agent_user` defaults to the
+# workspace name, which is a directory basename by default - so it is validated
+# here rather than trusted, since plenty of legal workspace names ('MyProject',
 # 'foo.bar', '2fa-lib') are not legal Linux usernames. Failing at config-resolve
 # time costs a second; failing in `useradd` costs a boot.
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
@@ -76,7 +106,7 @@ SSH_USER_CONFIG = Path.home() / ".ssh" / "config"
 
 
 def known_hosts_path(box: str) -> Path:
-    """The known-hosts file for one box. Per box, not shared: several projects
+    """The known-hosts file for one box. Per box, not shared: several workspaces
     now point at the same machine, and creating a *different* box must not
     invalidate this one's pinned key for all of them."""
     return SSH_DIR / f"known_hosts.{box}"
@@ -96,8 +126,8 @@ DEFAULT_MEMORY_MIB = 12288
 DEFAULT_DISK_GB = 60
 DEFAULT_SSH_PUBKEY_PATH = "~/.ssh/id_ed25519.pub"
 
-# EC2 AMI defaults (Canonical's Ubuntu cloud images). A project's [ec2] section
-# can override the name glob / owner, or pin an explicit `ami`.
+# EC2 AMI defaults (Canonical's Ubuntu cloud images). The global [ec2] section
+# can override the name glob / owner, or a box can pin an explicit `ami`.
 DEFAULT_AMI_OWNER = "099720109477"  # Canonical
 DEFAULT_AMI_NAME_FILTER = {
     "x86_64": "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-*",
@@ -108,8 +138,8 @@ DEFAULT_AMI_NAME_FILTER = {
 # than an instance type + EBS size, so the bundle picks CPU/RAM/disk together:
 # the default is the 16 GB / 4 vCPU / 320 GB tier (~$84/mo). Lightsail's Linux
 # lineup is x86-only - there are no ARM/Graviton bundles - so there is no
-# architecture knob; a project's [lightsail] section can pin a different
-# `bundle` (or a different `blueprint`).
+# architecture knob; `devbox box create` can pin a different `bundle` (or a
+# different `blueprint`).
 DEFAULT_LIGHTSAIL_BUNDLE = "xlarge_3_0"        # 16 GB / 4 vCPU / 320 GB
 # The newest Ubuntu LTS blueprint Lightsail offers - older than the 26.04
 # userland the libvirt/ec2 providers boot, which pull Ubuntu cloud images.
@@ -173,7 +203,7 @@ class Ec2Config:
     security_groups: list = dataclasses.field(default_factory=list)
     # Candidate subnets, tried in order; each pins the AZ. Empty => AWS chooses.
     subnets: list = dataclasses.field(default_factory=list)
-    spot: bool = False  # default market when a project doesn't say otherwise
+    spot: bool = False  # default market when a box doesn't say otherwise
 
 
 @dataclasses.dataclass
@@ -189,12 +219,12 @@ class GlobalConfig:
     jj_name: Optional[str]
     jj_email: Optional[str]
     # [env]: {KEY: EnvVar} credentials/vars injected into the shell env of one of
-    # a box's two accounts (see sync.py). A project's [env] overrides per-key.
+    # a box's two accounts (see sync.py). A workspace's [env] overrides per-key.
     env: dict = dataclasses.field(default_factory=dict)
     aws: Optional[AwsConfig] = None      # shared AWS account creds
     ec2: Optional[Ec2Config] = None      # EC2-specific globals
     # [[sync]]: default host->box file-sync rules (see sync.py), applied ahead of
-    # every project's own [[sync]] - the $HOME/~/absolute-anchored shape only,
+    # every workspace's own [[sync]] - the $HOME/~/absolute-anchored shape only,
     # since there is no repo to anchor [[repo.sync]] against at this scope.
     sync: list = dataclasses.field(default_factory=list)
 
@@ -260,7 +290,7 @@ def _resolve_env(data: dict, config_path: Path) -> dict:
     """Parse `[env]` - credentials/vars injected into a box's shell environment
     (see sync.py) - into `{KEY: EnvVar}`. An entry is either a bare string (the
     agent's environment) or a table `{ value = "...", owner = "admin" }`. A
-    project's `[env]` overrides the global one per key, entry for whole entry:
+    workspace's `[env]` overrides the global one per key, entry for whole entry:
     re-declaring a key replaces its owner along with its value."""
     raw = data.get("env", {})
     if not isinstance(raw, dict):
@@ -308,32 +338,56 @@ def _load_ec2_config(ec2_data: Optional[dict], path: Path) -> Optional[Ec2Config
 
 
 def _resolve_global_sync(data: dict, path: Path) -> list:
-    """Parse the global `[[sync]]` - the same $HOME/~/absolute-anchored shape a
-    project's own `[[sync]]` uses (see config.SyncEntry), applied ahead of every
-    project's own entries. There is no global `[[repo.sync]]`: that shape anchors
-    at a project's own checkout, which doesn't exist at this scope."""
-    return [_parse_sync_entry(raw, path, repo_relative=False) for raw in data.get("sync", [])]
+    """Parse the global `[[sync]]` - the $HOME/~/absolute-anchored shape a
+    workspace's own `[[sync]]` also accepts (see config.SyncEntry), applied ahead
+    of every workspace's own entries. Only that shape: the workspace- and
+    repo-anchored ones need a workspace root, which doesn't exist at this
+    scope."""
+    return [_parse_sync_entry(raw, path, "[[sync]]", ANCHOR_HOME)
+            for raw in data.get("sync", [])]
 
 
-# ---- project config / resolution --------------------------------------------
+# ---- workspace config / resolution ------------------------------------------
+@dataclasses.dataclass(frozen=True)
+class Marker:
+    """Where a workspace's configuration lives, and what shape the directory is.
+
+    Resolved once by `find_workspace` and carried around whole, so nothing
+    downstream has to re-derive a path by appending the marker constants - which
+    is what the two spellings would otherwise force on every call site."""
+    root: Path                   # the workspace root
+    config_path: Path            # <root>/devbox.toml, or <root>/.devbox/config.toml
+    mods_dir: Path               # <root>/mods, or <root>/.devbox/mods
+    root_is_repo: bool           # which spelling was found (see the constants above)
+
+
 @dataclasses.dataclass
-class RepoConfig:
-    mode: str                    # "none" | "clone" | "push"
-    dir: str                     # "" when mode == "none"
+class RepoSpec:
+    """One checkout in a workspace. `dir` is where it lands in the agent's home;
+    `host` is the workstation-side path it corresponds to, which is what
+    `[[repos.sync]]` anchors on and what `devbox jj fetch` matches a cwd against.
+
+    A `clone` repo may have no host copy at all - `host` still points at where
+    one would be, and only the commands that read it care whether it exists."""
+    name: str                    # identifies the repo in `[[repos.sync]]` / `jj fetch`
+    mode: str                    # "clone" | "push"
+    dir: str                     # guest path, relative to the agent's home
+    host: Path                   # host path (absolute)
     url: Optional[str]           # set only when mode == "clone"
 
 
 @dataclasses.dataclass
 class SyncEntry:
-    """One host->box file-sync rule (see sync.py). `src`/`dst` are `$HOME`/`~`/
-    absolute-anchored for `[[sync]]`, or repo-relative for `[[repo.sync]]`
-    (host = the marker dir, guest = ~/<repo.dir>). `include` narrows to named
-    children of `src` (each mirrored in its own subtree); empty = the whole
-    `src`. `dst` defaults to `src`."""
+    """One host->box file-sync rule (see sync.py). `anchor` says what the two
+    ends are relative to - `$HOME`/`~`/absolute, the workspace root, or one
+    named repo (`repo`) - and `include` narrows to named children of `src` (each
+    mirrored in its own subtree); empty = the whole `src`. `dst` defaults to
+    `src`."""
     src: str
     dst: str
     include: list                # child names; empty = whole src
-    repo_relative: bool          # True for [[repo.sync]], False for [[sync]]
+    anchor: str                  # ANCHOR_HOME | ANCHOR_WORKSPACE | ANCHOR_REPO
+    repo: str = ""               # the repo's name, when anchor == ANCHOR_REPO
 
 
 @dataclasses.dataclass
@@ -387,31 +441,41 @@ class BoxSpec:
 
 
 @dataclasses.dataclass
-class ProjectConfig:
-    """A project: content, not hardware. Everything here describes what gets set
-    up inside one unprivileged account on a box - never the box itself."""
-    project: str                  # the project's name (default: marker dir basename)
-    # The box this project attaches to, as a canonical instance name. Defaults to
-    # the project's own name, which is what keeps the one-box-per-project case
-    # working with no configuration at all.
+class WorkspaceConfig:
+    """A workspace: content, not hardware. Everything here describes what gets
+    set up inside one unprivileged account on a box - never the box itself."""
+    workspace: str                # the workspace's name (default: root basename)
+    # The box this workspace attaches to, as a canonical instance name. Defaults
+    # to the workspace's own name, which is what keeps the one-box-per-workspace
+    # case working with no configuration at all.
     box: str
-    # The unprivileged account this project's agents, checkout and creds live
-    # under, created by the provisioning driver at attach. One per project; the
-    # box's privileged account is a box property, not a project one.
+    # The unprivileged account this workspace's agents, checkouts and creds live
+    # under, created by the provisioning driver at attach. One per workspace; the
+    # box's privileged account is a box property, not a workspace one.
     agent_user: str
-    repo: RepoConfig
-    marker_dir: Path              # the project's marker directory (holds .devbox/)
+    marker: Marker                # where the config lives, and the directory shape
+    # The checkouts this workspace puts in that one account, in config order.
+    # Several of them share the account, and with it one set of git/jj creds.
+    repos: list = dataclasses.field(default_factory=list)
     # Ordered provisioning mods appended after the built-in base playbook (see
-    # provision.py). Resolved by name project > global > built-in.
+    # provision.py). Resolved by name workspace > global > built-in.
     mods: list = dataclasses.field(default_factory=list)
     # Host->box file-sync rules: the global [[sync]] defaults (see
-    # GlobalConfig.sync), followed by this project's own [[sync]] / [[repo.sync]]
-    # (see sync.py).
+    # GlobalConfig.sync), followed by this workspace's own [[sync]] and each
+    # repo's [[repos.sync]] (see sync.py).
     sync: list = dataclasses.field(default_factory=list)
-    # Project-level [env]: {KEY: EnvVar} shell-env creds/vars injected into the
-    # box, overriding the global [env] per-key (see sync.py). .devbox/config.toml
-    # is git-excluded, so hardcoding scoped creds here is acceptable.
+    # Workspace-level [env]: {KEY: EnvVar} shell-env creds/vars injected into the
+    # box, overriding the global [env] per-key (see sync.py). The marker file is
+    # git-excluded, so hardcoding scoped creds here is acceptable.
     env: dict = dataclasses.field(default_factory=dict)
+
+    @property
+    def root(self) -> Path:
+        return self.marker.root
+
+    def repo(self, name: str) -> Optional[RepoSpec]:
+        """The repo with this name, or None."""
+        return next((r for r in self.repos if r.name == name), None)
 
 
 def _load_toml(path: Path) -> dict:
@@ -419,33 +483,128 @@ def _load_toml(path: Path) -> dict:
         return tomllib.load(f)
 
 
-def find_project_dir(start: Path) -> Path:
-    """Walk upward from `start` (like git looking for .git) for a devbox marker
-    (a directory containing `.devbox/config.toml`)."""
+def _marker_at(cur: Path) -> Optional[Marker]:
+    """The marker in exactly this directory, either spelling, or None."""
+    visible = cur / WORKSPACE_MARKER_FILE
+    hidden = cur / REPO_MARKER_DIR / REPO_MARKER_CONFIG
+    if visible.is_file() and hidden.is_file():
+        die(f"{cur} has both {WORKSPACE_MARKER_FILE} and "
+            f"{REPO_MARKER_DIR}/{REPO_MARKER_CONFIG}. They are two spellings of "
+            f"one marker - keep {REPO_MARKER_DIR}/ if this directory is itself a "
+            f"repo, {WORKSPACE_MARKER_FILE} if it holds repos; remove the other.")
+    if visible.is_file():
+        return Marker(root=cur, config_path=visible,
+                      mods_dir=cur / MODS_SUBDIR, root_is_repo=False)
+    if hidden.is_file():
+        return Marker(root=cur, config_path=hidden,
+                      mods_dir=cur / REPO_MARKER_DIR / MODS_SUBDIR, root_is_repo=True)
+    return None
+
+
+def find_workspace(start: Path) -> Marker:
+    """Walk upward from `start` (like git looking for .git) for either marker
+    spelling. The nearest level with one wins, so a workspace nested inside
+    another resolves to itself."""
     cur = start.resolve()
     while True:
-        if (cur / PROJECT_MARKER_DIR / PROJECT_CONFIG_FILE).is_file():
-            return cur
+        marker = _marker_at(cur)
+        if marker is not None:
+            return marker
         if cur.parent == cur:
-            die(f"no {PROJECT_MARKER_DIR}/{PROJECT_CONFIG_FILE} found in {start} or any "
-                f"parent directory (pass -C/--project-dir, or add a marker file to the project)")
+            die(f"no {WORKSPACE_MARKER_FILE} or "
+                f"{REPO_MARKER_DIR}/{REPO_MARKER_CONFIG} found in {start} or any "
+                f"parent directory (pass -C/--workspace-dir, or mark a workspace: "
+                f"{REPO_MARKER_DIR}/{REPO_MARKER_CONFIG} inside a repo, "
+                f"{WORKSPACE_MARKER_FILE} in a directory that holds repos)")
         cur = cur.parent
 
 
-def _resolve_repo_config(data: dict, config_path: Path) -> RepoConfig:
-    repo_data = data.get("repo", {})
-    mode = repo_data.get("mode", "none")
+def _resolve_repos(data: dict, marker: Marker) -> list:
+    """Parse `[[repos]]` - the checkouts this workspace puts in its account.
+
+    An entry with no `name` means *the workspace root itself is the repo*, which
+    is only meaningful under a `.devbox/` marker; `name` otherwise doubles as the
+    default host path (a child of the root) and the default guest directory. So
+    the common cases are one line each: `mode = "push"` for a single repo, and a
+    `name` + `mode` pair per repo for a workspace that holds several."""
+    raw_repos = data.get("repos", [])
+    if not isinstance(raw_repos, list) or not all(isinstance(r, dict) for r in raw_repos):
+        die(f"{marker.config_path}: `repos` must be an array of tables - one "
+            f"`[[repos]]` block per checkout")
+    repos = [_parse_repo_entry(raw, marker) for raw in raw_repos]
+    _check_repos_distinct(repos, marker)
+    return repos
+
+
+def _parse_repo_entry(raw: dict, marker: Marker) -> RepoSpec:
+    """One `[[repos]]` entry. `name` carries most of it: it addresses the repo,
+    and supplies both the host path (a child of the workspace root) and the guest
+    directory unless `host`/`dir` say otherwise."""
+    config_path = marker.config_path
+    unknown = sorted(set(raw) - {"name", "mode", "dir", "host", "url", "sync"})
+    if unknown:
+        die(f"{config_path}: [[repos]] has unknown key(s) "
+            f"{', '.join(repr(k) for k in unknown)} - an entry takes name, "
+            f"mode, dir, host, url, and [[repos.sync]]")
+
+    name = raw.get("name")
+    if name is not None and (not isinstance(name, str) or not name):
+        die(f"{config_path}: [[repos]] `name` must be a non-empty string")
+    if name is None and not marker.root_is_repo:
+        die(f"{config_path}: a [[repos]] entry with no `name` means the "
+            f"workspace root is itself the repo, but this workspace is marked "
+            f"with {WORKSPACE_MARKER_FILE}, which says the root holds repos. "
+            f"Give the entry a `name`, or move the marker into the repo as "
+            f"{REPO_MARKER_DIR}/{REPO_MARKER_CONFIG}.")
+    # A nameless entry is the root itself: the host side is the root, and both
+    # the name and the guest directory take its basename - the root's own path
+    # is not something the box shares.
+    default_name = name if name is not None else marker.root.name
+
+    mode = raw.get("mode")
     if mode not in REPO_MODES:
-        die(f"{config_path}: [repo] mode must be one of {REPO_MODES} (got {mode!r})")
-    repo_dir = repo_data.get("dir", "")
-    if mode != "none" and not repo_dir:
-        die(f"{config_path}: [repo] dir is required when mode = \"{mode}\"")
-    url = repo_data.get("url")
+        hint = (" - a workspace with nothing to check out lists no repos at all"
+                if mode == "none" else "")
+        die(f"{config_path}: [[repos]] mode must be one of {REPO_MODES} "
+            f"(got {mode!r}){hint}")
+    url = raw.get("url")
     if mode == "clone" and not url:
-        die(f"{config_path}: [repo] url is required when mode = \"clone\"")
+        die(f"{config_path}: [[repos]] url is required when mode = \"clone\"")
     if mode != "clone" and url:
-        die(f"{config_path}: [repo] url is only used when mode = \"clone\" (mode is \"{mode}\")")
-    return RepoConfig(mode=mode, dir=repo_dir, url=url)
+        die(f"{config_path}: [[repos]] url is only used when mode = \"clone\" "
+            f"(mode is \"{mode}\")")
+
+    host = raw.get("host", name if name is not None else ".")
+    if not isinstance(host, str) or not host or _path_anchored(host):
+        die(f"{config_path}: [[repos]] `host` must be a non-empty path relative "
+            f"to the workspace root (got {host!r})")
+    repo_dir = raw.get("dir", default_name)
+    if not isinstance(repo_dir, str) or not repo_dir or _path_anchored(repo_dir):
+        die(f"{config_path}: [[repos]] `dir` must be a non-empty path relative "
+            f"to the agent's home (got {repo_dir!r})")
+    return RepoSpec(name=default_name, mode=mode, dir=repo_dir,
+                    host=(marker.root / host).resolve(), url=url)
+
+
+def _check_repos_distinct(repos: list, marker: Marker) -> None:
+    """Two repos may share neither a name (which `[[repos.sync]]` and `jj fetch`
+    address them by) nor a guest directory (which would put two checkouts in one
+    tree). A repo may also not be called after the workspace's own mods
+    directory, which is a sibling of the repos under a visible marker."""
+    for field, label in (("name", "name"), ("dir", "guest `dir`")):
+        seen = set()
+        for repo in repos:
+            value = getattr(repo, field)
+            if value in seen:
+                die(f"{marker.config_path}: two [[repos]] entries share the "
+                    f"{label} {value!r}; each must be distinct")
+            seen.add(value)
+    if not marker.root_is_repo:
+        for repo in repos:
+            if repo.host == marker.mods_dir:
+                die(f"{marker.config_path}: the repo {repo.name!r} sits at "
+                    f"{marker.mods_dir}, which is this workspace's mods "
+                    f"directory; rename one of them")
 
 
 def _path_anchored(path: str) -> bool:
@@ -455,8 +614,12 @@ def _path_anchored(path: str) -> bool:
             or path.startswith("/"))
 
 
-def _parse_sync_entry(raw: dict, config_path: Path, repo_relative: bool) -> SyncEntry:
-    table = "[[repo.sync]]" if repo_relative else "[[sync]]"
+def _parse_sync_entry(raw: dict, config_path: Path, table: str,
+                      anchor: str, repo: str = "") -> SyncEntry:
+    """One sync entry, validated against the anchor its table implies. A path's
+    shape has to match its anchor - anchored (`$HOME`/`~`/`/`) for ANCHOR_HOME,
+    relative for the other two - so that reading an entry tells you where both of
+    its ends land, without knowing which table it came from."""
     if not isinstance(raw, dict):
         die(f"{config_path}: each {table} entry must be a table with a `src` key")
     src = raw.get("src")
@@ -468,30 +631,56 @@ def _parse_sync_entry(raw: dict, config_path: Path, repo_relative: bool) -> Sync
     include = raw.get("include", [])
     if not isinstance(include, list) or not all(isinstance(i, str) for i in include):
         die(f"{config_path}: {table} `include` must be a list of child names (strings)")
-    # [[sync]] paths are $HOME/~/absolute-anchored (resolved per side); [[repo.sync]]
-    # paths are repo-relative. Reject the wrong shape so anchoring is unambiguous.
+    unknown = sorted(set(raw) - {"src", "dst", "include"})
+    if unknown:
+        die(f"{config_path}: {table} has unknown key(s) "
+            f"{', '.join(repr(k) for k in unknown)} - an entry takes src, dst, include")
     for label, value in (("src", src), ("dst", dst)):
-        if repo_relative and _path_anchored(value):
-            die(f"{config_path}: [[repo.sync]] {label} must be repo-relative, not "
-                f"$HOME/~/absolute (got {value!r}); use [[sync]] for anchored paths")
-        if not repo_relative and not _path_anchored(value):
-            die(f"{config_path}: [[sync]] {label} must be anchored at $HOME, ~, or / "
-                f"(got {value!r}); use [[repo.sync]] for repo-relative paths")
-    return SyncEntry(src=src, dst=dst, include=include, repo_relative=repo_relative)
+        if anchor == ANCHOR_HOME and not _path_anchored(value):
+            die(f"{config_path}: {table} {label} must be anchored at $HOME, ~, or / "
+                f"(got {value!r})")
+        if anchor != ANCHOR_HOME and _path_anchored(value):
+            die(f"{config_path}: {table} {label} must be relative, not "
+                f"$HOME/~/absolute (got {value!r})")
+    return SyncEntry(src=src, dst=dst, include=include, anchor=anchor, repo=repo)
 
 
-def _resolve_sync(data: dict, config_path: Path, repo: RepoConfig) -> list:
-    entries = [_parse_sync_entry(raw, config_path, repo_relative=False)
+def _workspace_sync_anchor(raw: dict, marker: Marker) -> str:
+    """Which anchor a workspace-level `[[sync]]` entry uses: an anchored `src`
+    means `$HOME`/`~`/absolute on both sides, a relative one means the workspace
+    root on the host and the agent's home on the box.
+
+    That second shape lines up only when the root HOLDS the repos, since then
+    both sides carry the same child names. Under a `.devbox/` marker the host
+    root is itself a repo while the guest home is not, so the two ends would
+    silently mean different things - hence the refusal."""
+    src = raw.get("src")
+    if isinstance(src, str) and _path_anchored(src):
+        return ANCHOR_HOME
+    if marker.root_is_repo:
+        die(f"{marker.config_path}: [[sync]] src {src!r} is relative, which would "
+            f"anchor it at the workspace root on the host and at the agent's home "
+            f"on the box. This workspace is marked with "
+            f"{REPO_MARKER_DIR}/{REPO_MARKER_CONFIG}, so its root is a repo and "
+            f"those two are not the same place - use [[repos.sync]] to anchor at "
+            f"the checkout, or write an anchored path ($HOME, ~, /).")
+    return ANCHOR_WORKSPACE
+
+
+def _resolve_sync(data: dict, marker: Marker, repos: list) -> list:
+    """Every sync rule this workspace declares: its own `[[sync]]` entries first,
+    then each repo's `[[repos.sync]]`, in config order."""
+    entries = [_parse_sync_entry(raw, marker.config_path, "[[sync]]",
+                                 _workspace_sync_anchor(raw, marker))
                for raw in data.get("sync", [])]
-    repo_syncs = data.get("repo", {}).get("sync", [])
-    if repo_syncs and (repo.mode == "none" or not repo.dir):
-        die(f"{config_path}: [[repo.sync]] needs a [repo] with mode != \"none\" "
-            f"(paths anchor at the repo checkout ~/<repo.dir>)")
-    entries += [_parse_sync_entry(raw, config_path, repo_relative=True) for raw in repo_syncs]
+    for raw_repo, repo in zip(data.get("repos", []), repos):
+        entries += [_parse_sync_entry(raw, marker.config_path, "[[repos.sync]]",
+                                      ANCHOR_REPO, repo=repo.name)
+                    for raw in raw_repo.get("sync", [])]
     return entries
 
 
-# Keys that used to describe a project's one VM and are now box-level, given as
+# Keys that used to describe a workspace's one VM and are now box-level, given as
 # flags to `devbox box create`. Kept as hard errors rather than ignored warnings:
 # silently dropping `vcpus = 16` would boot the wrong-sized box.
 _BOX_LEVEL_KEYS = {
@@ -505,65 +694,73 @@ _BOX_LEVEL_KEYS = {
 }
 
 
-def resolve_project(start: Path, global_config: GlobalConfig) -> ProjectConfig:
-    marker_dir = find_project_dir(start)
-    devbox_dir = marker_dir / PROJECT_MARKER_DIR
-    config_path = devbox_dir / PROJECT_CONFIG_FILE
+def resolve_workspace(start: Path, global_config: GlobalConfig) -> WorkspaceConfig:
+    marker = find_workspace(start)
+    config_path = marker.config_path
     data = _load_toml(config_path)
 
-    # `name` used to be "the VM"; a box is not a project (a box now hosts as many
-    # projects as attach to it). Fail loudly rather than silently ignoring a
-    # stale field so the mismatch is obvious.
+    # `name` used to be "the VM"; a box is not a workspace (a box now hosts as
+    # many workspaces as attach to it). Fail loudly rather than silently ignoring
+    # a stale field so the mismatch is obvious.
     if "name" in data:
-        die(f"{config_path}: 'name' is no longer a project field - a box is not a "
-            f"project. Remove it; the project defaults to the directory name "
-            f"('{marker_dir.name}', override with 'project = ...'). Say which box "
-            f"this project lives on with 'box = ...'.")
+        die(f"{config_path}: 'name' is no longer a workspace field - a box is not "
+            f"a workspace. Remove it; the workspace defaults to the directory name "
+            f"('{marker.root.name}', override with 'workspace = ...'). Say which "
+            f"box this workspace lives on with 'box = ...'.")
+    if "project" in data:
+        die(f"{config_path}: 'project' is now 'workspace' - one account on a box, "
+            f"holding as many checkouts as you list under [[repos]]. Rename the key.")
+    if "repo" in data:
+        die(f"{config_path}: '[repo]' is now '[[repos]]', an array of tables - a "
+            f"workspace can hold several checkouts, which share its one account "
+            f"and so its git/jj credentials. Rewrite it as:\n\n"
+            f"    [[repos]]\n    mode = \"push\"\n\n"
+            f"and move any [[repo.sync]] under it as [[repos.sync]].")
 
     stale = sorted(k for k in _BOX_LEVEL_KEYS if k in data)
     if stale:
         flags = ", ".join(f"'{k}' ({_BOX_LEVEL_KEYS[k]})" for k in stale)
-        die(f"{config_path}: {flags} describe a BOX, not a project - a box is "
-            f"created independently and can host several projects. Remove "
+        die(f"{config_path}: {flags} describe a BOX, not a workspace - a box is "
+            f"created independently and can host several workspaces. Remove "
             f"{'them' if len(stale) > 1 else 'it'} and pass the flag to "
-            f"`devbox box create` instead; point this project at the result with "
+            f"`devbox box create` instead; point this workspace at the result with "
             f"'box = \"<name>\"'.")
 
     _warn_unknown_keys(
         data,
-        known_top={"project", "box", "agent_user", "mods"},
+        known_top={"workspace", "box", "agent_user", "mods"},
         known_sections={
-            "repo": {"mode", "dir", "url", "sync"},
-            "sync": _ANY_KEYS,  # array-of-tables, validated by _parse_sync_entry
-            "env": _ANY_KEYS,   # arbitrary user-defined credentials/vars
+            "repos": _ANY_KEYS,  # array-of-tables, validated by _resolve_repos
+            "sync": _ANY_KEYS,   # array-of-tables, validated by _parse_sync_entry
+            "env": _ANY_KEYS,    # arbitrary user-defined credentials/vars
         },
         config_path=config_path,
     )
 
-    repo = _resolve_repo_config(data, config_path)
-    project_name = data.get("project", marker_dir.name)
-    return ProjectConfig(
-        project=project_name,
-        box=_resolve_box_name(data, project_name, config_path),
-        agent_user=_resolve_agent_user(data, project_name, config_path),
-        repo=repo,
-        marker_dir=marker_dir,
+    repos = _resolve_repos(data, marker)
+    workspace_name = data.get("workspace", marker.root.name)
+    return WorkspaceConfig(
+        workspace=workspace_name,
+        box=_resolve_box_name(data, workspace_name, config_path),
+        agent_user=_resolve_agent_user(data, workspace_name, config_path),
+        marker=marker,
+        repos=repos,
         mods=_resolve_mods(data, config_path),
-        sync=[*global_config.sync, *_resolve_sync(data, config_path, repo)],
+        sync=[*global_config.sync, *_resolve_sync(data, marker, repos)],
         env=_resolve_env(data, config_path),
     )
 
 
-def _resolve_box_name(data: dict, project_name: str, config_path: Path) -> str:
-    """The canonical name of the box this project attaches to. Defaults to the
-    project's own name, so a project that never mentions a box gets one of its
-    own - today's single-box behavior, unchanged."""
-    box = data.get("box", project_name)
+def _resolve_box_name(data: dict, workspace_name: str, config_path: Path) -> str:
+    """The canonical name of the box this workspace attaches to. Defaults to the
+    workspace's own name, so a workspace that never mentions a box gets one of
+    its own - today's single-box behavior, unchanged."""
+    box = data.get("box", workspace_name)
     if not isinstance(box, str) or not box:
         die(f"{config_path}: box must be a non-empty instance name "
             f"(e.g. box = \"dev\" or box = \"ec2-dev\")")
     origin = ("box" if "box" in data else
-              f"the project name {project_name!r}, which box defaults to")
+              f"the workspace name {workspace_name!r}, which box defaults to")
     _validate_instance_name(box, f"{config_path}: {origin}")
     return box
 
@@ -581,19 +778,19 @@ def _validate_instance_name(name: str, origin: str) -> None:
         die(f"{origin}: {name!r} is not a usable box name")
 
 
-def _resolve_agent_user(data: dict, project_name: str, config_path: Path) -> str:
-    """The unprivileged account this project occupies on its box. Defaults to the
-    project name, and is validated here so an illegal name fails in a second
-    rather than at `useradd` time, a boot later. It cannot be checked against the
-    box's privileged account until attach time - that account is a property of
-    the box, not of this file."""
-    agent_user = data.get("agent_user", project_name)
+def _resolve_agent_user(data: dict, workspace_name: str, config_path: Path) -> str:
+    """The unprivileged account this workspace occupies on its box. Defaults to
+    the workspace name, and is validated here so an illegal name fails in a
+    second rather than at `useradd` time, a boot later. It cannot be checked
+    against the box's privileged account until attach time - that account is a
+    property of the box, not of this file."""
+    agent_user = data.get("agent_user", workspace_name)
 
     if not USERNAME_RE.match(agent_user):
-        # The overwhelmingly common cause is the default: a project name (i.e. a
-        # directory basename) that is not a legal username. Say so.
+        # The overwhelmingly common cause is the default: a workspace name (i.e.
+        # a directory basename) that is not a legal username. Say so.
         origin = ("agent_user" if "agent_user" in data else
-                  f"the project name {project_name!r}, which agent_user defaults to")
+                  f"the workspace name {workspace_name!r}, which agent_user defaults to")
         die(f"{config_path}: agent_user {agent_user!r} is not a valid Linux username "
             f"(lowercase letters/digits/'-'/'_', not starting with a digit, "
             f"32 chars max) - it comes from {origin}; set `agent_user = \"...\"`")
@@ -617,7 +814,7 @@ def _resolve_mods(data: dict, config_path: Path) -> list:
 def parse_instance_name(name: str) -> tuple:
     """Derive (provider, rest) from a canonical instance name. Non-libvirt
     instances are named "<provider>-<rest>"; a bare name is a libvirt instance
-    (the project's default). Split on the first "-", treating the left segment as
+    (the default). Split on the first "-", treating the left segment as
     the provider only when it's a known prefixed-provider keyword. This is pure
     string routing - no API call or credential load - so per-instance commands
     (ssh/ip/status/...) pick the right backend offline. Inverse of
@@ -634,11 +831,11 @@ def compose_instance_name(provider: str, name: str) -> str:
     return name if provider == DEFAULT_PROVIDER else f"{provider}-{name}"
 
 
-def resolve_instance(args, project: ProjectConfig) -> str:
+def resolve_instance(args, workspace: WorkspaceConfig) -> str:
     """Which box a command targets, as its canonical name. Explicit --box wins
-    (the full canonical name, e.g. `ec2-dev`), then the project's `box` key,
-    then - for a project that has never mentioned a box - its own name."""
-    return getattr(args, "box", None) or project.box
+    (the full canonical name, e.g. `ec2-dev`), then the workspace's `box` key,
+    then - for a workspace that has never mentioned a box - its own name."""
+    return getattr(args, "box", None) or workspace.box
 
 
 def resolve_box_spec(args, gc: GlobalConfig, bare_name: str) -> BoxSpec:

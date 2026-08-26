@@ -4,35 +4,43 @@
 # requires = ["jj", "github-auth"]
 # ///
 #
-# mod: repo-bootstrap - get the project's code onto the box per [repo] in
-# .devbox/config.toml. "clone" pulls an existing repo via jj; "push" leaves an
-# empty colocated jj+git repo ready to receive `jj git push` from the host;
-# "none" is a no-op. Ordered last in the base playbook (after jj + github-auth,
-# so a private clone can authenticate).
+# mod: repo-bootstrap - get the workspace's checkouts onto the box, one per
+# [[repos]] entry. "clone" pulls an existing repo via jj; "push" leaves an empty
+# colocated jj+git repo ready to receive `jj git push` from the host. Ordered
+# last in the base playbook (after jj + github-auth, so a private clone can
+# authenticate).
 #
-# Idempotency: guarded on the target directory, so a reconverge is a no-op once
-# the repo exists.
+# Every checkout lands in this one account, which is what makes them share a set
+# of git/jj credentials - the point of putting several repos in one workspace.
 #
-# Context (from the environment): DEVBOX_REPO_MODE, DEVBOX_REPO_DIR, DEVBOX_REPO_URL.
+# Idempotency: guarded per target directory, so a reconverge is a no-op for the
+# repos that already exist and still creates the ones that don't.
+#
+# Context: the payload's `repos` file, one `<name>\t<mode>\t<dir>\t<url>` record
+# per checkout, reached through DEVBOX_PAYLOAD_DIR (the driver exports it).
 set -euo pipefail
 
-case "${DEVBOX_REPO_MODE:-none}" in
-  clone)
-    if [ ! -d "$HOME/$DEVBOX_REPO_DIR" ]; then
-      jj git clone "$DEVBOX_REPO_URL" "$HOME/$DEVBOX_REPO_DIR"
-    fi
-    ;;
-  push)
-    if [ ! -d "$HOME/$DEVBOX_REPO_DIR" ]; then
-      git init --initial-branch=main "$HOME/$DEVBOX_REPO_DIR"
-      (cd "$HOME/$DEVBOX_REPO_DIR" \
+repos="${DEVBOX_PAYLOAD_DIR:?repo-bootstrap needs DEVBOX_PAYLOAD_DIR}/repos"
+[ -f "$repos" ] || { echo "payload has no repos file at $repos" >&2; exit 1; }
+
+while IFS=$'\t' read -r name mode dir url; do
+  [ -n "$name" ] || continue
+  [ -d "$HOME/$dir" ] && continue
+  case "$mode" in
+    clone)
+      # </dev/null: this loop is reading the repos file on stdin, and jj must not
+      # consume the records still queued behind the current one.
+      jj git clone "$url" "$HOME/$dir" </dev/null
+      ;;
+    push)
+      git init --initial-branch=main "$HOME/$dir" </dev/null
+      (cd "$HOME/$dir" \
         && jj git init --colocate \
-        && git config receive.denyCurrentBranch updateInstead)
-    fi
-    ;;
-  none) ;;
-  *)
-    echo "unknown DEVBOX_REPO_MODE: ${DEVBOX_REPO_MODE:-}" >&2
-    exit 1
-    ;;
-esac
+        && git config receive.denyCurrentBranch updateInstead) </dev/null
+      ;;
+    *)
+      echo "unknown mode '$mode' for repo '$name'" >&2
+      exit 1
+      ;;
+  esac
+done < "$repos"

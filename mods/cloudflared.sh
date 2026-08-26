@@ -6,7 +6,7 @@
 #
 # mod: cloudflared - Cloudflare's `cloudflared` binary, from their apt repo.
 # Installs it and nothing else; `cloudflared-tunnel` is the mod that runs a
-# tunnel, once per attached project, in that project's own account.
+# tunnel, once per attached workspace, in that workspace's own account.
 #
 # Root because it adds an apt repo and installs from it. The package cannot be
 # a `packages` entry: it lives in Cloudflare's own repo, which does not exist

@@ -1,6 +1,6 @@
 # devbox
 
-A tool for launching development virtual machines and attaching projects to
+A tool for launching development virtual machines and attaching workspaces to
 them. Its primary use cases are sandboxed agentic development, and
 cross-platform development and benchmarking on cloud VMs.
 
@@ -16,29 +16,116 @@ Every devbox starts from the latest Ubuntu LTS as its base image — currently
 Ubuntu 26.04 "Resolute Raccoon" — brought to life on first boot by a single
 bash **init script** handed to the instance as user-data (just the privileged
 user, baseline packages, `BASH_ENV` wiring, and the hostname). Everything else — jj, dotfiles, Claude Code, the repo,
-a project's toolchain — is provisioned by composable, idempotent **mods** run
+a workspace's toolchain — is provisioned by composable, idempotent **mods** run
 **over SSH** after boot, so a box can be reconverged in place (`devbox sync
 --mods`) instead of rebuilt.
 
-### A box is not a project
+### A box is not a workspace
 
-A **box** is a VM. A **project** is a directory on your host with a
-`.devbox/config.toml` in it. Several projects can live on one box, each in its
-own unprivileged account — because the VM is what provides *security* isolation,
-and the accounts are mostly for *organization*.
+A **box** is a VM. A **workspace** is a directory on your host holding one or
+more repos, marked by a devbox config file. Several workspaces can live on one
+box, each in its own unprivileged account — because the VM is what provides
+*security* isolation, and the accounts are mostly for *organization*.
 
-| | **box** | **project** |
+| | **box** | **workspace** |
 | --- | --- | --- |
-| is | a machine: provider, resources, image, hostname | content: an account, a checkout, creds, mods |
+| is | a machine: provider, resources, image, hostname | content: an account, its checkouts, creds, mods |
 | named | `dev`, `ec2-dev` (canonical instance name) | the marker directory's basename |
-| owns | the privileged account, system packages | its `agent_user`, `[repo]`, `mods`, `[env]`, `[[sync]]` |
+| owns | the privileged account, system packages | its `agent_user`, `[[repos]]`, `mods`, `[env]`, `[[sync]]` |
 | created by | `devbox box create dev [flags]` | `devbox create`, which attaches it to its box |
-| configured by | **command-line flags only** — there is no box config file | `.devbox/config.toml` |
-| recorded in | the instance's own tags / libvirt `<metadata>` | `/etc/devbox/projects/<agent_user>` on the box |
+| configured by | **command-line flags only** — there is no box config file | `devbox.toml` or `.devbox/config.toml` |
+| recorded in | the instance's own tags / libvirt `<metadata>` | `/etc/devbox/workspaces/<agent_user>` on the box |
 
-A project says which box it lives on with `box = "dev"`. It defaults to the
-project's own name, so a project that never mentions a box gets one to itself —
+A workspace says which box it lives on with `box = "dev"`. It defaults to the
+workspace's own name, so a workspace that never mentions a box gets one to itself —
 which is why the single-box case still needs no configuration at all.
+
+### Where the marker goes
+
+A workspace is marked one of two ways, and which one you use says what shape the
+directory has. Both hold the same keys; only the location differs.
+
+```
+~/src/devbox/              ~/src/acme/
+  .devbox/                   devbox.toml        <- visible: nothing to hide from
+    config.toml              mods/rust.sh
+    mods/rust.sh             frontend/          <- a repo
+  devbox/                    backend/           <- a repo
+  README.md                  shared-protos/     <- a repo
+```
+
+**`<repo>/.devbox/config.toml`** — the workspace *is* one repo. The marker hides
+inside that repo's tree, so git-exclude it (`.git/info/exclude`).
+
+**`<root>/devbox.toml`** — the workspace *holds* repos, as children of the root.
+There is no repo to hide the marker from, so it is a plain visible file, and the
+mods sit beside it in `<root>/mods/`.
+
+devbox walks up from the working directory looking for either, nearest level
+first. A directory holding both is an error: which shape the workspace has
+decides every repo's host path, and that is not a coin to toss.
+
+### A workspace holds repos
+
+Every checkout in one workspace lives in one account, and therefore shares one
+set of git/jj credentials. That is the point: a change spanning a client and its
+server is one agent's job, not two accounts'.
+
+```toml
+# ~/src/acme/devbox.toml
+box = "dev"
+
+[[repos]]
+name = "frontend"     # host ~/src/acme/frontend  ->  box ~/frontend
+mode = "push"
+
+[[repos]]
+name = "backend"
+mode = "push"
+
+[[repos]]
+name = "shared-protos"
+mode = "clone"        # no host copy needed; the box clones it
+url  = "git@github.com:acme/shared-protos.git"
+```
+
+One `name` is usually the whole of an entry: it addresses the repo (in
+`[[repos.sync]]` and `devbox jj fetch`), and doubles as its host path under the
+root and its directory in the agent's home. Override either with `host` / `dir`.
+
+Under a `.devbox/` marker the root is itself the repo, so an entry needs no name
+at all:
+
+```toml
+# ~/src/devbox/.devbox/config.toml
+box = "dev"
+
+[[repos]]
+mode = "push"         # host ~/src/devbox  ->  box ~/devbox
+```
+
+Repos are listed, never discovered: globbing the root for `.git` would put an
+unrelated clone on the box the moment you made one. A workspace with nothing to
+check out simply lists no repos.
+
+### Coming from `[repo]` and "projects"
+
+What devbox called a *project* is now a *workspace*, and it holds a list of
+checkouts instead of one. Existing config files need three edits, each of which
+devbox will name if you forget it:
+
+| was | now |
+| --- | --- |
+| `project = "x"` | `workspace = "x"` |
+| `[repo]` with `mode`/`dir`/`url` | a `[[repos]]` entry; `dir` still names the box-side directory |
+| `[[repo.sync]]` | `[[repos.sync]]`, nested under its `[[repos]]` entry |
+| `[repo] mode = "none"` | no `[[repos]]` entries at all |
+
+Marker files stay where they are — `.devbox/config.toml` is still the shape for a
+workspace that is one repo. A live box needs nothing: it records which workspace
+owns each account under `/etc/devbox/workspaces/`, and a box last attached by an
+older devbox has that record under `/etc/devbox/projects/`, which devbox still
+reads and retires on the next `devbox create`.
 
 **No box config file.** A box's resources are fixed the moment it is created and
 readable from the provider afterwards, so a persisted spec could only ever
@@ -51,15 +138,15 @@ means retyping the flags.
 ### Accounts on a box
 
 Every box has one privileged user and one unprivileged account per attached
-project. AI agents run as the latter:
+workspace. AI agents run as the latter:
 
-| | **privileged** (`--user`, default `$USER`) | **agent** (`agent_user`, default = the project name) |
+| | **privileged** (`--user`, default `$USER`) | **agent** (`agent_user`, default = the workspace name) |
 | --- | --- | --- |
-| how many | one per box | one per attached project |
+| how many | one per box | one per attached workspace |
 | sudo | NOPASSWD `ALL` | **none**, and in no group that grants it |
 | home | `/home/<user>`, `0750` | `/home/<agent_user>`, `0750`, own group |
-| holds | the provisioning payload, the provision logs | that project's checkout, `~/.claude`, `~/.local/bin`, its `[env]` creds |
-| SSH | `devbox box ssh <box>` | `devbox ssh` (from the project) |
+| holds | the provisioning payload, the provision logs | that workspace's checkout, `~/.claude`, `~/.local/bin`, its `[env]` creds |
+| SSH | `devbox box ssh <box>` | `devbox ssh` (from the workspace) |
 | created by | the init script, at first boot | the provisioning driver, at attach, so it reconverges |
 
 **What this buys, and what it doesn't.** A sudoless agent still has full network
@@ -67,31 +154,31 @@ egress and still holds `GITHUB_TOKEN` / `LINEAR_API_KEY` — which for most thre
 models *are* the crown jewels. This is containment of **system integrity**, not
 of **credential exfiltration**. What it does gain: the agent can't tamper with
 the provisioner or the system, can't read the privileged user's home *or any
-other project's*, can't persist outside its own, and has a crisply defined blast
+other workspace's*, can't persist outside its own, and has a crisply defined blast
 radius.
 
-**What sharing a box costs.** Worth knowing before you put two projects on one
+**What sharing a box costs.** Worth knowing before you put two workspaces on one
 machine:
 
 - **One apt namespace.** A `packages` entry or a `runas = ["root"]` mod from one
-  project upgrades a library every other project builds against. Per-project
+  workspace upgrades a library every other workspace builds against. Per-workspace
   toolchains belong in `$HOME` (rustup, uv, nvm — which is already how every
-  base mod but `dotfiles-packages` works). devbox warns when a project run
+  base mod but `dotfiles-packages` works). devbox warns when a workspace run
   includes a privileged mod, since that writes state the whole box shares.
 - **`devbox box destroy` takes everyone's uncommitted work.** The confirm prompt
-  names the attached projects, and the project-level `devbox destroy` refuses
+  names the attached workspaces, and the workspace-level `devbox destroy` refuses
   outright when anything else is on the box.
-- **Every attached project's tokens are on one machine.** The 0600 per-account
+- **Every attached workspace's tokens are on one machine.** The 0600 per-account
   env files keep agents out of each other's, but a kernel escape from any one of
-  them yields all of them. Prefer repo-scoped PATs in a project's own `[env]`,
+  them yields all of them. Prefer repo-scoped PATs in a workspace's own `[env]`,
   and note that a *global* `[env]` `GITHUB_TOKEN` now sits on a box shared with
-  unrelated projects.
+  unrelated workspaces.
 - **`/proc/<pid>/cmdline` is world-readable**, so one agent can read another's
   argv. (`environ` is 0400, so the env file itself stays private.) A
   `runas = ["root"]` box mod mounting `/proc` with `hidepid=2` is the fix if that
   matters to you; devbox doesn't ship one.
 - **Shared CPU, RAM and disk.** N agents running `cargo build` contend, and one
-  can ENOSPC the rest. Box sizing is now an N-project decision.
+  can ENOSPC the rest. Box sizing is now an N-workspace decision.
 - **Duplication, deliberately.** Each account gets its own oh-my-zsh, jj binary,
   Claude Code install and vim plugins — a few minutes and a few hundred MB per
   attach, accepted in exchange for accounts that don't share state.
@@ -117,7 +204,7 @@ cover the common case.
 ownership record — a box built before devbox tracked attachments, or an account
 somebody made by hand — is **refused**, rather than silently moved into. Claim it
 once with `devbox create --adopt`. An account that belongs to a *different*
-project is refused outright; pick another `agent_user`, or detach that project.
+workspace is refused outright; pick another `agent_user`, or detach that workspace.
 
 Once a box is up, the way you work with it —
 `ssh`/`list`/`jj fetch`/`sync` — is backend-independent; only
@@ -125,30 +212,28 @@ Once a box is up, the way you work with it —
 thin `Provider` seam). All boxes share one cached base image (libvirt) and one
 global config, and every attachment runs the same base playbook of idempotent
 "mods" (jj, dotfiles, Claude Code, GitHub auth, repo bootstrap) that devbox owns;
-each project appends only what's different via a `mods = [...]` list. `devbox`
-finds "which box the project in the current working directory lives on" the way
+each workspace appends only what's different via a `mods = [...]` list. `devbox`
+finds "which box the workspace in the current working directory lives on" the way
 `git`/`direnv`/`mise` locate their own markers.
 
 ## Example Workflow
 
-Mark a directory as a devbox project by dropping a `.devbox/config.toml` at its
-root. A minimal local (libvirt) project just needs to say how to get the code:
+Mark a directory as a devbox workspace and say how to get the code. A minimal
+local (libvirt) workspace, marked inside the one repo it holds:
 
 ```toml
-# .devbox/config.toml
-[repo]
-mode = "clone"
-dir = "my-project"
-url = "https://github.com/<org>/my-project"
+# ~/src/my-workspace/.devbox/config.toml
+[[repos]]
+mode = "push"    # the box gets an empty repo ready to receive `jj git push`
 ```
 
-Then, from anywhere inside the project:
+Then, from anywhere inside the workspace:
 
 ```bash
-devbox create      # boot a box named after the project (base image cached),
+devbox create      # boot a box named after the workspace (base image cached),
                    #   then attach: create its account, inject creds, run the
                    #   mods, push [[sync]] files — blocks until ready
-devbox ssh         # log into the sandbox as this project's account
+devbox ssh         # log into the sandbox as this workspace's account
 ```
 
 Work in the sandbox (e.g. let an agent make changes), bookmark what should be
@@ -159,25 +244,40 @@ visible to the host, and pull it back:
 jj bookmark create wip -r @
 # on the host:
 devbox jj fetch                # fetch the sandbox's bookmarked work
-jj new wip@devbox-my-project   # check it out locally
+jj new wip@devbox-my-workspace   # check it out locally
 ```
 
 `devbox stop` shuts the box down (keeping its disk); `devbox destroy` tears it
 down entirely.
 
-**Sharing one box between projects.** Create the box once, then point each
-project at it:
+**Sharing one box between workspaces.** Create the box once, then point each
+workspace at it:
 
 ```bash
 devbox box create dev --vcpus 8 --memory 32768    # or --provider ec2/aws
-# in each project's .devbox/config.toml:  box = "dev"
+# in each workspace's marker file:  box = "dev"
 cd ~/src/binius && devbox create                  # attaches as user `binius`
 cd ~/src/web    && devbox create                  # attaches as user `web`
 devbox box list --attached                        # who is on which box
 ```
 
-Each project gets its own account, checkout, creds and SSH alias on the shared
+Each workspace gets its own account, checkouts, creds and SSH alias on the shared
 machine. `devbox detach` gives an account up again.
+
+**Several repos in one workspace.** Put the marker beside them instead of inside
+one of them, and list them:
+
+```bash
+mkdir ~/src/acme && cd ~/src/acme
+git clone git@github.com:acme/frontend.git
+git clone git@github.com:acme/backend.git
+$EDITOR devbox.toml        # [[repos]] name = "frontend" / "backend", mode = "push"
+devbox create              # one account on the box, holding both checkouts
+devbox jj fetch            # from inside either one: fetches that one
+```
+
+Both checkouts share the account, and so share its GitHub token and jj identity —
+which is what makes a change spanning them a single agent's job.
 
 ## Usage
 
@@ -186,30 +286,30 @@ machine. `devbox detach` gives an account up again.
 | Command | Behavior |
 |---|---|
 | `devbox box create NAME [flags]` | Launch a box: bare-named for libvirt, `<provider>-NAME` with `--provider ec2\|aws`. Renders the init script and first-boots the instance with it as user-data (libvirt NoCloud seed / EC2 `UserData` / Lightsail `userData`), stamps it (libvirt `<metadata>` / AWS tags), then runs the **box playbook**. Idempotent: an existing box is left alone. Errors if the name is taken on another provider (global-uniqueness). Flags: `--provider --user --vcpus --memory --disk --instance-type --arch --ami --spot/--on-demand --bundle --blueprint --zone`. |
-| `devbox box list [--attached]` | List devbox-managed boxes — name, provider, state, resources, uptime (cloud rows show the EC2 instance type / Lightsail bundle and a `($)` cost flag while running). `--attached` adds a PROJECTS column, read from each box (one SSH per row, hence opt-in). Global (doesn't need a project); unions libvirt (this host, by `<metadata>` stamp) + EC2 + Lightsail (account-wide, by `devbox:managed` tag). `devbox list` is the same command. |
+| `devbox box list [--attached]` | List devbox-managed boxes — name, provider, state, resources, uptime (cloud rows show the EC2 instance type / Lightsail bundle and a `($)` cost flag while running). `--attached` adds a WORKSPACES column, read from each box (one SSH per row, hence opt-in). Global (doesn't need a workspace); unions libvirt (this host, by `<metadata>` stamp) + EC2 + Lightsail (account-wide, by `devbox:managed` tag). `devbox list` is the same command. |
 | `devbox box up NAME` | Start an already-defined, shut-off box. Errors if undefined — run `box create` first. |
-| `devbox box stop NAME` | Gracefully shut down (ACPI) a running box; says so when more than one project is attached. |
+| `devbox box stop NAME` | Gracefully shut down (ACPI) a running box; says so when more than one workspace is attached. |
 | `devbox box ssh NAME [-- args...]` | `ssh` in as the **privileged user** — the box's only sudo shell, for debugging the machine itself. |
 | `devbox box status NAME` | SSH in as the privileged user and show `cloud-init status --long` plus the tail of the box's own `~/provision.log`. |
 | `devbox box sync --mods[=a,b,c]` | Reconverge the **box playbook** (system state and the privileged account) without touching any attachment. |
-| `devbox box destroy NAME` | Tear down the box and its disk (the cached base image is left alone). The confirm prompt names every attached project, since their checkouts go with it. |
+| `devbox box destroy NAME` | Tear down the box and its disk (the cached base image is left alone). The confirm prompt names every attached workspace, since their checkouts go with it. |
 
-**Project commands** act on this project's account on its box, and take no name.
+**Workspace commands** act on this workspace's account on its box, and take no name.
 
 | Command | Behavior |
 |---|---|
-| `devbox create` | Ensure the project's box exists, then **attach**: create its unprivileged account, inject the `[env]` creds, run the project playbook, push `[[sync]]` files. Idempotent — re-running is a reconverge. Boots the box itself when the project owns it (i.e. no `box =` key) or when box-create flags are passed; otherwise says to run `devbox box create` first. `--adopt` claims an account devbox has no record of. |
-| `devbox ssh [-- args...]` | `ssh` in as **this project's** unprivileged account — where its checkout and tooling live. (The box's sudo shell is `devbox box ssh <box>`.) |
-| `devbox status` | cloud-init progress plus the tail of this project's `~/provision-<agent_user>.log`. |
+| `devbox create` | Ensure the workspace's box exists, then **attach**: create its unprivileged account, inject the `[env]` creds, run the workspace playbook, push `[[sync]]` files. Idempotent — re-running is a reconverge. Boots the box itself when the workspace owns it (i.e. no `box =` key) or when box-create flags are passed; otherwise says to run `devbox box create` first. `--adopt` claims an account devbox has no record of. |
+| `devbox ssh [-- args...]` | `ssh` in as **this workspace's** unprivileged account — where its checkout and tooling live. (The box's sudo shell is `devbox box ssh <box>`.) |
+| `devbox status` | cloud-init progress plus the tail of this workspace's `~/provision-<agent_user>.log`. |
 | `devbox ip` | Print the box's IPv4. |
 | `devbox sync --envvars` | (Re-)write the devbox-managed 0600 `[env]` files — scoped creds/vars (`GITHUB_TOKEN`, API keys) into the shell env of the account each one's `owner` names. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
-| `devbox sync --mods[=a,b,c]` | (Re-)run this project's **mods** over SSH — reconverge (bump jj, add a plugin, re-apply a rust mod) without destroy+create. No list runs the whole project playbook; a comma-separated list runs just those (fast iteration). |
-| `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repo.sync]]`) onto the box via rsync — agent skills, git-excluded project files. Re-runnable + incremental. See "Host→box file sync" below. |
-| `devbox jj fetch` | jj-fetch the account's bookmarked work into your local repo: refreshes the SSH alias (address via the provider), ensures the jj remote, and runs `jj git fetch`. See "Exchanging commits" below. |
-| `devbox host` | Refresh the SSH aliases used for `jj fetch` (below); prints this project's alias, and names the admin one. |
-| `devbox herdr [-- args]` | Launch a herdr session on the box as this project's agent user — refreshes the alias, then `herdr --remote <alias>`. Replaces `herdr --remote $(devbox host)`. Trailing args pass through (e.g. `--session NAME`). herdr runs on the **host**, so it has to be installed here; the box needs nothing. |
-| `devbox detach [--purge]` | Give up this project's account: drop its ownership record, its authorized key and its creds, and lock it. The home — and any uncommitted work in it — survives, so `devbox create` re-attaches instantly. `--purge` terminates the account's sessions and `userdel -r`s it, behind the same confirmation as `destroy`. |
-| `devbox destroy` | Tear down the whole box — **refused** when any other project is attached, pointing at `detach` / `box destroy` instead. |
+| `devbox sync --mods[=a,b,c]` | (Re-)run this workspace's **mods** over SSH — reconverge (bump jj, add a plugin, re-apply a rust mod) without destroy+create. No list runs the whole workspace playbook; a comma-separated list runs just those (fast iteration). |
+| `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repos.sync]]`) onto the box via rsync — agent skills, git-excluded workspace files. Re-runnable + incremental. See "Host→box file sync" below. |
+| `devbox jj fetch [REPO]` | jj-fetch one checkout's bookmarked work into your local repo: refreshes the SSH alias (address via the provider), ensures the jj remote, and runs `jj git fetch`. Which checkout: the named one, else the one the working directory is inside, else the workspace's only one. See "Exchanging commits" below. |
+| `devbox host` | Refresh the SSH aliases used for `jj fetch` (below); prints this workspace's alias, and names the admin one. |
+| `devbox herdr [-- args]` | Launch a herdr session on the box as this workspace's agent user — refreshes the alias, then `herdr --remote <alias>`. Replaces `herdr --remote $(devbox host)`. Trailing args pass through (e.g. `--session NAME`). herdr runs on the **host**, so it has to be installed here; the box needs nothing. |
+| `devbox detach [--purge]` | Give up this workspace's account: drop its ownership record, its authorized key and its creds, and lock it. The home — and any uncommitted work in it — survives, so `devbox create` re-attaches instantly. `--purge` terminates the account's sessions and `userdel -r`s it, behind the same confirmation as `destroy`. |
+| `devbox destroy` | Tear down the whole box — **refused** when any other workspace is attached, pointing at `detach` / `box destroy` instead. |
 
 `devbox sync` requires at least one of `--envvars`/`--mods`/`--files` (any
 combination). They run in that order — env before mods (a mod may need a cred,
@@ -218,15 +318,15 @@ It's the same steps `devbox create` runs when attaching.
 
 Each box gets a `devbox-<box>-admin` SSH alias for the privileged user
 (`--envvars` and `--mods`, both of which need sudo), and **one alias per
-attachment** for the project's own account: `devbox-<box>-<project>`, which
-collapses to plain `devbox-<box>` when the project owns the box — so the
-single-project case keeps the alias every existing jj remote already carries.
+attachment** for the workspace's own account: `devbox-<box>-<workspace>`, which
+collapses to plain `devbox-<box>` when the workspace owns the box — so the
+single-workspace case keeps the alias every existing jj remote already carries.
 Each lives alone in its own file under `~/.config/devbox/ssh/`.
 
-Every subcommand accepts `-C/--project-dir PATH` and `--box NAME` (both
+Every subcommand accepts `-C/--workspace-dir PATH` and `--box NAME` (both
 before the subcommand, so `ssh`'s trailing args don't swallow them) — `-C`
-resolves a project other than the current directory; `--box` targets a specific
-box instead of the project's own. `--name` is accepted as an alias for `--box`.
+resolves a workspace other than the current directory; `--box` targets a specific
+box instead of the workspace's own. `--name` is accepted as an alias for `--box`.
 
 **Changing the first-boot init script (the packages/login user/`BASH_ENV` in
 devbox's `init-script.sh`) only takes effect via `box destroy` + `box create`,
@@ -236,24 +336,25 @@ it. The
 provisioning **mods**, by contrast, reconverge in place: `devbox sync --mods`
 re-delivers the driver + mods + context over SSH and re-runs them on a live box,
 so edits to a mod (or to the context it consumes — jj identity, GitHub token,
-`[repo]`, a project's `mods` list) apply without a rebuild. So does
+`[[repos]]`, a workspace's `mods` list) apply without a rebuild. So does
 `agent_user`: the account is the driver's to create, not first boot's, which is
-why attaching a second project needs no rebuild either.
+why attaching a second workspace needs no rebuild either.
 
-### Project & box resolution
+### Workspace & box resolution
 
-Project subcommands first find the **project** (box subcommands and `list` are
+Workspace subcommands first find the **workspace** (box subcommands and `list` are
 global and skip this):
 
 1. Start at `-C PATH` if given, else the current directory.
-2. Walk upward (like `git` searching for `.git`) looking for
-   `.devbox/config.toml` at each directory level.
-3. The first directory that has it wins.
-4. No marker found up to `/` → error telling you to pass `-C` or add a
-   `.devbox/config.toml` to the project.
+2. Walk upward (like `git` searching for `.git`) looking for either marker
+   spelling — `devbox.toml` or `.devbox/config.toml` — at each directory level.
+3. The first directory that has one wins. A directory with **both** is an error:
+   the spelling decides the workspace's shape, so it must be unambiguous.
+4. No marker found up to `/` → error telling you to pass `-C` or mark a
+   workspace.
 
-Then they resolve **which box**: an explicit `--box` wins, then the project's
-`box` key, then — for a project that has never mentioned one — its own name.
+Then they resolve **which box**: an explicit `--box` wins, then the workspace's
+`box` key, then — for a workspace that has never mentioned one — its own name.
 Daily use never needs `--box`.
 
 ## Requirements
@@ -326,13 +427,13 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    [ec2]                                # optional — EC2-specific defaults
    default_security_groups = ["sg-..."] # optional
    default_subnets = ["subnet-a", "subnet-b"]  # optional; tried in order (capacity fallback)
-   spot = true                          # optional default market (projects can override)
+   spot = true                          # optional default market (workspaces can override)
    ```
 
    `[aws]` holds the shared AWS account credentials and is what enables **both**
    AWS-backed providers (**ec2** and **aws**/Lightsail); `[ec2]` holds the
    EC2-specific knobs (both sections optional). Lightsail has no global section
-   at all — its knobs are all per-project, under `[lightsail]`. Omit them
+   at all — its knobs are all per-workspace, under `[lightsail]`. Omit them
    entirely on a libvirt-only host — `devbox list` then never reaches for
    AWS credentials. Single region/profile only for now (multi-region/profile
    deferred). `boto3` is a declared dependency, so it's always installed, but
@@ -365,7 +466,7 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
 
    `[env]` is a map of environment variables — scoped credentials, API
    keys — injected into every box (see [Credentials](#credentials-env) below).
-   A project's `[env]` overrides it per-key. **`GITHUB_TOKEN` is the way to give
+   A workspace's `[env]` overrides it per-key. **`GITHUB_TOKEN` is the way to give
    the sandbox GitHub auth**: `gh`/`git`/`jj git` pick it up so private clones
    and pushes work. Use a
    [fine-grained personal access token](https://github.com/settings/personal-access-tokens)
@@ -384,21 +485,23 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    ~/.config/devbox/ssh/*.conf` to `~/.ssh/config` the first time it runs, so
    there's nothing to do here manually; it's idempotent.
 
-## Per-project setup
+## Per-workspace setup
 
-Create a `.devbox/config.toml` at the project's root — **not committed**;
-add `.devbox/` to the project's `.git/info/exclude` (local-only, invisible
-to other contributors — there's nothing project-shareable in here, it's
-purely this machine's VM config):
+Write the marker — `.devbox/config.toml` inside the repo, or `devbox.toml` in a
+directory that holds repos (see "Where the marker goes" above). Either way it is
+**not committed**: for the `.devbox/` shape, add `.devbox/` to that repo's
+`.git/info/exclude` (local-only, invisible to other contributors — there's
+nothing workspace-shareable in here, it's purely this machine's VM config); the
+`devbox.toml` shape sits outside every repo and needs no excluding at all.
 
 ```toml
-# project = "my-project"    # this project's name
+# workspace = "my-workspace"  # this workspace's name
 #                           # (default: the directory's basename)
 # box = "dev"               # the box to attach to, by canonical instance name
-#                           # (default: the project's own name, i.e. a box of
+#                           # (default: the workspace's own name, i.e. a box of
 #                           # its own). Create it with `devbox box create`.
-# agent_user = "my-project" # the UNPRIVILEGED account agents run as (no sudo).
-#                           # Default: the project name. Must be a legal Linux
+# agent_user = "my-workspace" # the UNPRIVILEGED account agents run as (no sudo).
+#                           # Default: the workspace name. Must be a legal Linux
 #                           # username and not a system or cloud-image account —
 #                           # validated up front. It must also differ from the
 #                           # box's privileged account, which is only knowable
@@ -406,29 +509,39 @@ purely this machine's VM config):
 # mods = ["rust"]           # provisioning mods appended after the base playbook
 #                           # (see "Provisioning: mods" below)
 
-[repo]                      # optional; omit entirely for no repo bootstrap
-mode = "clone"               # "clone" | "push"
-dir = "my-project"           # created at ~/<dir> in the sandbox
-url = "https://github.com/<org>/<repo>"   # required iff mode == "clone"
+# One [[repos]] block per checkout; omit them all for no repo bootstrap. Every
+# repo lands in the same account, so they share its git/jj credentials.
+[[repos]]
+name = "my-repo"            # addresses the repo, and supplies the two defaults
+                            #   below. Omit it ONLY under a `.devbox/` marker,
+                            #   where it means "the workspace root is the repo".
+mode = "clone"              # "clone" | "push"
+url = "https://github.com/<org>/my-repo"   # required iff mode == "clone"
+# host = "my-repo"          # host path, relative to the workspace root
+#                           #   (default: `name`; "." for a nameless entry)
+# dir = "my-repo"           # where it lands in the agent's home, ~/<dir>
+#                           #   (default: `name`)
 
 # [env]                     # creds/vars injected into the box's shell env;
 # GITHUB_TOKEN = "github_pat_..."   #   overrides the global [env] per-key. A
-#                           #   repo-scoped PAT belongs here (.devbox is git-excluded).
+#                           #   repo-scoped PAT belongs here (the marker is
+#                           #   git-excluded).
 
-# Host->box file sync (rsync). [[sync]] = $HOME/~/absolute-anchored (resolved
-# per side); [[repo.sync]] = repo-relative (host: marker dir; guest: ~/<repo.dir>).
-# See "Host->box file sync" below.
+# Host->box file sync (rsync); see "Host->box file sync" below.
 # [[sync]]
-# src = "$HOME/.claude/skills"   # dst defaults to src (resolved per side)
+# src = "$HOME/.claude/skills"   # $HOME/~/absolute: resolved per side
 # include = ["jujutsu"]          # only these children of src (each mirrored)
-# [[repo.sync]]
-# src = ".claude/skills"         # -> ~/<repo.dir>/.claude/skills on the box
+# [[sync]]
+# src = "notes"                  # bare-relative: workspace root -> ~/notes.
+#                                #   `devbox.toml` markers only.
+# [[repos.sync]]                 # nested under a [[repos]] entry: anchored at
+# src = ".claude/skills"         #   that checkout on both sides.
 
 ```
 
-**Hardware is not project config.** `provider`, `user`, `vcpus`, `memory_mib`,
+**Hardware is not workspace config.** `provider`, `user`, `vcpus`, `memory_mib`,
 `disk_gb`, `[ec2]` and `[lightsail]` describe a *box*, so they are flags to
-`devbox box create` and devbox errors if it finds any of them in a project's
+`devbox box create` and devbox errors if it finds any of them in a workspace's
 config — silently ignoring `vcpus = 16` would boot the wrong-sized machine.
 
 ```bash
@@ -447,25 +560,25 @@ The scheme:
 - **Canonical name** = `<provider>-<name>` for cloud providers, **bare** for
   libvirt (local is the common case). So `box create binius-arm --provider ec2`
   composes **`ec2-binius-arm`** — that's the identity `devbox box list` shows,
-  what a project's `box =` key holds, and what every later command references.
+  what a workspace's `box =` key holds, and what every later command references.
 - Commands derive the provider by parsing the name: the first `-`-delimited
   segment routes to that provider if it's a known keyword (`ec2`, `aws`, …),
   else libvirt.
 - The `<provider>-` prefix is **added automatically** — pass the bare name to
   `box create` (`binius-arm`, not `ec2-binius-arm`). devbox rejects a name that
   already starts with a known provider prefix, so it can't misparse. The same
-  goes for a project name that would double as a bare libvirt box name.
+  goes for a workspace name that would double as a bare libvirt box name.
 - Provider-side, the prefix is redundant, so the **AWS-side name drops it**:
   `ec2-binius-arm` shows as `devbox-binius-arm` in the EC2 console, and
   `aws-binius-arm` is created as the Lightsail instance `binius-arm`. devbox's
   own `devbox:name` addressing tag keeps the canonical prefixed name on both.
 
 Box names are globally unique across providers (the prefix makes that fall out
-for free). Every project config key is optional; an empty `config.toml` is a
+for free). Every workspace config key is optional; an empty `config.toml` is a
 valid marker. `name` is no longer a field — devbox errors if it's present, to
 flag the migration.
 
-The same re-runnable provisioning (jj, dotfiles, Claude Code, `[repo]`
+The same re-runnable provisioning (jj, dotfiles, Claude Code, `[[repos]]`
 bootstrap) runs over SSH after boot on every provider, so a sandbox is identical
 whether it's a local libvirt VM, an EC2 instance or a Lightsail box.
 
@@ -490,7 +603,7 @@ EBS volume. Trade-offs worth knowing:
 - **No spot market:** `--spot`/`--on-demand` are EC2-only and are ignored here.
 
 `devbox box create binius-box --provider aws` needs nothing but `[aws]` creds and
-no other flag at all; a project then selects it with `box = "aws-binius-box"`.
+no other flag at all; a workspace then selects it with `box = "aws-binius-box"`.
 
 > **On IMDS and instance roles.** devbox attaches **no** instance profile on
 > either AWS provider, so there are no role credentials to steal at
@@ -500,40 +613,47 @@ no other flag at all; a project then selects it with `box = "aws-binius-box"`.
 > Block IMDS for the agent user (an iptables owner-match rule on that address) in
 > the same change that attaches the profile.
 
-`[repo]` drives how the sandbox gets your code, via the built-in
-`repo-bootstrap` mod (see below) — no project needs to author this by hand:
+`[[repos]]` drives how the sandbox gets your code, via the built-in
+`repo-bootstrap` mod (see below) — no workspace needs to author this by hand.
+Each entry's `mode` says how that one checkout arrives:
 
-- **`mode = "clone"`** — the project already has a git remote. The sandbox
-  runs `jj git clone <url> ~/<dir>` while provisioning.
-- **`mode = "push"`** — brand-new project with nothing pushed anywhere yet.
-  The sandbox creates an empty colocated jj+git repo at `~/<dir>`, ready to
-  receive a push from the host — see "Exchanging commits" below. `url` is not used
-  (and not allowed) in this mode.
-- **Omit `[repo]` entirely** (or `mode = "none"`) — no repo bootstrap at all,
-  e.g. a scratch/experiment VM.
+- **`mode = "clone"`** — the repo already has a git remote. The sandbox runs
+  `jj git clone <url> ~/<dir>` while provisioning.
+- **`mode = "push"`** — nothing pushed anywhere yet. The sandbox creates an empty
+  colocated jj+git repo at `~/<dir>`, ready to receive a push from the host — see
+  "Exchanging commits" below. `url` is not used (and not allowed) in this mode.
+- **List no repos at all** — no repo bootstrap, e.g. a scratch/experiment VM.
+  (There is no `mode = "none"`: an entry that does nothing has no reason to be
+  written down.)
 
-A project adds everything it needs as a **mod** (see below). There is no
-per-project first-boot hook: devbox's first-boot layer is one fixed init script
+`repo-bootstrap` is guarded per directory, so a reconverge creates only the
+checkouts that are missing and leaves the rest alone — which is what makes adding
+a repo to a live workspace a `devbox sync --mods=repo-bootstrap`.
+
+A workspace adds everything it needs as a **mod** (see below). There is no
+per-workspace first-boot hook: devbox's first-boot layer is one fixed init script
 (see [First boot](#first-boot-the-init-script)), and the older
 `.devbox/cloud-config.yaml` fragment is **gone** — port anything you had there
-to a project mod, which reconverges in place instead of forcing a rebuild.
-Provisioning context (jj identity, `[repo]`, the GitHub token) flows to mods via
-the environment, not `%TOKEN%`s.
+to a workspace mod, which reconverges in place instead of forcing a rebuild.
+Provisioning context (jj identity, the account names, the GitHub token) flows to
+mods via the environment, not `%TOKEN%`s. The checkouts are the exception: there
+can be any number of them, so they ride along as a `repos` file in the payload,
+which `repo-bootstrap` reads through `DEVBOX_PAYLOAD_DIR`.
 
 ## Provisioning: mods
 
 Provisioning is a list of small, idempotent, composable bash scripts — **mods**
 (inspired by Ansible roles, without Ansible). A mod installs/configures one
-thing (jj, dotfiles, Claude Code, a project's rust toolchain, …). There are **two
+thing (jj, dotfiles, Claude Code, a workspace's rust toolchain, …). There are **two
 playbooks**, because a box and an attachment need different things:
 
 ```
 box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim
                                     # runs once per box, as root / the admin
 
-project playbook (built-in base):   jj → github-auth → dotfiles → vim → neovim →
+workspace playbook (built-in base):   jj → github-auth → dotfiles → vim → neovim →
                                     claude-code → cargo-binstall → repo-bootstrap
-project mods (config.toml):         + rust + wasm-tools + …
+workspace mods (config.toml):         + rust + wasm-tools + …
                                     # runs once per attachment, in its account
 ```
 
@@ -544,9 +664,9 @@ before `dotfiles`, the per-user half). The 95% case is "just add rust":
 
 **A box takes no config, so its playbook is fixed** — `dotfiles-packages` is the
 one genuinely box-level mod in the base (apt, as root); everything else installs
-into somebody's home. A project that needs more *system* state ships a
+into somebody's home. A workspace that needs more *system* state ships a
 `runas = ["root"]` mod of its own, which runs on the shared box when it attaches;
-devbox prints a warning naming it, since that writes state every other project
+devbox prints a warning naming it, since that writes state every other workspace
 sees.
 
 **`dotfiles` and `vim` are in both playbooks on purpose** — each declares
@@ -555,19 +675,25 @@ admin half once (so `devbox box ssh`, the debugging shell, is usable) and each
 attachment runs the agent half in its own account, without redoing the admin's.
 
 **Resolution** — each mod name resolves to a `<name>.sh` script by precedence
-**project > global > built-in**, so a project can shadow a built-in by name:
+**workspace > global > built-in**, so a workspace can shadow a built-in by name:
 
 ```
-mods/*.sh                     # built-in, at the repo root
-~/.config/devbox/mods/*.sh    # global user (shared across projects)
-.devbox/mods/*.sh             # project-local
+mods/*.sh                       # built-in, at the repo root
+~/.config/devbox/mods/*.sh      # global user (shared across workspaces)
+<workspace>/mods/*.sh           # workspace-local, beside a devbox.toml marker
+<repo>/.devbox/mods/*.sh        #   ... or inside a .devbox/ one
 ```
+
+A workspace's own mods live beside its config file, whichever spelling it uses.
 
 **Static files, env for context.** Mods are static (lintable, shellcheck-able,
 diffable, and directly runnable — the metadata below lives in a fenced block of
 comments, so the shebang stays on line 1) and receive context via the **environment**
-(`DEVBOX_AGENT_USER`, `DEVBOX_ADMIN_USER`, `DEVBOX_JJ_NAME`, `DEVBOX_REPO_URL`,
-…), not `%TOKEN%` substitution. Each mod also sources the `[env]` creds file of
+(`DEVBOX_AGENT_USER`, `DEVBOX_ADMIN_USER`, `DEVBOX_JJ_NAME`, `DEVBOX_WORKSPACE`,
+…), not `%TOKEN%` substitution. The one thing too long for an environment
+variable is the list of checkouts, which arrives as a `repos` file in the payload
+(`$DEVBOX_PAYLOAD_DIR/repos`, one `<name>\t<mode>\t<dir>\t<url>` record each).
+Each mod also sources the `[env]` creds file of
 the account that owns them (see [Credentials](#credentials-env)) — its target
 user's, or the privileged user's for a `runas = ["root"]` mod — so a mod that needs
 a secret (`repo-bootstrap` cloning a private repo with `GITHUB_TOKEN`,
@@ -613,7 +739,7 @@ privileged account) and `root`. A mod may name more than one, and then runs once
 per target that is in scope. That key is also what decides scope, so there is no
 second, drifting `scope` key to keep in sync:
 
-| the mod declares | in the **box** playbook it runs | in a **project** playbook |
+| the mod declares | in the **box** playbook it runs | in a **workspace** playbook |
 |---|---|---|
 | an `agent` target (e.g. `admin agent`) | everything *except* the agent | *only* the agent |
 | no agent target (e.g. `root`) | all of its targets | all of its targets |
@@ -625,18 +751,18 @@ Validated before any boot/SSH; an unknown target is a hard error.
 **System packages (`packages`).** `packages = ["jq", "unzip"]` — apt-installed by
 the driver, as the privileged user, before the body runs. This is the sanctioned
 route now that a mod body has no sudo. The index is refreshed once per run. Note
-that apt is box-wide: a package one project asks for is installed for everybody.
+that apt is box-wide: a package one workspace asks for is installed for everybody.
 
 **Delivered over SSH** (one path). devbox tars the resolved driver + mods +
-context + manifest, pipes it to the box over the `devbox-<box>-admin` SSH alias
+context + manifest + `repos`, pipes it to the box over the `devbox-<box>-admin` SSH alias
 (the driver needs sudo), extracts it into a per-run temp dir, and runs the
 driver. This is the **only** delivery path — the same for a fresh box and a
 reconverge:
 
 - **`devbox box create`** — after boot, runs the box playbook.
-- **`devbox create`** — attaches: creates this project's account, injects the
-  `[env]` creds, runs the project playbook, then pushes `[[sync]]` files. It
-  blocks through all of it, so when it returns the project is fully provisioned.
+- **`devbox create`** — attaches: creates this workspace's account, injects the
+  `[env]` creds, runs the workspace playbook, then pushes `[[sync]]` files. It
+  blocks through all of it, so when it returns the workspace is fully provisioned.
 - **`devbox sync --mods[=a,b,c]`** / **`devbox box sync --mods`** — reconverge a
   live box; no list runs the whole playbook, a list runs just those (fast
   iteration while writing a mod).
@@ -649,20 +775,20 @@ The driver runs each mod in playbook order, stops at the first failure (naming
 which mod and which account), and tees each mod's output to
 `~/provision/<agent_user>/<name>.log` — `<name>.<user>.log` for a mod that runs
 for more than one account — plus the combined `~/provision-<agent_user>.log` that
-`devbox status` tails. Both are **per attachment**, so two projects reconverging
+`devbox status` tails. Both are **per attachment**, so two workspaces reconverging
 don't overwrite each other's; a box run uses `~/provision/box/` and
 `~/provision.log`. All of these live in the **privileged** user's home, since
 that is where the driver runs.
 
 Before any mod, on every run, the driver ensures the accounts it is about to use:
-it wires the privileged user's `~/.bash_env`, then — for a project run — creates
-that project's account if absent (no supplementary groups, `0750` home, locked
+it wires the privileged user's `~/.bash_env`, then — for a workspace run — creates
+that workspace's account if absent (no supplementary groups, `0750` home, locked
 password, your SSH key authorized), records who owns it in
-`/etc/devbox/projects/<agent_user>`, and **refuses to continue** if the account
-belongs to another project, if it exists with no record at all (pass `--adopt`),
+`/etc/devbox/workspaces/<agent_user>`, and **refuses to continue** if the account
+belongs to another workspace, if it exists with no record at all (pass `--adopt`),
 or if the agent has somehow acquired sudo or a root-equivalent group. It is a
 driver preamble rather than a mod on purpose: it must always run, must not be
-shadowable by a project's `.devbox/mods/`, and must not be skippable via
+shadowable by a workspace's own mods directory, and must not be skippable via
 `devbox sync --mods=jj`.
 
 **Idempotency contract:** every mod either overwrites unconditionally or guards
@@ -673,19 +799,19 @@ mod's header prose documents which pattern it uses.
 first declares it as `requires = ["jj", "github-auth"]`. devbox parses this
 statically and, at playbook-resolution time (before any boot/SSH), hard-errors if
 a required mod is missing from either playbook or listed *after* the mod that
-needs it. The box playbook is indexed first, so a project mod may depend on a box
+needs it. The box playbook is indexed first, so a workspace mod may depend on a box
 mod — the machine exists before any attachment does. It is **not** a resolver —
 it never reorders or auto-inserts; it just validates order (so a future reorder
 can't silently break things). Built-in examples: `repo-bootstrap`
 `requires = ["jj", "github-auth"]`, `vim` `requires = ["dotfiles"]`.
 
-### Example: a rust project
+### Example: a rust workspace
 
-`.devbox/config.toml` gains one line, and the rust setup is a project-local mod
-— nothing else to configure:
+The marker gains one line, and the rust setup is a workspace-local mod — nothing
+else to configure:
 
 ```toml
-# .devbox/config.toml
+# .devbox/config.toml  (or devbox.toml)
 mods = ["rust"]
 ```
 
@@ -745,24 +871,24 @@ under `set -euo pipefail`:
    distro upgrade.
 5. Switches the login shell to `zsh` now that it exists.
 
-It deliberately creates **no** project accounts. User-data runs once, at first
+It deliberately creates **no** workspace accounts. User-data runs once, at first
 boot, so an account born here could never appear on an existing box: attaching a
-second project — or changing an `agent_user` — would need a rebuild. The
+second workspace — or changing an `agent_user` — would need a rebuild. The
 provisioning driver creates them instead, where they reconverge. This is also why
-first boot takes a *box*, not a project: it sets up the machine, and knows
+first boot takes a *box*, not a workspace: it sets up the machine, and knows
 nothing about who will later live on it.
 
 Every step is idempotent, and the whole thing carries no provisioning payload —
-mods run over SSH afterwards. A project cannot extend this layer (the
-`.devbox/cloud-config.yaml` fragment is gone); project-specific setup is a mod,
+mods run over SSH afterwards. A workspace cannot extend this layer (the
+`.devbox/cloud-config.yaml` fragment is gone); workspace-specific setup is a mod,
 which has the advantage of reconverging on a live box.
 
 ## Credentials (`[env]`)
 
 `[env]` is a map of environment variables — scoped credentials, API keys —
 hardcoded in `config.toml` and injected into a box. Global `[env]`
-(`~/.config/devbox`) applies to every box; project `[env]` (`.devbox`, which is
-git-excluded) adds project-specific keys and **overrides the global map
+(`~/.config/devbox`) applies to every box; workspace `[env]` (`.devbox`, which is
+git-excluded) adds workspace-specific keys and **overrides the global map
 per-key**.
 
 ```toml
@@ -789,12 +915,12 @@ from **both** that user's `~/.zshenv` (interactive zsh) **and** its `~/.bash_env
 would be invisible to the agent and anything it runs.
 
 Homes are 0750 with a per-user group and every file 0600, so no agent can read
-the privileged user's file — the whole point of `owner` — nor another project's.
+the privileged user's file — the whole point of `owner` — nor another workspace's.
 The privileged side can read them all; it is the trusted side of the box.
 
 Note the asymmetry a shared box introduces: the *global* `[env]` applies to every
-box, so a token there now reaches every project's account on a machine it shares
-with unrelated projects. Prefer a project's own `[env]` for anything scoped.
+box, so a token there now reaches every workspace's account on a machine it shares
+with unrelated workspaces. Prefer a workspace's own `[env]` for anything scoped.
 
 **GitHub auth** is just `GITHUB_TOKEN` in `[env]`: `gh` reads it natively (no
 `gh auth login`, so nothing lands in `~/.config/gh/hosts.yml`), and the
@@ -818,32 +944,51 @@ substituted).
 
 `devbox sync --files` pushes **host-local, non-VCS-tracked files** onto the box —
 primarily agent **skills** (which change often) from wherever they live on the
-host (`~/.claude/skills`, a project's git-excluded skills) to wherever they go
+host (`~/.claude/skills`, a workspace's git-excluded skills) to wherever they go
 on the box. This is a distinct problem from provisioning: a **mod runs on the
 box and can't read host-local files**, so host-only files fundamentally need a
-host-side push. (Skills that live in the project repo arrive via `[repo]`; skills
+host-side push. (Skills that live in a tracked repo arrive via `[[repos]]`; skills
 published on GitHub belong in a mod that clones them box-side — `--files` is only
 for host-local files.)
 
-Configure it with two arrays of `{ src, dst?, include? }` entries:
+Configure it with `{ src, dst?, include? }` entries. Every rule carries its own
+**anchor** — what its two ends are relative to — and all three anchors put the
+box end under the agent's home, since that is where a workspace lives:
 
 ```toml
-# repo-relative: host = the marker dir (repo root), guest = the checkout
-# ~/<repo.dir>. Requires a [repo] with mode != "none".
-[[repo.sync]]
-src = ".claude/skills"                 # -> ~/<repo.dir>/.claude/skills on the box
+# Repo-anchored: nested under a [[repos]] entry, so it never has to name one.
+# Host = that checkout; box = ~/<its dir>.
+[[repos]]
+name = "frontend"
+mode = "push"
+[[repos.sync]]
+src = ".claude/skills"                 # -> ~/frontend/.claude/skills on the box
 
 # $HOME/~/absolute-anchored, resolved per side (host home reading src, guest
 # home writing dst).
 [[sync]]
 src = "$HOME/.claude/skills"
 include = ["jujutsu"]                   # only this child of src, not every skill
+
+# Workspace-anchored: host = the workspace root, box = the agent's home.
+# `devbox.toml` markers only — see below.
+[[sync]]
+src = "shared-notes"                   # -> ~/shared-notes on the box
 ```
+
+**Why workspace-anchored paths need a `devbox.toml` marker.** That shape lines up
+only when the workspace root *holds* the repos: then the root and the agent's
+home carry the same child names, and `notes` means the same place on both sides.
+Under a `.devbox/` marker the root is itself a repo while the box-side home is
+not, so the two ends would quietly mean different things — devbox refuses it and
+points at `[[repos.sync]]`.
 
 - **`dst` defaults to `src`**, and `$HOME`/`~` resolve **per side** — so the
   common "same relative location both ends" case needs only `src`. Only
   `$HOME`/`~` are supported (not arbitrary env vars — guest-side expansion would
-  mean running a shell on the box); both sides resolve offline.
+  mean running a shell on the box); both sides resolve offline. An anchored `src`
+  picks the `$HOME`/absolute anchor; a bare-relative one picks the workspace (at
+  the top level) or the repo (under a `[[repos]]` entry).
 - **`include`** narrows to named children of `src` (names only for now). Its key
   subtlety is that it **defines the mirror unit**: an entry with `include`
   expands to one rsync per child (`src/jujutsu → dst/jujutsu`), each mirrored
@@ -851,14 +996,14 @@ include = ["jujutsu"]                   # only this child of src, not every skil
   `--delete`s box-installed skills outside the list. Without `include`, the whole
   `src` is one mirror of `src → dst`.
 
-**Mechanism:** `rsync` over this project's own SSH alias, idempotent and
+**Mechanism:** `rsync` over this workspace's own SSH alias, idempotent and
 incremental (cheap to run often). **Host wins** — a mirror deletes host-removed
 files within a synced subtree, so an agent's box-side edits to a synced skill
 are clobbered on the next sync (acceptable for host-authored skills).
 
 **When it runs:** on demand via `devbox sync --files`, and automatically as the
 last step of `devbox create` (after the mods run, since the sync dsts depend on
-the repo clone being in place). Files and mods are separate flags of `devbox
+the checkouts being in place). Files and mods are separate flags of `devbox
 sync` precisely because skills change on a faster cadence than provisioning —
 `devbox sync --files` alone is cheap. (`rsync` must be installed on the host; it
 ships in the box's base packages.)
@@ -867,37 +1012,43 @@ ships in the box's base packages.)
 
 The sandbox is a plain SSH-reachable git remote for the host, in both
 directions: the host **fetches** the agent's work to view/test it, and, for
-projects with no git server yet (`[repo] mode = "push"`), the host **pushes**
+repos with no git server yet (`mode = "push"`), the host **pushes**
 to seed the sandbox with an initial commit. This is **identical whether the box
 is libvirt, EC2, or Lightsail** — the address is resolved through the
 provider (libvirt DHCP lease, or the cloud instance's public IP); everything
 above that is the same
-jj-remote model. The remote points at this project's own account, so two
-projects on one box fetch from two different homes over two different aliases.
+jj-remote model. The remote points at this workspace's own account, so two
+workspaces on one box fetch from two different homes over two different aliases.
 
-Both directions go through this project's SSH alias, which `devbox jj fetch`
+A workspace holding several repos uses **one alias for all of them** — the alias
+identifies the account, and each repo is a different path inside it. So
+`devbox jj fetch` needs to know which checkout you mean: it takes the one you
+name (`devbox jj fetch backend`), else the one your working directory is inside,
+else the workspace's only one.
+
+Both directions go through this workspace's SSH alias, which `devbox jj fetch`
 and `devbox host` set up/refresh:
 
 - A per-box known-hosts file, `~/.config/devbox/ssh/known_hosts.<box>`,
   **truncated when that box is created** (a freshly created box has a brand-new
   SSH host key, so stale entries can only cause false mismatches). Per box, not
   shared: creating a *different* box must not invalidate this one's pinned key
-  for every project attached to it.
-- A `Host devbox-<box>-<project>` block — collapsing to `devbox-<box>` when the
-  project owns the box — alone in `~/.config/devbox/ssh/<box>.<project>.conf`,
-  with the box's current IP (from the provider), the project's account, and
+  for every workspace attached to it.
+- A `Host devbox-<box>-<workspace>` block — collapsing to `devbox-<box>` when the
+  workspace owns the box — alone in `~/.config/devbox/ssh/<box>.<workspace>.conf`,
+  with the box's current IP (from the provider), the workspace's account, and
   `StrictHostKeyChecking accept-new` scoped to that box's known-hosts file. It is
   regenerated on every call since the address can change across `stop`/`up`
   cycles (a libvirt DHCP lease, or a new public IP after stop/start — Lightsail
   boxes use a dynamic IPv4, so this is expected there rather than exceptional).
   One stanza per file is what keeps attachments independent: a single shared file
-  per box would have each project's refresh overwrite the last one's account.
+  per box would have each workspace's refresh overwrite the last one's account.
 - A one-time, idempotent `Include ~/.config/devbox/ssh/*.conf` line in
   `~/.ssh/config`.
 
-### Fetch: pulling sandbox commits to the host (`[repo] mode = "clone"`)
+### Fetch: pulling sandbox commits to the host (`mode = "clone"`)
 
-The sandbox already cloned the project on first boot (via `[repo]`), so
+The sandbox already cloned the repo while provisioning (via `[[repos]]`), so
 there's no manual clone step. The agent just bookmarks work it wants visible
 on the host — jj only exports *bookmarked* commits to git refs, which is what
 the host's fetch reads:
@@ -908,31 +1059,31 @@ jj bookmark create wip -r @
 
 # Host side (from your local jj checkout): one command, any provider.
 devbox jj fetch                      # refreshes the alias, wires the jj remote, fetches
-jj new wip@devbox-my-project         # check out the fetched bookmark
+jj new wip@devbox-my-workspace         # check out the fetched bookmark
 ```
 
-`devbox jj fetch` refreshes the SSH alias (address via the provider), ensures a jj
-git remote named after the alias points at this project's
+`devbox jj fetch` picks the checkout (see above), refreshes the SSH alias (address
+via the provider), ensures a jj git remote named after the alias points at that
 colocated repo (`ssh://<alias>/home/<agent_user>/<dir>`), and runs `jj git
-fetch`. It's equivalent to the manual flow:
+fetch` in the matching host repo. It's equivalent to the manual flow:
 
 ```bash
-devbox host                                             # prints alias, e.g. devbox-my-project
-jj git remote add devbox-my-project ssh://devbox-my-project/home/<agent_user>/<dir>
-jj git fetch --remote devbox-my-project
+devbox host                                             # prints alias, e.g. devbox-my-workspace
+jj git remote add devbox-my-workspace ssh://devbox-my-workspace/home/<agent_user>/<dir>
+jj git fetch --remote devbox-my-workspace
 ```
 
-### Push: seeding a brand-new sandbox (`[repo] mode = "push"`)
+### Push: seeding a brand-new sandbox (`mode = "push"`)
 
-For a project with no git remote yet, the sandbox's common provisioning
-creates an *empty* colocated jj+git repo at `~/<dir>` on first boot
+For a repo with no git remote yet, the sandbox's common provisioning
+creates an *empty* colocated jj+git repo at `~/<dir>` while provisioning
 (`git init --initial-branch=main`, `jj git init --colocate`, then
 `git config receive.denyCurrentBranch updateInstead` — the setting that lets
 a push update a non-bare repo's checked-out working tree). The host seeds it:
 
 ```bash
-devbox host                                             # prints alias, e.g. devbox-my-project-dev
-jj git remote add sandbox ssh://devbox-my-project-dev/home/<agent_user>/<dir>
+devbox host                                             # prints alias, e.g. devbox-my-workspace-dev
+jj git remote add sandbox ssh://devbox-my-workspace-dev/home/<agent_user>/<dir>
 jj bookmark set main -r @ --allow-backwards   # the bookmark name MUST be "main" -
                                                 # matches the sandbox repo's initial-branch
 jj git push --remote sandbox --allow-new -b main
@@ -956,7 +1107,8 @@ uv sync              # create .venv with dev dependencies (pytest)
 uv run pytest        # run the test suite
 ```
 
-The code is a `devbox/` package: `config` (global/project config, `BoxSpec`),
+The code is a `devbox/` package: `config` (global/workspace config, marker
+resolution, `[[repos]]`, `BoxSpec`),
 `provision` (modular mods — resolution, scope, env context, payload/driver
 assembly), `initscript` (first-boot user-data script render), `sync` (host→box
 rsync file sync), `cli` (subcommands + argparse), and a `providers/` package — a

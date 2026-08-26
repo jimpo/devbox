@@ -46,8 +46,8 @@ class Instance:
     any workstation. A box created before the stamp existed reports None; callers
     fall back to the host's own $USER, which is what it was created with.
 
-    There is deliberately no `project` field: a box hosts as many projects as
-    attach to it, and the answer lives on the box (`/etc/devbox/projects/`), not
+    There is deliberately no `workspace` field: a box hosts as many workspaces as
+    attach to it, and the answer lives on the box (`/etc/devbox/workspaces/`), not
     in a launch-time tag. `devbox box list --attached` reads it from there."""
     name: str
     provider: str

@@ -89,13 +89,13 @@ def test_global_config_parses_sync_entries(tmp_path):
     gc = devbox.GlobalConfig.load(path)
     assert gc.sync == [
         devbox.SyncEntry(src="$HOME/.claude/skills", dst="$HOME/.claude/skills",
-                         include=["jujutsu"], repo_relative=False),
+                         include=["jujutsu"], anchor=devbox.ANCHOR_HOME),
     ]
 
 
 def test_global_config_sync_rejects_repo_relative_paths(tmp_path):
     # There is no [repo] at global scope, so a bare-relative src (the shape
-    # [[repo.sync]] takes) is rejected the same way a project's own [[sync]]
+    # [[repo.sync]] takes) is rejected the same way a workspace's own [[sync]]
     # rejects it.
     path = tmp_path / "config.toml"
     path.write_text('[[sync]]\nsrc = "relative/skills"\n')
@@ -112,7 +112,7 @@ def test_global_config_partial_override_keeps_other_defaults(tmp_path):
     assert gc.vcpus == devbox.DEFAULT_VCPUS
 
 
-# ---- project marker resolution -------------------------------------------
+# ---- workspace marker resolution -------------------------------------------
 @pytest.fixture
 def global_config():
     gc = devbox.GlobalConfig.load(devbox.Path("/nonexistent"))
@@ -122,45 +122,95 @@ def global_config():
 
 
 def _write_marker(root, content, local=False):
-    devbox_dir = root / devbox.PROJECT_MARKER_DIR
+    """The `.devbox/config.toml` spelling: the workspace root IS a repo."""
+    devbox_dir = root / devbox.REPO_MARKER_DIR
     devbox_dir.mkdir(parents=True, exist_ok=True)
-    (devbox_dir / devbox.PROJECT_CONFIG_FILE).write_text(content)
+    (devbox_dir / devbox.REPO_MARKER_CONFIG).write_text(content)
 
 
-def test_find_project_dir_at_start(tmp_path):
+def _write_visible_marker(root, content):
+    """The `devbox.toml` spelling: the workspace root HOLDS repos."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / devbox.WORKSPACE_MARKER_FILE).write_text(content)
+
+
+def test_find_workspace_at_start(tmp_path):
     _write_marker(tmp_path, 'name = "x"\n')
-    assert devbox.find_project_dir(tmp_path) == tmp_path.resolve()
+    assert devbox.find_workspace(tmp_path).root == tmp_path.resolve()
 
 
-def test_find_project_dir_walks_up(tmp_path):
+def test_find_workspace_walks_up(tmp_path):
     _write_marker(tmp_path, 'name = "x"\n')
     deep = tmp_path / "a" / "b" / "c"
     deep.mkdir(parents=True)
-    assert devbox.find_project_dir(deep) == tmp_path.resolve()
+    assert devbox.find_workspace(deep).root == tmp_path.resolve()
 
 
-def test_find_project_dir_missing_dies(tmp_path):
+def test_find_workspace_missing_dies(tmp_path):
     with pytest.raises(SystemExit):
-        devbox.find_project_dir(tmp_path)
+        devbox.find_workspace(tmp_path)
 
 
-def test_resolve_project_basic(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "myproj"\n')
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.project == "myproj"
-    assert project.repo.mode == "none"
+def test_find_workspace_repo_marker_shape(tmp_path):
+    # `.devbox/config.toml`: the marker hides inside a repo, so the root IS one.
+    _write_marker(tmp_path, 'box = "dev"\n')
+    marker = devbox.find_workspace(tmp_path)
+    assert marker.root_is_repo is True
+    assert marker.config_path == tmp_path.resolve() / ".devbox" / "config.toml"
+    assert marker.mods_dir == tmp_path.resolve() / ".devbox" / "mods"
 
 
-def test_resolve_project_box_defaults_to_the_project_name(tmp_path, global_config):
-    # A project that never mentions a box gets one of its own, named after it -
+def test_find_workspace_visible_marker_shape(tmp_path):
+    # `devbox.toml`: the root holds repos, so there is nothing to hide from and
+    # the mods sit beside the config file rather than under a dot directory.
+    _write_visible_marker(tmp_path, 'box = "dev"\n')
+    marker = devbox.find_workspace(tmp_path)
+    assert marker.root_is_repo is False
+    assert marker.config_path == tmp_path.resolve() / "devbox.toml"
+    assert marker.mods_dir == tmp_path.resolve() / "mods"
+
+
+def test_find_workspace_finds_the_visible_marker_walking_up(tmp_path):
+    _write_visible_marker(tmp_path, 'box = "dev"\n')
+    deep = tmp_path / "frontend" / "src"
+    deep.mkdir(parents=True)
+    assert devbox.find_workspace(deep).root == tmp_path.resolve()
+
+
+def test_find_workspace_nearest_level_wins(tmp_path):
+    # A workspace nested inside another resolves to itself, like git and .git.
+    _write_visible_marker(tmp_path, 'box = "outer"\n')
+    inner = tmp_path / "inner"
+    _write_marker(inner, 'box = "inner"\n')
+    assert devbox.find_workspace(inner).root == inner.resolve()
+
+
+def test_find_workspace_both_spellings_at_one_level_dies(tmp_path):
+    # Two spellings of one marker in one directory: which shape the workspace has
+    # would be a coin toss, and it decides every repo's host path.
+    _write_marker(tmp_path, 'box = "dev"\n')
+    _write_visible_marker(tmp_path, 'box = "dev"\n')
+    with pytest.raises(SystemExit):
+        devbox.find_workspace(tmp_path)
+
+
+def test_resolve_workspace_basic(tmp_path, global_config):
+    _write_marker(tmp_path, 'workspace = "myproj"\n')
+    workspace = devbox.resolve_workspace(tmp_path, global_config)
+    assert workspace.workspace == "myproj"
+    assert workspace.repos == []
+
+
+def test_resolve_workspace_box_defaults_to_the_workspace_name(tmp_path, global_config):
+    # A workspace that never mentions a box gets one of its own, named after it -
     # which is what keeps the single-box case working with no configuration.
-    _write_marker(tmp_path, 'project = "myproj"\n')
-    assert devbox.resolve_project(tmp_path, global_config).box == "myproj"
+    _write_marker(tmp_path, 'workspace = "myproj"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).box == "myproj"
 
 
-def test_resolve_project_box_explicit_wins(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "myproj"\nbox = "ec2-shared"\n')
-    assert devbox.resolve_project(tmp_path, global_config).box == "ec2-shared"
+def test_resolve_workspace_box_explicit_wins(tmp_path, global_config):
+    _write_marker(tmp_path, 'workspace = "myproj"\nbox = "ec2-shared"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).box == "ec2-shared"
 
 
 @pytest.mark.parametrize("key,value", [
@@ -170,41 +220,41 @@ def test_resolve_project_box_explicit_wins(tmp_path, global_config):
     ("memory_mib", "2048"),
     ("disk_gb", "40"),
 ])
-def test_resolve_project_rejects_box_level_scalars(tmp_path, global_config, key, value):
+def test_resolve_workspace_rejects_box_level_scalars(tmp_path, global_config, key, value):
     # Hardware describes a box, which is now created independently and may host
-    # several projects. Silently ignoring `vcpus = 16` would boot the wrong-sized
+    # several workspaces. Silently ignoring `vcpus = 16` would boot the wrong-sized
     # machine, so it is a hard error that names the flag to use instead.
-    _write_marker(tmp_path, f'project = "p"\n{key} = {value}\n')
+    _write_marker(tmp_path, f'workspace = "p"\n{key} = {value}\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
 @pytest.mark.parametrize("section", [
     '[ec2]\ninstance_type = "t3.micro"\n',
     '[lightsail]\nbundle = "small_3_0"\n',
 ])
-def test_resolve_project_rejects_box_level_sections(tmp_path, global_config, section):
-    _write_marker(tmp_path, f'project = "p"\n{section}')
+def test_resolve_workspace_rejects_box_level_sections(tmp_path, global_config, section):
+    _write_marker(tmp_path, f'workspace = "p"\n{section}')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_defaults_project_to_dirname(tmp_path, global_config):
-    # No `project` key -> defaults to the marker directory's basename.
+def test_resolve_workspace_defaults_workspace_to_dirname(tmp_path, global_config):
+    # No `workspace` key -> defaults to the marker directory's basename.
     _write_marker(tmp_path, "")
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.project == tmp_path.resolve().name
+    workspace = devbox.resolve_workspace(tmp_path, global_config)
+    assert workspace.workspace == tmp_path.resolve().name
 
 
 # ---- agent_user (the unprivileged account) ----------------------------------
-def test_resolve_project_agent_user_defaults_to_the_project_name(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "myproj"\n')
-    assert devbox.resolve_project(tmp_path, global_config).agent_user == "myproj"
+def test_resolve_workspace_agent_user_defaults_to_the_workspace_name(tmp_path, global_config):
+    _write_marker(tmp_path, 'workspace = "myproj"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).agent_user == "myproj"
 
 
-def test_resolve_project_agent_user_explicit_wins(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "myproj"\nagent_user = "botty"\n')
-    assert devbox.resolve_project(tmp_path, global_config).agent_user == "botty"
+def test_resolve_workspace_agent_user_explicit_wins(tmp_path, global_config):
+    _write_marker(tmp_path, 'workspace = "myproj"\nagent_user = "botty"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).agent_user == "botty"
 
 
 @pytest.mark.parametrize("name", [
@@ -215,128 +265,127 @@ def test_resolve_project_agent_user_explicit_wins(tmp_path, global_config):
     "a" * 33,       # too long for a Linux username
     "has space",
 ])
-def test_resolve_project_agent_user_invalid_username_dies(tmp_path, global_config, name):
-    # Project names are directory basenames, so plenty of legal project names are
+def test_resolve_workspace_agent_user_invalid_username_dies(tmp_path, global_config, name):
+    # Workspace names are directory basenames, so plenty of legal workspace names are
     # illegal usernames. Catching it here costs a second; catching it at useradd
     # time costs a boot.
-    _write_marker(tmp_path, f'project = "p"\nagent_user = "{name}"\n')
+    _write_marker(tmp_path, f'workspace = "p"\nagent_user = "{name}"\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_agent_user_from_an_invalid_project_name_dies(tmp_path, global_config):
+def test_resolve_workspace_agent_user_from_an_invalid_workspace_name_dies(tmp_path, global_config):
     # Same check, reached via the default rather than an explicit key.
-    _write_marker(tmp_path, 'project = "My.Project"\n')
+    _write_marker(tmp_path, 'workspace = "My.Workspace"\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_cannot_check_agent_user_against_the_box_here(
+def test_resolve_workspace_cannot_check_agent_user_against_the_box_here(
         tmp_path, global_config):
     # "agent_user must differ from the box's privileged account" is a real rule,
     # but the box's account is a property of the machine, not of this file - so
     # it is enforced at attach time (cmd_create), and resolving must not guess.
-    _write_marker(tmp_path, 'project = "p"\nagent_user = "alice"\n')
-    assert devbox.resolve_project(tmp_path, global_config).agent_user == "alice"
+    _write_marker(tmp_path, 'workspace = "p"\nagent_user = "alice"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).agent_user == "alice"
 
 
 @pytest.mark.parametrize("name", ["root", "ubuntu", "ec2-user", "nobody"])
-def test_resolve_project_agent_user_reserved_dies(tmp_path, global_config, name):
+def test_resolve_workspace_agent_user_reserved_dies(tmp_path, global_config, name):
     # `ubuntu` is the cloud images' own sudo-capable default user.
-    _write_marker(tmp_path, f'project = "p"\nagent_user = "{name}"\n')
+    _write_marker(tmp_path, f'workspace = "p"\nagent_user = "{name}"\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_agent_user_known_key_no_warning(tmp_path, global_config, capsys):
-    _write_marker(tmp_path, 'project = "p"\nagent_user = "botty"\n')
-    devbox.resolve_project(tmp_path, global_config)
+def test_resolve_workspace_agent_user_known_key_no_warning(tmp_path, global_config, capsys):
+    _write_marker(tmp_path, 'workspace = "p"\nagent_user = "botty"\n')
+    devbox.resolve_workspace(tmp_path, global_config)
     assert capsys.readouterr().err == ""
 
 
-def test_resolve_project_env(tmp_path, global_config):
+def test_resolve_workspace_env(tmp_path, global_config):
     _write_marker(tmp_path, '[env]\nGITHUB_TOKEN = "github_pat_proj"\n')
-    project = devbox.resolve_project(tmp_path, global_config)
+    workspace = devbox.resolve_workspace(tmp_path, global_config)
     # A bare string is the agent's - the account that does the work.
-    assert project.env == {"GITHUB_TOKEN": devbox.EnvVar("github_pat_proj", "agent")}
+    assert workspace.env == {"GITHUB_TOKEN": devbox.EnvVar("github_pat_proj", "agent")}
 
 
-def test_resolve_project_env_defaults_empty(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "myproj"\n')
-    assert devbox.resolve_project(tmp_path, global_config).env == {}
+def test_resolve_workspace_env_defaults_empty(tmp_path, global_config):
+    _write_marker(tmp_path, 'workspace = "myproj"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).env == {}
 
 
-def test_resolve_project_env_non_string_dies(tmp_path, global_config):
+def test_resolve_workspace_env_non_string_dies(tmp_path, global_config):
     _write_marker(tmp_path, '[env]\nPORT = 8080\n')  # values must be strings
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_env_table_form_carries_an_owner(tmp_path, global_config):
+def test_resolve_workspace_env_table_form_carries_an_owner(tmp_path, global_config):
     _write_marker(tmp_path, '[env]\n'
                             'CLOUDFLARE_TOKEN = { value = "cf_tok", owner = "admin" }\n'
                             'PLAIN = { value = "p" }\n')
-    assert devbox.resolve_project(tmp_path, global_config).env == {
+    assert devbox.resolve_workspace(tmp_path, global_config).env == {
         "CLOUDFLARE_TOKEN": devbox.EnvVar("cf_tok", "admin"),
         "PLAIN": devbox.EnvVar("p", "agent"),    # owner defaults to the agent
     }
 
 
-def test_resolve_project_env_unknown_owner_dies(tmp_path, global_config):
+def test_resolve_workspace_env_unknown_owner_dies(tmp_path, global_config):
     # No "root" owner: a `runas = ["root"]` mod reads the admin's env file.
     _write_marker(tmp_path, '[env]\nK = { value = "v", owner = "root" }\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_env_unknown_entry_key_dies(tmp_path, global_config):
+def test_resolve_workspace_env_unknown_entry_key_dies(tmp_path, global_config):
     # A typo in an entry's own keys is fatal, unlike an unknown [env] KEY (which
     # is user-defined by design) - it would otherwise silently mean "agent".
     _write_marker(tmp_path, '[env]\nK = { value = "v", admin = true }\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_env_table_without_a_value_dies(tmp_path, global_config):
+def test_resolve_workspace_env_table_without_a_value_dies(tmp_path, global_config):
     _write_marker(tmp_path, '[env]\nK = { owner = "admin" }\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_legacy_name_field_dies(tmp_path, global_config):
+def test_resolve_workspace_legacy_name_field_dies(tmp_path, global_config):
     # `name` used to be the VM; it's now a migration error, not silently ignored.
     _write_marker(tmp_path, 'name = "myproj"\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
 # ---- unknown-key warnings -----------------------------------------------
-def test_resolve_project_unknown_top_level_key_warns(tmp_path, global_config, capsys):
-    _write_marker(tmp_path, 'project = "myproj"\nvpcus = 4\n')  # typo: vpcus
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.project == "myproj"  # still loads
+def test_resolve_workspace_unknown_top_level_key_warns(tmp_path, global_config, capsys):
+    _write_marker(tmp_path, 'workspace = "myproj"\nvpcus = 4\n')  # typo: vpcus
+    workspace = devbox.resolve_workspace(tmp_path, global_config)
+    assert workspace.workspace == "myproj"  # still loads
     err = capsys.readouterr().err
     assert "unknown key 'vpcus'" in err
 
 
-def test_resolve_project_unknown_section_key_warns(tmp_path, global_config, capsys):
-    _write_marker(tmp_path, '[repo]\nmode = "none"\nbranch = "main"\n')
-    devbox.resolve_project(tmp_path, global_config)
-    err = capsys.readouterr().err
-    assert "unknown key 'repo.branch'" in err
+def test_resolve_workspace_unknown_section_warns(tmp_path, global_config, capsys):
+    _write_marker(tmp_path, '[bogus]\nkey = "value"\n')
+    devbox.resolve_workspace(tmp_path, global_config)
+    assert "unknown key 'bogus'" in capsys.readouterr().err
 
 
-def test_resolve_project_known_config_no_warning(tmp_path, global_config, capsys):
-    _write_marker(tmp_path, 'project = "myproj"\nbox = "dev"\nagent_user = "botty"\n'
-                            'mods = ["rust"]\n[repo]\nmode = "none"\n')
-    devbox.resolve_project(tmp_path, global_config)
+def test_resolve_workspace_known_config_no_warning(tmp_path, global_config, capsys):
+    _write_marker(tmp_path, 'workspace = "myproj"\nbox = "dev"\nagent_user = "botty"\n'
+                            'mods = ["rust"]\n[[repos]]\nmode = "push"\n')
+    devbox.resolve_workspace(tmp_path, global_config)
     assert capsys.readouterr().err == ""
 
 
-def test_resolve_project_unknown_env_key_does_not_warn(tmp_path, global_config, capsys):
+def test_resolve_workspace_unknown_env_key_does_not_warn(tmp_path, global_config, capsys):
     # [env] holds arbitrary user-defined keys; they must not be flagged.
     _write_marker(tmp_path, '[env]\nANYTHING_GOES = "value"\n')
-    devbox.resolve_project(tmp_path, global_config)
+    devbox.resolve_workspace(tmp_path, global_config)
     assert capsys.readouterr().err == ""
 
 
@@ -384,59 +433,157 @@ def test_global_config_unknown_ec2_key_warns(tmp_path, capsys):
     assert "unknown key 'ec2.default_subnet'" in capsys.readouterr().err
 
 
-def test_resolve_project_invalid_provider_dies(tmp_path, global_config):
+def test_resolve_workspace_invalid_provider_dies(tmp_path, global_config):
     _write_marker(tmp_path, 'provider = "gcp"\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-# ---- [repo] validation -----------------------------------------------------
-def test_resolve_project_repo_defaults_to_none(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "myproj"\n')
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.repo == devbox.RepoConfig(mode="none", dir="", url=None)
+# ---- [[repos]] validation ---------------------------------------------------
+def test_resolve_workspace_no_repos_by_default(tmp_path, global_config):
+    # A workspace with nothing to check out lists no repos - the shape that used
+    # to be spelled `[repo] mode = "none"`.
+    _write_marker(tmp_path, 'workspace = "myproj"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).repos == []
 
 
-def test_resolve_project_repo_clone_mode(tmp_path, global_config):
+def test_resolve_workspace_nameless_repo_is_the_root(tmp_path, global_config):
+    # Under a `.devbox/` marker the root IS the repo, so an entry needs no name:
+    # the host side is the root and the guest directory takes its basename.
+    _write_marker(tmp_path, '[[repos]]\nmode = "push"\n')
+    repos = devbox.resolve_workspace(tmp_path, global_config).repos
+    assert repos == [devbox.RepoSpec(name=tmp_path.name, mode="push",
+                                     dir=tmp_path.name, host=tmp_path.resolve(),
+                                     url=None)]
+
+
+def test_resolve_workspace_repo_clone_mode(tmp_path, global_config):
     _write_marker(
         tmp_path,
-        '[repo]\nmode = "clone"\ndir = "myrepo"\nurl = "https://example.com/myrepo"\n',
+        '[[repos]]\nname = "myrepo"\nmode = "clone"\n'
+        'url = "https://example.com/myrepo"\n',
     )
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.repo == devbox.RepoConfig(mode="clone", dir="myrepo", url="https://example.com/myrepo")
+    assert devbox.resolve_workspace(tmp_path, global_config).repos == [
+        devbox.RepoSpec(name="myrepo", mode="clone", dir="myrepo",
+                        host=tmp_path.resolve() / "myrepo",
+                        url="https://example.com/myrepo")]
 
 
-def test_resolve_project_repo_push_mode(tmp_path, global_config):
+def test_resolve_workspace_repo_name_supplies_host_and_dir(tmp_path, global_config):
+    # One `name` is the whole of a repo entry in the common case: it addresses
+    # the repo, and doubles as its host path and its guest directory.
+    _write_visible_marker(tmp_path, '[[repos]]\nname = "myrepo"\nmode = "push"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).repos == [
+        devbox.RepoSpec(name="myrepo", mode="push", dir="myrepo",
+                        host=tmp_path.resolve() / "myrepo", url=None)]
+
+
+def test_resolve_workspace_repo_host_and_dir_override_the_name(tmp_path, global_config):
+    _write_visible_marker(
+        tmp_path,
+        '[[repos]]\nname = "api"\nmode = "push"\nhost = "vendor/api"\ndir = "srv"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).repos == [
+        devbox.RepoSpec(name="api", mode="push", dir="srv",
+                        host=tmp_path.resolve() / "vendor" / "api", url=None)]
+
+
+def test_resolve_workspace_holds_several_repos(tmp_path, global_config):
+    # The point of a workspace: several checkouts in one account, so one set of
+    # git/jj credentials covers all of them.
+    _write_visible_marker(
+        tmp_path,
+        '[[repos]]\nname = "frontend"\nmode = "push"\n'
+        '[[repos]]\nname = "backend"\nmode = "push"\n'
+        '[[repos]]\nname = "protos"\nmode = "clone"\nurl = "https://x/protos"\n')
+    repos = devbox.resolve_workspace(tmp_path, global_config).repos
+    assert [r.name for r in repos] == ["frontend", "backend", "protos"]
+    assert [r.dir for r in repos] == ["frontend", "backend", "protos"]
+
+
+def test_resolve_workspace_repo_lookup_by_name(tmp_path, global_config):
+    _write_visible_marker(
+        tmp_path,
+        '[[repos]]\nname = "frontend"\nmode = "push"\n'
+        '[[repos]]\nname = "backend"\nmode = "push"\n')
+    workspace = devbox.resolve_workspace(tmp_path, global_config)
+    assert workspace.repo("backend").dir == "backend"
+    assert workspace.repo("nope") is None
+
+
+def test_resolve_workspace_nameless_repo_under_a_visible_marker_dies(tmp_path, global_config):
+    # `devbox.toml` says the root holds repos, so "the root is the repo" is a
+    # contradiction rather than a default worth guessing at.
+    _write_visible_marker(tmp_path, '[[repos]]\nmode = "push"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+
+
+def test_resolve_workspace_repo_invalid_mode_dies(tmp_path, global_config):
+    _write_marker(tmp_path, '[[repos]]\nname = "myrepo"\nmode = "bogus"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+
+
+def test_resolve_workspace_repo_mode_none_dies(tmp_path, global_config):
+    # "none" is not a mode any more; a workspace with no checkout lists no repos.
+    _write_marker(tmp_path, '[[repos]]\nname = "myrepo"\nmode = "none"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+
+
+def test_resolve_workspace_repo_clone_missing_url_dies(tmp_path, global_config):
+    _write_marker(tmp_path, '[[repos]]\nname = "myrepo"\nmode = "clone"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+
+
+def test_resolve_workspace_repo_push_with_url_dies(tmp_path, global_config):
+    _write_marker(
+        tmp_path,
+        '[[repos]]\nname = "myrepo"\nmode = "push"\nurl = "https://example.com/x"\n',
+    )
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+
+
+def test_resolve_workspace_repo_unknown_key_dies(tmp_path, global_config):
+    _write_marker(tmp_path, '[[repos]]\nmode = "push"\nbranch = "main"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+
+
+@pytest.mark.parametrize("body", [
+    # Two entries may share neither the name they are addressed by ...
+    '[[repos]]\nname = "a"\nmode = "push"\ndir = "x"\n'
+    '[[repos]]\nname = "a"\nmode = "push"\ndir = "y"\n',
+    # ... nor the guest directory, which would put both in one tree.
+    '[[repos]]\nname = "a"\nmode = "push"\ndir = "x"\n'
+    '[[repos]]\nname = "b"\nmode = "push"\ndir = "x"\n',
+])
+def test_resolve_workspace_repos_must_be_distinct(tmp_path, global_config, body):
+    _write_visible_marker(tmp_path, body)
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+
+
+def test_resolve_workspace_repo_may_not_be_the_mods_dir(tmp_path, global_config):
+    # Under a visible marker the mods directory is a sibling of the repos, so it
+    # shares their namespace - a collision has to be an error, not a surprise.
+    _write_visible_marker(tmp_path, '[[repos]]\nname = "mods"\nmode = "push"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+
+
+def test_resolve_workspace_rejects_the_old_singular_repo_table(tmp_path, global_config):
     _write_marker(tmp_path, '[repo]\nmode = "push"\ndir = "myrepo"\n')
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.repo == devbox.RepoConfig(mode="push", dir="myrepo", url=None)
-
-
-def test_resolve_project_repo_invalid_mode_dies(tmp_path, global_config):
-    _write_marker(tmp_path, '[repo]\nmode = "bogus"\ndir = "myrepo"\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_repo_clone_missing_url_dies(tmp_path, global_config):
-    _write_marker(tmp_path, '[repo]\nmode = "clone"\ndir = "myrepo"\n')
+def test_resolve_workspace_rejects_the_old_project_key(tmp_path, global_config):
+    _write_marker(tmp_path, 'project = "myproj"\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
-
-
-def test_resolve_project_repo_missing_dir_dies(tmp_path, global_config):
-    _write_marker(tmp_path, '[repo]\nmode = "push"\n')
-    with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
-
-
-def test_resolve_project_repo_push_with_url_dies(tmp_path, global_config):
-    _write_marker(
-        tmp_path,
-        '[repo]\nmode = "push"\ndir = "myrepo"\nurl = "https://example.com/myrepo"\n',
-    )
-    with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
 # ---- render_init_script -----------------------------------------------------
@@ -447,17 +594,46 @@ def pubkey(tmp_path):
     return path
 
 
-def _project(mode="none", dir="", url=None, env=None,
-             marker_dir=None, mods=None, sync=None, agent_user="agentbot",
-             project="test-project", box=None):
-    return devbox.ProjectConfig(
-        project=project,
-        # A project with no `box` of its own attaches to one named after it -
+def _marker(root=None, root_is_repo=True):
+    """A resolved Marker of either spelling, without touching the filesystem."""
+    root = devbox.Path(root) if root is not None else devbox.Path("/ws")
+    if root_is_repo:
+        return devbox.Marker(root=root,
+                             config_path=root / devbox.REPO_MARKER_DIR / devbox.REPO_MARKER_CONFIG,
+                             mods_dir=root / devbox.REPO_MARKER_DIR / devbox.MODS_SUBDIR,
+                             root_is_repo=True)
+    return devbox.Marker(root=root, config_path=root / devbox.WORKSPACE_MARKER_FILE,
+                         mods_dir=root / devbox.MODS_SUBDIR, root_is_repo=False)
+
+
+def _repo(name="r", mode="push", dir=None, url=None, host=None, root=None):
+    root = devbox.Path(root) if root is not None else devbox.Path("/ws")
+    return devbox.RepoSpec(name=name, mode=mode,
+                           dir=dir if dir is not None else name,
+                           host=devbox.Path(host) if host is not None else root / name,
+                           url=url)
+
+
+def _workspace(mode="none", dir="", url=None, env=None,
+               marker_dir=None, mods=None, sync=None, agent_user="agentbot",
+               workspace="test-workspace", box=None, repos=None,
+               root_is_repo=True):
+    """A resolved workspace. `mode`/`dir`/`url` are the shorthand for the single
+    repo most tests want (mode="none" meaning none at all); `repos=` is the way
+    to build a workspace that holds several."""
+    marker = _marker(marker_dir, root_is_repo=root_is_repo)
+    if repos is None:
+        repos = ([] if mode == "none" else
+                 [_repo(name=dir or "r", mode=mode, dir=dir or "r", url=url,
+                        root=marker.root)])
+    return devbox.WorkspaceConfig(
+        workspace=workspace,
+        # A workspace with no `box` of its own attaches to one named after it -
         # the zero-config case, and what most tests want.
-        box=box if box is not None else project,
+        box=box if box is not None else workspace,
         agent_user=agent_user,
-        repo=devbox.RepoConfig(mode=mode, dir=dir, url=url),
-        marker_dir=marker_dir or devbox.Path("/proj"),
+        marker=marker,
+        repos=repos,
         mods=mods if mods is not None else [],
         sync=sync if sync is not None else [],
         env=env if env is not None else {},
@@ -562,10 +738,10 @@ def test_render_init_script_wires_bash_env_through_a_shared_stub(pubkey):
 
 
 def test_render_init_script_creates_only_the_privileged_user(pubkey):
-    # A project's agent account is deliberately NOT a first-boot concern:
+    # A workspace's agent account is deliberately NOT a first-boot concern:
     # user-data runs once, so an account born here could never reach an existing
-    # box, and attaching a second project would need a rebuild. The driver
-    # creates them instead - which is why first boot takes a box, not a project.
+    # box, and attaching a second workspace would need a rebuild. The driver
+    # creates them instead - which is why first boot takes a box, not a workspace.
     rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     assert "agentbot" not in rendered
     assert rendered.count("useradd") == 1
@@ -579,7 +755,7 @@ def test_render_init_script_locks_down_the_home_directory(pubkey):
 
 
 def test_render_init_script_hostname_is_the_box_name(pubkey):
-    # The hostname is the box's, not any project's: several projects share it.
+    # The hostname is the box's, not any workspace's: several workspaces share it.
     rendered = devbox.render_init_script(_box(name="aws-mybox"),
                                          _global_config(pubkey))
     assert "DEVBOX_HOSTNAME='aws-mybox'" in rendered
@@ -651,52 +827,87 @@ def isolated_mods(monkeypatch):
     monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR", devbox.Path("/nonexistent-global-mods"))
 
 
-def _payload_map(project, gc, admin_user="alice"):
-    return {pf.path: pf for pf in devbox.build_payload(project, gc, admin_user)}
+def _payload_map(workspace, gc, admin_user="alice"):
+    return {pf.path: pf for pf in devbox.build_payload(workspace, gc, admin_user)}
 
 
 def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubkey):
-    payload = _payload_map(_project(mode="clone", dir="r", url="https://x/y"), _global_config(pubkey))
+    payload = _payload_map(_workspace(mode="clone", dir="r", url="https://x/y"), _global_config(pubkey))
     assert payload["provision-driver.sh"].content == devbox.DRIVER_PATH.read_text()
     manifest_names = [line.split("\t")[0]
                       for line in payload["manifest"].content.splitlines()]
-    assert manifest_names == list(devbox.PROJECT_BASE_MODS)
+    assert manifest_names == list(devbox.WORKSPACE_BASE_MODS)
     ctx = payload["context.env"].content
     # Both accounts, named explicitly - a bare DEVBOX_USER would be ambiguous now.
     assert "export DEVBOX_ADMIN_USER=alice" in ctx
     assert "export DEVBOX_AGENT_USER=agentbot" in ctx
     assert "export DEVBOX_USER=" not in ctx
-    # Which project owns the account, so the driver can refuse to hand it to a
+    # Which workspace owns the account, so the driver can refuse to hand it to a
     # second one rather than silently sharing a home.
-    assert "export DEVBOX_PROJECT=test-project" in ctx
+    assert "export DEVBOX_WORKSPACE=test-workspace" in ctx
     # The host's public key, so the driver can authorize it for the agent account
     # it creates. Public by definition, so it belongs in the payload.
     assert "export DEVBOX_SSH_PUBKEY='ssh-ed25519 AAAAtest user@host'" in ctx
     assert "export DEVBOX_JJ_NAME='Alice Example'" in ctx   # shell-quoted (space)
-    assert "export DEVBOX_REPO_MODE=clone" in ctx
+    # The checkouts themselves travel as their own payload file, since there can
+    # be any number of them; the context carries only their guest directories.
+    assert "export DEVBOX_REPO_MODE=" not in ctx
+    assert "export DEVBOX_REPO_DIRS=r" in ctx
+    assert payload["repos"].content == "r\tclone\tr\thttps://x/y\n"
     # Creds ([env]) are NOT in the payload - they're delivered separately as the
     # box's 0600 ~/.config/devbox/env (see run_envvars).
     assert "secret.env" not in payload
     assert "GITHUB_TOKEN" not in ctx
-    for name in devbox.PROJECT_BASE_MODS:
+    for name in devbox.WORKSPACE_BASE_MODS:
         assert f"mods/{name}.sh" in payload
+
+
+def test_render_repos_is_tab_separated_in_config_order(pubkey):
+    # Same shape as the manifest, for the same reason: repo-bootstrap reads it
+    # with plain IFS splitting and has no parser to spare.
+    repos = [_repo("frontend", mode="push"),
+             _repo("protos", mode="clone", url="https://x/protos")]
+    assert devbox.render_repos(repos) == (
+        "frontend\tpush\tfrontend\t\n"
+        "protos\tclone\tprotos\thttps://x/protos\n")
+
+
+def test_render_repos_empty_when_a_workspace_has_none(pubkey):
+    assert devbox.render_repos([]) == ""
+
+
+def test_build_payload_repos_file_lists_every_checkout(isolated_mods, pubkey):
+    ws = _workspace(repos=[_repo("frontend"), _repo("backend")])
+    payload = _payload_map(ws, _global_config(pubkey))
+    assert payload["repos"].content == "frontend\tpush\tfrontend\t\nbackend\tpush\tbackend\t\n"
+    # ... and the context names their guest directories, nothing more.
+    assert "export DEVBOX_REPO_DIRS=frontend,backend" in payload["context.env"].content
+
+
+def test_build_payload_resolves_mods_from_the_markers_own_directory(isolated_mods, tmp_path):
+    # A `devbox.toml` workspace keeps its mods in `<root>/mods`, not under a dot
+    # directory - the marker carries which, so nothing re-derives it.
+    (tmp_path / "mods").mkdir()
+    (tmp_path / "mods" / "rust.sh").write_text("#!/usr/bin/env bash\necho rust\n")
+    ws = _workspace(marker_dir=tmp_path, root_is_repo=False, mods=["rust"])
+    assert devbox.resolve_mod("rust", ws.marker.mods_dir).read_text().endswith("echo rust\n")
 
 
 def test_build_payload_carries_no_creds(isolated_mods, pubkey):
     # Even with a global [env] token set, build_payload never embeds it.
     gc = _global_config(pubkey, env={"GITHUB_TOKEN": "github_pat_x"})
-    payload = _payload_map(_project(env={"SOME_KEY": "v"}), gc)
+    payload = _payload_map(_workspace(env={"SOME_KEY": "v"}), gc)
     assert "secret.env" not in payload
     assert not any("github_pat_x" in pf.content for pf in payload.values())
 
 
-def test_build_payload_appends_project_mods(isolated_mods, pubkey, tmp_path):
+def test_build_payload_appends_workspace_mods(isolated_mods, pubkey, tmp_path):
     (tmp_path / ".devbox" / "mods").mkdir(parents=True)
     (tmp_path / ".devbox" / "mods" / "rust.sh").write_text("#!/usr/bin/env bash\necho rust\n")
-    payload = _payload_map(_project(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
+    payload = _payload_map(_workspace(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
     manifest_names = [line.split("\t")[0]
                       for line in payload["manifest"].content.splitlines()]
-    assert manifest_names == [*devbox.PROJECT_BASE_MODS, "rust"]
+    assert manifest_names == [*devbox.WORKSPACE_BASE_MODS, "rust"]
     assert payload["mods/rust.sh"].content == "#!/usr/bin/env bash\necho rust\n"
 
 
@@ -704,7 +915,7 @@ def test_build_payload_missing_jj_identity_dies(isolated_mods, pubkey, monkeypat
     monkeypatch.setattr(devbox.shutil, "which", lambda name: None)  # no host jj fallback
     gc = _global_config(pubkey, jj_name=None)
     with pytest.raises(SystemExit):
-        devbox.build_payload(_project(), gc, "alice")
+        devbox.build_payload(_workspace(), gc, "alice")
 
 
 def test_build_payload_jj_identity_host_fallback(isolated_mods, pubkey, monkeypatch):
@@ -715,37 +926,37 @@ def test_build_payload_jj_identity_host_fallback(isolated_mods, pubkey, monkeypa
             args, 0, {"user.name": "Host Jj Name", "user.email": "host@example.com"}[args[-1]] + "\n", ""),
     )
     gc = _global_config(pubkey, jj_name=None, jj_email=None)
-    ctx = _payload_map(_project(), gc)["context.env"].content
+    ctx = _payload_map(_workspace(), gc)["context.env"].content
     assert "export DEVBOX_JJ_NAME='Host Jj Name'" in ctx
     assert "export DEVBOX_JJ_EMAIL=host@example.com" in ctx
 
 
-# ---- resolve_env (global + project [env], project overrides per-key) --------
-def test_resolve_env_merges_global_and_project():
+# ---- resolve_env (global + workspace [env], workspace overrides per-key) --------
+def test_resolve_env_merges_global_and_workspace():
     gc = _global_config(devbox.Path("/nonexistent"),
                         env={"GITHUB_TOKEN": devbox.EnvVar("g_tok"),
                              "SHARED": devbox.EnvVar("global")})
-    project = _project(env={"SHARED": devbox.EnvVar("project"),
+    workspace = _workspace(env={"SHARED": devbox.EnvVar("workspace"),
                             "PROJECT_ONLY": devbox.EnvVar("p")})
-    assert devbox.resolve_env(project, gc) == {
+    assert devbox.resolve_env(workspace, gc) == {
         "GITHUB_TOKEN": devbox.EnvVar("g_tok"),     # global-only key kept
-        "SHARED": devbox.EnvVar("project"),         # project overrides per-key
-        "PROJECT_ONLY": devbox.EnvVar("p"),         # project-only key added
+        "SHARED": devbox.EnvVar("workspace"),         # workspace overrides per-key
+        "PROJECT_ONLY": devbox.EnvVar("p"),         # workspace-only key added
     }
 
 
-def test_resolve_env_project_override_replaces_the_owner_too():
+def test_resolve_env_workspace_override_replaces_the_owner_too():
     # The override is per entry, not per field: re-declaring a key hands it to
-    # the account the project names, whatever the global config said.
+    # the account the workspace names, whatever the global config said.
     gc = _global_config(devbox.Path("/nonexistent"),
                         env={"TOKEN": devbox.EnvVar("g_tok", "admin")})
-    project = _project(env={"TOKEN": devbox.EnvVar("p_tok")})
-    assert devbox.resolve_env(project, gc) == {"TOKEN": devbox.EnvVar("p_tok", "agent")}
+    workspace = _workspace(env={"TOKEN": devbox.EnvVar("p_tok")})
+    assert devbox.resolve_env(workspace, gc) == {"TOKEN": devbox.EnvVar("p_tok", "agent")}
 
 
 def test_resolve_env_empty_when_neither_set():
     gc = _global_config(devbox.Path("/nonexistent"))
-    assert devbox.resolve_env(_project(), gc) == {}
+    assert devbox.resolve_env(_workspace(), gc) == {}
 
 
 def test_env_for_owner_slices_by_account():
@@ -756,18 +967,18 @@ def test_env_for_owner_slices_by_account():
 
 
 # ---- provisioning: mods, env, payload ---------------------------------------
-def test_project_playbook_appends_project_mods_after_the_base():
-    assert devbox.project_playbook(_project(mods=["rust", "wasm"])) == \
-        [*devbox.PROJECT_BASE_MODS, "rust", "wasm"]
+def test_workspace_playbook_appends_workspace_mods_after_the_base():
+    assert devbox.workspace_playbook(_workspace(mods=["rust", "wasm"])) == \
+        [*devbox.WORKSPACE_BASE_MODS, "rust", "wasm"]
 
 
-def test_project_playbook_base_only_when_no_project_mods():
-    assert devbox.project_playbook(_project()) == list(devbox.PROJECT_BASE_MODS)
+def test_workspace_playbook_base_only_when_no_workspace_mods():
+    assert devbox.workspace_playbook(_workspace()) == list(devbox.WORKSPACE_BASE_MODS)
 
 
 def test_box_playbook_is_fixed():
     # A box takes no config, so its playbook is not extensible per box; a
-    # project that needs more system state ships a `runas = ["root"]` mod.
+    # workspace that needs more system state ships a `runas = ["root"]` mod.
     assert devbox.box_playbook() == list(devbox.BOX_BASE_MODS)
 
 
@@ -775,37 +986,36 @@ def test_the_two_playbooks_split_the_apt_half_from_the_per_user_half():
     # dotfiles-packages and tree-sitter-cli are box-level mods (root, system-
     # wide); everything else in the base installs into somebody's home.
     assert "dotfiles-packages" in devbox.BOX_BASE_MODS
-    assert "dotfiles-packages" not in devbox.PROJECT_BASE_MODS
+    assert "dotfiles-packages" not in devbox.WORKSPACE_BASE_MODS
     for per_user in ("jj", "claude-code", "repo-bootstrap"):
-        assert per_user in devbox.PROJECT_BASE_MODS
+        assert per_user in devbox.WORKSPACE_BASE_MODS
         assert per_user not in devbox.BOX_BASE_MODS
 
 
 # ---- scope: which `runas` targets run in which playbook --------------------
-@pytest.mark.parametrize("runas,box,project", [
+@pytest.mark.parametrize("runas,box,workspace", [
     # A mod with an agent half: the box runs everything else, the attachment
-    # runs only the agent. This is what stops a second project reinstalling the
+    # runs only the agent. This is what stops a second workspace reinstalling the
     # privileged account's oh-my-zsh.
     (["admin", "agent"], ["admin"], ["agent"]),
     (["agent"], [], ["agent"]),
     # No agent target at all: pure system work, which runs whole in whichever
-    # playbook lists it - that is how a project ships docker onto a shared box.
+    # playbook lists it - that is how a workspace ships docker onto a shared box.
     (["root"], ["root"], ["root"]),
     (["root", "admin"], ["root", "admin"], ["root", "admin"]),
 ])
-def test_scoped_runas(runas, box, project):
+def test_scoped_runas(runas, box, workspace):
     assert devbox.scoped_runas(runas, devbox.SCOPE_BOX) == box
-    assert devbox.scoped_runas(runas, devbox.SCOPE_PROJECT) == project
+    assert devbox.scoped_runas(runas, devbox.SCOPE_WORKSPACE) == workspace
 
 
-def test_resolve_mod_precedence_project_over_global_over_builtin(tmp_path):
-    marker = tmp_path / "proj"
-    proj = marker / ".devbox" / "mods"
+def test_resolve_mod_precedence_workspace_over_global_over_builtin(tmp_path):
+    proj = tmp_path / "ws" / ".devbox" / "mods"
     glob = tmp_path / "global"
     built = tmp_path / "builtin"
     for d in (proj, glob, built):
         d.mkdir(parents=True)
-    # `dotfiles` in all three -> project wins; `shared` in global+builtin ->
+    # `dotfiles` in all three -> workspace wins; `shared` in global+builtin ->
     # global wins; `basic` only built-in -> built-in.
     (proj / "dotfiles.sh").write_text("proj")
     (glob / "dotfiles.sh").write_text("glob")
@@ -814,9 +1024,9 @@ def test_resolve_mod_precedence_project_over_global_over_builtin(tmp_path):
     (built / "shared.sh").write_text("built")
     (built / "basic.sh").write_text("built")
 
-    assert devbox.resolve_mod("dotfiles", marker, glob, built).read_text() == "proj"
-    assert devbox.resolve_mod("shared", marker, glob, built).read_text() == "glob"
-    assert devbox.resolve_mod("basic", marker, glob, built).read_text() == "built"
+    assert devbox.resolve_mod("dotfiles", proj, glob, built).read_text() == "proj"
+    assert devbox.resolve_mod("shared", proj, glob, built).read_text() == "glob"
+    assert devbox.resolve_mod("basic", proj, glob, built).read_text() == "built"
 
 
 def test_resolve_mod_missing_dies(tmp_path):
@@ -913,8 +1123,13 @@ def test_parse_mod_metadata_rejects_a_non_list_value():
 
 
 # ---- validate_playbooks (`requires` ordering across both playbooks) ---------
-def _write_project_mod(marker_dir, name, text):
-    d = marker_dir / ".devbox" / "mods"
+def _mods_dir(root):
+    """The mods directory of a `.devbox/`-marked workspace rooted at `root`."""
+    return root / devbox.REPO_MARKER_DIR / devbox.MODS_SUBDIR
+
+
+def _write_workspace_mod(marker_dir, name, text):
+    d = _mods_dir(marker_dir)
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{name}.sh").write_text(text)
 
@@ -922,48 +1137,48 @@ def _write_project_mod(marker_dir, name, text):
 def test_validate_playbooks_base_passes(isolated_mods):
     # The shipped base playbooks (with their `requires` metadata) are correctly
     # ordered - no dep is missing or listed after its dependent.
-    devbox.validate_playbooks(_project())
+    devbox.validate_playbooks(_workspace())
 
 
-def test_validate_playbooks_project_mod_requiring_base_mod_passes(isolated_mods, tmp_path):
-    _write_project_mod(tmp_path, "rust", _mod('requires = ["jj"]'))
-    devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["rust"]))
+def test_validate_playbooks_workspace_mod_requiring_base_mod_passes(isolated_mods, tmp_path):
+    _write_workspace_mod(tmp_path, "rust", _mod('requires = ["jj"]'))
+    devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["rust"]))
 
 
-def test_validate_playbooks_project_mod_requiring_a_box_mod_passes(isolated_mods, tmp_path):
+def test_validate_playbooks_workspace_mod_requiring_a_box_mod_passes(isolated_mods, tmp_path):
     # A box mod always ran earlier - it belongs to the machine, which exists
     # before any attachment - so it satisfies a dep from the other playbook.
-    _write_project_mod(tmp_path, "rust", _mod('requires = ["dotfiles-packages"]'))
-    devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["rust"]))
+    _write_workspace_mod(tmp_path, "rust", _mod('requires = ["dotfiles-packages"]'))
+    devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["rust"]))
 
 
 def test_validate_playbooks_missing_dep_dies(isolated_mods, tmp_path):
-    _write_project_mod(tmp_path, "rust", _mod('requires = ["nonexistent"]'))
+    _write_workspace_mod(tmp_path, "rust", _mod('requires = ["nonexistent"]'))
     with pytest.raises(SystemExit):
-        devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["rust"]))
+        devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["rust"]))
 
 
 def test_validate_playbooks_dep_listed_after_dies(isolated_mods, tmp_path):
     # `a` requires `b`, but `b` is appended after `a` -> misordered -> die.
-    _write_project_mod(tmp_path, "a", _mod('requires = ["b"]'))
-    _write_project_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
+    _write_workspace_mod(tmp_path, "a", _mod('requires = ["b"]'))
+    _write_workspace_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
     with pytest.raises(SystemExit):
-        devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["a", "b"]))
+        devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["a", "b"]))
 
 
 def test_validate_playbooks_dep_listed_before_passes(isolated_mods, tmp_path):
     # Same two mods, `b` ahead of `a` -> ordering satisfied.
-    _write_project_mod(tmp_path, "a", _mod('requires = ["b"]'))
-    _write_project_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
-    devbox.validate_playbooks(_project(marker_dir=tmp_path, mods=["b", "a"]))
+    _write_workspace_mod(tmp_path, "a", _mod('requires = ["b"]'))
+    _write_workspace_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
+    devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["b", "a"]))
 
 
 def test_build_payload_validates_mods(isolated_mods, pubkey, tmp_path):
     # build_payload is the choke point: a bad `requires` fails there (so a
     # selective `devbox sync --mods=a` still validates the full playbook).
-    _write_project_mod(tmp_path, "rust", _mod('requires = ["nonexistent"]'))
+    _write_workspace_mod(tmp_path, "rust", _mod('requires = ["nonexistent"]'))
     with pytest.raises(SystemExit):
-        devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]),
+        devbox.build_payload(_workspace(marker_dir=tmp_path, mods=["rust"]),
                              _global_config(pubkey), "alice")
 
 
@@ -971,31 +1186,31 @@ def test_build_payload_validates_mods(isolated_mods, pubkey, tmp_path):
 def test_load_mod_specs_runas_defaults_to_the_agent(isolated_mods, tmp_path):
     # The default target is the unprivileged account, because that is what a mod
     # almost always configures: a user's home directory.
-    _write_project_mod(tmp_path, "rust", "#!/bin/bash\nset -e\n")
-    spec, = devbox.load_mod_specs(["rust"], tmp_path)
+    _write_workspace_mod(tmp_path, "rust", "#!/bin/bash\nset -e\n")
+    spec, = devbox.load_mod_specs(["rust"], _mods_dir(tmp_path))
     assert spec.runas == ["agent"]
     assert spec.requires == [] and spec.packages == []
 
 
 def test_load_mod_specs_carries_the_declared_metadata(isolated_mods, tmp_path):
-    _write_project_mod(tmp_path, "rust", _mod(
+    _write_workspace_mod(tmp_path, "rust", _mod(
         'requires = ["jj"]', 'runas = ["admin", "agent"]', 'packages = ["clang"]'))
-    spec, = devbox.load_mod_specs(["rust"], tmp_path)
+    spec, = devbox.load_mod_specs(["rust"], _mods_dir(tmp_path))
     assert (spec.requires, spec.runas, spec.packages) == \
         (["jj"], ["admin", "agent"], ["clang"])
 
 
 def test_load_mod_specs_rejects_an_unknown_runas_target(isolated_mods, tmp_path):
-    _write_project_mod(tmp_path, "rust", _mod('runas = ["nobody-special"]'))
+    _write_workspace_mod(tmp_path, "rust", _mod('runas = ["nobody-special"]'))
     with pytest.raises(SystemExit):
-        devbox.load_mod_specs(["rust"], tmp_path)
+        devbox.load_mod_specs(["rust"], _mods_dir(tmp_path))
 
 
 def test_build_payload_validates_runas(isolated_mods, pubkey, tmp_path):
     # Same choke point as `requires`: a bad target fails before any boot/SSH.
-    _write_project_mod(tmp_path, "rust", _mod('runas = ["wheel"]'))
+    _write_workspace_mod(tmp_path, "rust", _mod('runas = ["wheel"]'))
     with pytest.raises(SystemExit):
-        devbox.build_payload(_project(marker_dir=tmp_path, mods=["rust"]),
+        devbox.build_payload(_workspace(marker_dir=tmp_path, mods=["rust"]),
                              _global_config(pubkey), "alice")
 
 
@@ -1012,7 +1227,7 @@ def _manifest_specs():
 def test_render_manifest_is_tab_separated_with_comma_joined_lists():
     # The driver parses this with plain IFS splitting - it has no YAML/JSON
     # parser and should not grow one.
-    assert devbox.render_manifest(_manifest_specs(), devbox.SCOPE_PROJECT) == (
+    assert devbox.render_manifest(_manifest_specs(), devbox.SCOPE_WORKSPACE) == (
         "jj\tagent\t\n"
         "dotfiles\tagent\tjq,unzip\n"
     )
@@ -1029,7 +1244,7 @@ def test_render_manifest_narrows_the_runas_column_to_the_scope():
 def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
     # Every shipped mod's `# /// mod` block parses, and its `runas` targets are
     # known. Guards the metadata itself, which nothing else type-checks.
-    names = [*devbox.box_playbook(), *devbox.project_playbook(_project())]
+    names = [*devbox.box_playbook(), *devbox.workspace_playbook(_workspace())]
     specs = devbox.load_mod_specs(names, None)
     assert [s.name for s in specs] == names
     for spec in specs:
@@ -1041,7 +1256,7 @@ def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
 def test_shipped_mods_never_call_sudo(isolated_mods):
     # A mod body runs as an account without sudo. `sudo` in a mod is a bug now:
     # apt goes through `packages`, and real privilege through `runas = ["root"]`.
-    names = [*devbox.box_playbook(), *devbox.project_playbook(_project())]
+    names = [*devbox.box_playbook(), *devbox.workspace_playbook(_workspace())]
     for spec in devbox.load_mod_specs(names, None):
         for line in spec.path.read_text().splitlines():
             stripped = line.strip()
@@ -1050,21 +1265,21 @@ def test_shipped_mods_never_call_sudo(isolated_mods):
             assert "sudo " not in stripped, f"{spec.name}: {stripped}"
 
 
-def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_projects(isolated_mods):
+def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_workspaces(isolated_mods):
     # The one mod that lives in both playbooks, and the reason scoping exists:
     # the privileged user gets the dotfiles once per box (so `devbox box ssh`,
     # the debugging shell, is usable), and each attachment gets them in its own
     # account - without redoing the admin's on every attach.
     box = devbox.load_mod_specs(devbox.box_playbook(), None)
-    project = devbox.load_mod_specs(devbox.project_playbook(_project()), None)
+    workspace = devbox.load_mod_specs(devbox.workspace_playbook(_workspace()), None)
     assert devbox.render_manifest(box, devbox.SCOPE_BOX).splitlines() == [
         "dotfiles-packages\troot\t",   # the apt half: once, as root, per box
         "tree-sitter-cli\troot\tunzip",
         "dotfiles\tadmin\t",
         "vim\tadmin\t",
     ]
-    by_name = {s.name: s for s in project}
-    assert devbox.scoped_runas(by_name["dotfiles"].runas, devbox.SCOPE_PROJECT) == ["agent"]
+    by_name = {s.name: s for s in workspace}
+    assert devbox.scoped_runas(by_name["dotfiles"].runas, devbox.SCOPE_WORKSPACE) == ["agent"]
     assert "dotfiles-packages" in by_name["dotfiles"].requires
     assert "tree-sitter-cli" in by_name["dotfiles"].requires
 
@@ -1074,22 +1289,22 @@ def test_render_env_file_shell_quotes_values():
     assert out == "export A=plain\nexport B='has space'\nexport C='a'\"'\"'b'\n"
 
 
-def test_resolve_project_parses_mods(tmp_path, global_config):
+def test_resolve_workspace_parses_mods(tmp_path, global_config):
     _write_marker(tmp_path, 'mods = ["rust", "wasm-tools"]\n')
-    project = devbox.resolve_project(tmp_path, global_config)
-    assert project.mods == ["rust", "wasm-tools"]
-    assert project.marker_dir == tmp_path.resolve()
+    workspace = devbox.resolve_workspace(tmp_path, global_config)
+    assert workspace.mods == ["rust", "wasm-tools"]
+    assert workspace.marker.root == tmp_path.resolve()
 
 
-def test_resolve_project_mods_defaults_empty(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "p"\n')
-    assert devbox.resolve_project(tmp_path, global_config).mods == []
+def test_resolve_workspace_mods_defaults_empty(tmp_path, global_config):
+    _write_marker(tmp_path, 'workspace = "p"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).mods == []
 
 
-def test_resolve_project_mods_must_be_string_list(tmp_path, global_config):
+def test_resolve_workspace_mods_must_be_string_list(tmp_path, global_config):
     _write_marker(tmp_path, 'mods = [1, 2]\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
 def test_build_tarball_roundtrips_payload():
@@ -1115,24 +1330,24 @@ def test_build_tarball_is_deterministic():
 
 
 # ---- instance identity / resolution ----------------------------------------
-def test_resolve_instance_defaults_to_the_project_name():
-    # A project that never mentioned a box owns one named after itself.
+def test_resolve_instance_defaults_to_the_workspace_name():
+    # A workspace that never mentioned a box owns one named after itself.
     args = argparse.Namespace(box=None)
-    assert devbox.resolve_instance(args, _project()) == "test-project"
+    assert devbox.resolve_instance(args, _workspace()) == "test-workspace"
 
 
-def test_resolve_instance_uses_the_projects_box_key():
+def test_resolve_instance_uses_the_workspaces_box_key():
     args = argparse.Namespace(box=None)
-    assert devbox.resolve_instance(args, _project(box="ec2-shared")) == "ec2-shared"
+    assert devbox.resolve_instance(args, _workspace(box="ec2-shared")) == "ec2-shared"
 
 
 def test_resolve_instance_flag_overrides_the_box_key():
     args = argparse.Namespace(box="ec2-foo-gpu")
-    assert devbox.resolve_instance(args, _project(box="ec2-shared")) == "ec2-foo-gpu"
+    assert devbox.resolve_instance(args, _workspace(box="ec2-shared")) == "ec2-foo-gpu"
 
 
 def test_parse_instance_name_bare_is_libvirt():
-    # No known-provider prefix -> libvirt (the project's default), name unchanged.
+    # No known-provider prefix -> libvirt (the workspace's default), name unchanged.
     assert devbox.parse_instance_name("binius-dev") == ("libvirt", "binius-dev")
 
 
@@ -1176,18 +1391,18 @@ def test_resolve_target_routes_by_box_name(monkeypatch):
     monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: f"prov:{name}")
     gc = _global_config(devbox.Path("/nonexistent"))
     args = argparse.Namespace(box="ec2-binius-arm")
-    assert devbox.cli._resolve_target(args, _project(), gc) == (
+    assert devbox.cli._resolve_target(args, _workspace(), gc) == (
         "ec2-binius-arm", "ec2", "prov:ec2")
     args = argparse.Namespace(box=None)  # bare default -> libvirt
-    assert devbox.cli._resolve_target(args, _project(), gc) == (
-        "test-project", "libvirt", "prov:libvirt")
+    assert devbox.cli._resolve_target(args, _workspace(), gc) == (
+        "test-workspace", "libvirt", "prov:libvirt")
 
 
 def _create_args(box=None, adopt=False, **kw):
     """A `devbox create` argv namespace: the box-create flags plus its own."""
     args = _box_args(name=None, **kw)
     args.box = box
-    args.project_dir = None
+    args.workspace_dir = None
     args.adopt = adopt
     return args
 
@@ -1250,24 +1465,24 @@ def test_cmd_box_create_on_an_existing_box_is_a_no_op(monkeypatch, pubkey, capsy
     assert provider.seen == {}
 
 
-def test_cmd_create_boots_the_projects_own_box_when_it_is_missing(monkeypatch, pubkey):
-    # The zero-config path: a project that never named a box owns one called
+def test_cmd_create_boots_the_workspaces_own_box_when_it_is_missing(monkeypatch, pubkey):
+    # The zero-config path: a workspace that never named a box owns one called
     # after itself, and `devbox create` boots it on the global [defaults].
     provider = _FakeCreateProvider()
     gc = _patch_create(monkeypatch, provider, pubkey)
     with pytest.raises(_CreateStop):
-        devbox.cli.cmd_create(_create_args(), gc, _project(project="myproj"))
+        devbox.cli.cmd_create(_create_args(), gc, _workspace(workspace="myproj"))
     assert provider.seen["spec"].name == "myproj"
 
 
 def test_cmd_create_refuses_to_invent_a_missing_shared_box(monkeypatch, pubkey):
-    # A project pointing at a box that isn't there is a different matter:
+    # A workspace pointing at a box that isn't there is a different matter:
     # guessing the shape of somebody else's shared machine is worse than saying
     # so, since hardware can't be changed afterwards.
     provider = _FakeCreateProvider()
     gc = _patch_create(monkeypatch, provider, pubkey)
     with pytest.raises(SystemExit):
-        devbox.cli.cmd_create(_create_args(), gc, _project(box="ec2-shared"))
+        devbox.cli.cmd_create(_create_args(), gc, _workspace(box="ec2-shared"))
     assert provider.seen == {}
 
 
@@ -1276,7 +1491,7 @@ def test_cmd_create_boots_a_named_box_when_given_box_flags(monkeypatch, pubkey):
     provider = _FakeCreateProvider()
     gc = _patch_create(monkeypatch, provider, pubkey)
     with pytest.raises(_CreateStop):
-        devbox.cli.cmd_create(_create_args(vcpus=8), gc, _project(box="shared"))
+        devbox.cli.cmd_create(_create_args(vcpus=8), gc, _workspace(box="shared"))
     assert provider.seen["spec"].name == "shared"
     assert provider.seen["spec"].vcpus == 8
 
@@ -1288,7 +1503,7 @@ def test_cmd_create_refuses_an_agent_user_that_is_the_boxs_admin(monkeypatch, pu
     gc = _patch_create(monkeypatch, provider, pubkey)
     monkeypatch.setattr(devbox.cli, "_admin_user", lambda provider, name: "alice")
     with pytest.raises(SystemExit):
-        devbox.cli.cmd_create(_create_args(), gc, _project(agent_user="alice"))
+        devbox.cli.cmd_create(_create_args(), gc, _workspace(agent_user="alice"))
 
 
 # ---- libvirt <metadata> stamp -----------------------------------------------
@@ -1478,7 +1693,7 @@ def _herdr_env(monkeypatch, execs, which=lambda p: f"/usr/bin/{p}"):
     """Stub everything cmd_herdr touches outside the process: target resolution,
     the provider address, the alias refresh, `which`, and the exec."""
     monkeypatch.setattr(devbox.cli, "_resolve_target",
-                        lambda args, project, gc: ("box1", None, _FakeAddr()))
+                        lambda args, workspace, gc: ("box1", None, _FakeAddr()))
     monkeypatch.setattr(devbox.cli, "_admin_user", lambda provider, name: "admin")
     monkeypatch.setattr(devbox.cli, "_refresh_ssh_aliases",
                         lambda *a, **kw: ("devbox-proj", "devbox-box1-admin"))
@@ -1527,7 +1742,7 @@ def test_cmd_herdr_dies_without_an_address(monkeypatch):
     execs = []
     _herdr_env(monkeypatch, execs)
     monkeypatch.setattr(devbox.cli, "_resolve_target",
-                        lambda args, project, gc: ("box1", None, NoAddr()))
+                        lambda args, workspace, gc: ("box1", None, NoAddr()))
     with pytest.raises(SystemExit):
         devbox.cli.cmd_herdr(argparse.Namespace(herdr_args=[]), None, None)
     assert execs == []
@@ -1581,89 +1796,162 @@ def test_ensure_jj_remote_not_a_repo_dies(monkeypatch, tmp_path):
         devbox.cli._ensure_jj_remote(tmp_path, "devbox-foo", "ssh://x")
 
 
-def test_cmd_jj_fetch_without_repo_dies():
+def test_cmd_jj_fetch_without_repos_dies():
     import argparse
     gc = _global_config(devbox.Path("/nonexistent"))
+    args = argparse.Namespace(name=None, workspace_dir=None, repo=None)
     with pytest.raises(SystemExit):
-        devbox.cli.cmd_jj_fetch(argparse.Namespace(name=None, project_dir=None), gc, _project(mode="none"))
+        devbox.cli.cmd_jj_fetch(args, gc, _workspace(mode="none"))
+
+
+# ---- _select_repo: which checkout a repo-scoped command acts on -------------
+def _multi(tmp_path):
+    return _workspace(marker_dir=tmp_path, root_is_repo=False, repos=[
+        _repo("frontend", root=tmp_path), _repo("backend", root=tmp_path)])
+
+
+def test_select_repo_by_name(tmp_path):
+    repo = devbox.cli._select_repo(_multi(tmp_path), "backend", tmp_path)
+    assert repo.name == "backend"
+
+
+def test_select_repo_by_name_unknown_dies(tmp_path):
+    with pytest.raises(SystemExit):
+        devbox.cli._select_repo(_multi(tmp_path), "nope", tmp_path)
+
+
+def test_select_repo_from_the_cwd(tmp_path):
+    # The cwd decides, the way `jj` itself works: from anywhere inside a
+    # checkout, that checkout is the one meant.
+    deep = tmp_path / "frontend" / "src" / "components"
+    deep.mkdir(parents=True)
+    assert devbox.cli._select_repo(_multi(tmp_path), None, deep).name == "frontend"
+
+
+def test_select_repo_outside_any_checkout_dies(tmp_path):
+    # Several to choose from and nothing to choose by: better to ask than guess.
+    (tmp_path / "elsewhere").mkdir()
+    with pytest.raises(SystemExit):
+        devbox.cli._select_repo(_multi(tmp_path), None, tmp_path / "elsewhere")
+
+
+def test_select_repo_falls_back_to_a_lone_repo(tmp_path):
+    # One checkout is never ambiguous, so `devbox jj fetch` still works from
+    # anywhere in the workspace - which is how the single-repo case behaves today.
+    workspace = _workspace(marker_dir=tmp_path, repos=[_repo("only", root=tmp_path)])
+    assert devbox.cli._select_repo(workspace, None, tmp_path).name == "only"
 
 
 # ---- host->box sync ---------------------------------------------------------
-def test_resolve_project_parses_sync_entries(tmp_path, global_config):
+def test_resolve_workspace_parses_sync_entries(tmp_path, global_config):
     _write_marker(tmp_path, (
         '[[sync]]\n'
         'src = "$HOME/.claude/skills"\n'
         'include = ["jujutsu"]\n\n'
-        '[repo]\n'
+        '[[repos]]\n'
+        'name = "binius64"\n'
         'mode = "clone"\n'
-        'dir = "binius64"\n'
         'url = "https://github.com/x/binius64"\n\n'
-        '[[repo.sync]]\n'
+        '[[repos.sync]]\n'
         'src = ".claude/skills"\n'
     ))
-    entries = devbox.resolve_project(tmp_path, global_config).sync
+    entries = devbox.resolve_workspace(tmp_path, global_config).sync
     assert entries == [
         devbox.SyncEntry(src="$HOME/.claude/skills", dst="$HOME/.claude/skills",
-                         include=["jujutsu"], repo_relative=False),
+                         include=["jujutsu"], anchor=devbox.ANCHOR_HOME),
         devbox.SyncEntry(src=".claude/skills", dst=".claude/skills",
-                         include=[], repo_relative=True),
+                         include=[], anchor=devbox.ANCHOR_REPO, repo="binius64"),
     ]
 
 
-def test_resolve_project_sync_defaults_empty(tmp_path, global_config):
-    _write_marker(tmp_path, 'project = "p"\n')
-    assert devbox.resolve_project(tmp_path, global_config).sync == []
+def test_resolve_workspace_repo_sync_names_its_own_repo(tmp_path, global_config):
+    # Each entry is nested under the repo it anchors at, so it never has to name
+    # it - and two repos' rules cannot be confused for each other.
+    _write_visible_marker(tmp_path, (
+        '[[repos]]\nname = "frontend"\nmode = "push"\n'
+        '[[repos.sync]]\nsrc = ".claude/skills"\n\n'
+        '[[repos]]\nname = "backend"\nmode = "push"\n'
+        '[[repos.sync]]\nsrc = ".env.local"\n'
+    ))
+    entries = devbox.resolve_workspace(tmp_path, global_config).sync
+    assert [(e.repo, e.src) for e in entries] == [
+        ("frontend", ".claude/skills"), ("backend", ".env.local")]
 
 
-def test_resolve_project_repo_sync_without_repo_dies(tmp_path, global_config):
-    _write_marker(tmp_path, '[[repo.sync]]\nsrc = ".claude/skills"\n')  # no [repo]
+def test_resolve_workspace_workspace_relative_sync(tmp_path, global_config):
+    # Under a visible marker the root holds the repos, so a bare-relative path
+    # means the same child name on both sides.
+    _write_visible_marker(tmp_path, '[[sync]]\nsrc = "notes"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).sync == [
+        devbox.SyncEntry(src="notes", dst="notes", include=[],
+                         anchor=devbox.ANCHOR_WORKSPACE)]
+
+
+def test_resolve_workspace_relative_sync_under_a_repo_marker_dies(tmp_path, global_config):
+    # The root is a repo here, so the host root and the agent's home are not the
+    # same place; anchoring across them would silently mean two things.
+    _write_marker(tmp_path, '[[sync]]\nsrc = "notes"\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_sync_relative_path_dies(tmp_path, global_config):
+def test_resolve_workspace_sync_defaults_empty(tmp_path, global_config):
+    _write_marker(tmp_path, 'workspace = "p"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).sync == []
+
+
+def test_resolve_workspace_repo_sync_without_a_repo_entry_dies(tmp_path, global_config):
+    # `[[repos.sync]]` is nested under a `[[repos]]` entry, so writing one alone
+    # declares a repo with nothing but sync rules - caught as a repo missing its
+    # `mode`, which is what it is.
+    _write_marker(tmp_path, '[[repos.sync]]\nsrc = ".claude/skills"\n')
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+
+
+def test_resolve_workspace_sync_relative_path_dies(tmp_path, global_config):
     # [[sync]] paths must be $HOME/~/absolute-anchored, not bare-relative.
     _write_marker(tmp_path, '[[sync]]\nsrc = "relative/skills"\n')
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def test_resolve_project_repo_sync_anchored_path_dies(tmp_path, global_config):
+def test_resolve_workspace_repo_sync_anchored_path_dies(tmp_path, global_config):
     _write_marker(tmp_path, (
         '[repo]\nmode = "push"\ndir = "x"\n\n'
         '[[repo.sync]]\nsrc = "$HOME/skills"\n'  # repo.sync must be repo-relative
     ))
     with pytest.raises(SystemExit):
-        devbox.resolve_project(tmp_path, global_config)
+        devbox.resolve_workspace(tmp_path, global_config)
 
 
-def _sync(src, dst=None, include=None, repo_relative=False):
+def _sync(src, dst=None, include=None, anchor=devbox.ANCHOR_HOME, repo=""):
     return devbox.SyncEntry(src=src, dst=dst if dst is not None else src,
-                            include=include or [], repo_relative=repo_relative)
+                            include=include or [], anchor=anchor, repo=repo)
 
 
-def test_resolve_project_prepends_global_sync_defaults(tmp_path, global_config):
-    # The global [[sync]] defaults apply to every project, ahead of that
-    # project's own entries - the same order mods use for the built-in base.
+def test_resolve_workspace_prepends_global_sync_defaults(tmp_path, global_config):
+    # The global [[sync]] defaults apply to every workspace, ahead of that
+    # workspace's own entries - the same order mods use for the built-in base.
     global_config.sync = [_sync("$HOME/.claude/skills")]
     _write_marker(tmp_path, '[[sync]]\nsrc = "$HOME/.ssh/config"\n')
-    assert devbox.resolve_project(tmp_path, global_config).sync == [
+    assert devbox.resolve_workspace(tmp_path, global_config).sync == [
         _sync("$HOME/.claude/skills"),
         _sync("$HOME/.ssh/config"),
     ]
 
 
-def test_resolve_project_with_no_own_sync_keeps_only_global_defaults(tmp_path, global_config):
+def test_resolve_workspace_with_no_own_sync_keeps_only_global_defaults(tmp_path, global_config):
     global_config.sync = [_sync("$HOME/.claude/skills")]
-    _write_marker(tmp_path, 'project = "p"\n')
-    assert devbox.resolve_project(tmp_path, global_config).sync == [
+    _write_marker(tmp_path, 'workspace = "p"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).sync == [
         _sync("$HOME/.claude/skills"),
     ]
 
 
 def test_plan_sync_home_expansion_per_side(tmp_path):
     (tmp_path / ".claude" / "skills").mkdir(parents=True)
-    proj = _project(sync=[_sync("$HOME/.claude/skills")])
+    proj = _workspace(sync=[_sync("$HOME/.claude/skills")])
     jobs = devbox.plan_sync(proj, host_home=str(tmp_path), guest_home="/home/alice")
     assert len(jobs) == 1
     assert jobs[0].host_path == f"{tmp_path}/.claude/skills"     # host home
@@ -1674,38 +1962,66 @@ def test_plan_sync_home_expansion_per_side(tmp_path):
 def test_plan_sync_include_expands_to_per_child_units(tmp_path):
     skills = tmp_path / "skills"
     (skills / "jujutsu").mkdir(parents=True)
-    proj = _project(sync=[_sync("$HOME/skills", include=["jujutsu"])])
+    proj = _workspace(sync=[_sync("$HOME/skills", include=["jujutsu"])])
     jobs = devbox.plan_sync(proj, host_home=str(tmp_path), guest_home="/home/alice")
     assert len(jobs) == 1
     assert jobs[0].host_path == f"{skills}/jujutsu"
     assert jobs[0].guest_path == "/home/alice/skills/jujutsu"
 
 
-def test_plan_sync_repo_relative_anchoring(tmp_path):
-    (tmp_path / ".claude" / "skills").mkdir(parents=True)
-    proj = _project(mode="clone", dir="binius64", url="https://x/y", marker_dir=tmp_path,
-                    sync=[_sync(".claude/skills", repo_relative=True)])
-    jobs = devbox.plan_sync(proj, host_home="/host", guest_home="/home/alice")
-    assert jobs[0].host_path == f"{tmp_path}/.claude/skills"                 # marker dir
-    assert jobs[0].guest_path == "/home/alice/binius64/.claude/skills"       # ~/<repo.dir>
+def test_plan_sync_repo_anchoring(tmp_path):
+    # A repo-anchored rule starts at that checkout on each side: its host path,
+    # and ~/<dir> in the agent's home.
+    (tmp_path / "binius64" / ".claude" / "skills").mkdir(parents=True)
+    ws = _workspace(marker_dir=tmp_path, root_is_repo=False,
+                    repos=[_repo("binius64", mode="clone", url="https://x/y",
+                                 root=tmp_path)],
+                    sync=[_sync(".claude/skills", anchor=devbox.ANCHOR_REPO,
+                                repo="binius64")])
+    jobs = devbox.plan_sync(ws, host_home="/host", guest_home="/home/alice")
+    assert jobs[0].host_path == f"{tmp_path}/binius64/.claude/skills"
+    assert jobs[0].guest_path == "/home/alice/binius64/.claude/skills"
+
+
+def test_plan_sync_repo_anchoring_picks_the_named_repo(tmp_path):
+    # Two checkouts in one account: each rule has to land in its own tree.
+    for name in ("frontend", "backend"):
+        (tmp_path / name / ".claude").mkdir(parents=True)
+    ws = _workspace(marker_dir=tmp_path, root_is_repo=False,
+                    repos=[_repo("frontend", root=tmp_path), _repo("backend", root=tmp_path)],
+                    sync=[_sync(".claude", anchor=devbox.ANCHOR_REPO, repo="backend")])
+    jobs = devbox.plan_sync(ws, host_home="/host", guest_home="/home/alice")
+    assert jobs[0].host_path == f"{tmp_path}/backend/.claude"
+    assert jobs[0].guest_path == "/home/alice/backend/.claude"
+
+
+def test_plan_sync_workspace_anchoring(tmp_path):
+    # The workspace root against the agent's home - the shape that lines up only
+    # when the root holds the repos.
+    (tmp_path / "notes").mkdir()
+    ws = _workspace(marker_dir=tmp_path, root_is_repo=False,
+                    sync=[_sync("notes", anchor=devbox.ANCHOR_WORKSPACE)])
+    jobs = devbox.plan_sync(ws, host_home="/host", guest_home="/home/alice")
+    assert jobs[0].host_path == f"{tmp_path}/notes"
+    assert jobs[0].guest_path == "/home/alice/notes"
 
 
 def test_plan_sync_file_src_is_not_mirrored(tmp_path):
     (tmp_path / "f.txt").write_text("x")
-    proj = _project(sync=[_sync("$HOME/f.txt")])
+    proj = _workspace(sync=[_sync("$HOME/f.txt")])
     jobs = devbox.plan_sync(proj, host_home=str(tmp_path), guest_home="/home/alice")
     assert jobs[0].mirror is False
 
 
 def test_plan_sync_missing_src_dies(tmp_path):
-    proj = _project(sync=[_sync("$HOME/nope")])
+    proj = _workspace(sync=[_sync("$HOME/nope")])
     with pytest.raises(SystemExit):
         devbox.plan_sync(proj, host_home=str(tmp_path), guest_home="/home/alice")
 
 
 def test_run_sync_rsync_argv_mirror_dir(tmp_path, monkeypatch):
     (tmp_path / "skills").mkdir()
-    proj = _project(sync=[_sync("$HOME/skills")])
+    proj = _workspace(sync=[_sync("$HOME/skills")])
     calls = []
     monkeypatch.setattr(devbox.subprocess, "run",
                         lambda argv, **k: calls.append(argv) or _cp(argv, 0))
@@ -1717,7 +2033,7 @@ def test_run_sync_rsync_argv_mirror_dir(tmp_path, monkeypatch):
 
 def test_run_sync_rsync_argv_file(tmp_path, monkeypatch):
     (tmp_path / "f.txt").write_text("x")
-    proj = _project(sync=[_sync("$HOME/f.txt", dst="$HOME/g.txt")])
+    proj = _workspace(sync=[_sync("$HOME/f.txt", dst="$HOME/g.txt")])
     calls = []
     monkeypatch.setattr(devbox.subprocess, "run",
                         lambda argv, **k: calls.append(argv) or _cp(argv, 0))
@@ -1729,7 +2045,7 @@ def test_run_sync_rsync_argv_file(tmp_path, monkeypatch):
 
 def test_run_sync_dies_on_rsync_failure(tmp_path, monkeypatch):
     (tmp_path / "skills").mkdir()
-    proj = _project(sync=[_sync("$HOME/skills")])
+    proj = _workspace(sync=[_sync("$HOME/skills")])
     monkeypatch.setattr(devbox.subprocess, "run", lambda argv, **k: _cp(argv, 23))
     with pytest.raises(SystemExit):
         devbox.run_sync(proj, "devbox-foo", host_home=str(tmp_path), guest_home="/home/alice")
@@ -1831,7 +2147,7 @@ def test_run_driver_tees_only_when_asked(monkeypatch):
 
 
 def test_provision_log_is_per_attachment():
-    # Two projects reconverging on one box must not overwrite each other's log.
+    # Two workspaces reconverging on one box must not overwrite each other's log.
     assert devbox.provision_log("botty") == "provision-botty.log"
     assert devbox.provision_log("webbot") == "provision-webbot.log"
     assert devbox.provision_log() == "provision.log"      # the box's own
@@ -1851,19 +2167,19 @@ def test_run_driver_quotes_mod_names(monkeypatch):
 
 
 # ---- SSH aliases (one per attachment) ---------------------------------------
-def test_alias_names_collapse_when_the_project_owns_the_box():
-    # The one-project case keeps the exact alias every existing jj remote, doc
-    # and finger already names - the box and the project are the same word.
-    assert devbox.cli._alias_names("binius", _project(project="binius")) == \
+def test_alias_names_collapse_when_the_workspace_owns_the_box():
+    # The one-workspace case keeps the exact alias every existing jj remote, doc
+    # and finger already names - the box and the workspace are the same word.
+    assert devbox.cli._alias_names("binius", _workspace(workspace="binius")) == \
         ("devbox-binius", "devbox-binius-admin")
 
 
 def test_alias_names_are_per_attachment_on_a_shared_box():
-    assert devbox.cli._alias_names("dev", _project(project="binius", box="dev")) == \
+    assert devbox.cli._alias_names("dev", _workspace(workspace="binius", box="dev")) == \
         ("devbox-dev-binius", "devbox-dev-admin")
 
 
-def test_alias_names_without_a_project_are_admin_only():
+def test_alias_names_without_a_workspace_are_admin_only():
     assert devbox.cli._alias_names("dev") == (None, "devbox-dev-admin")
 
 
@@ -1877,7 +2193,7 @@ def ssh_dir(tmp_path, monkeypatch):
 
 def test_refresh_ssh_aliases_writes_one_stanza_per_file(ssh_dir):
     aliases = devbox.cli._refresh_ssh_aliases(
-        "binius", "10.0.0.5", "alice", _project(project="binius"))
+        "binius", "10.0.0.5", "alice", _workspace(workspace="binius"))
     assert aliases == ("devbox-binius", "devbox-binius-admin")
 
     agent = (ssh_dir / "binius.binius.conf").read_text()
@@ -1891,10 +2207,10 @@ def test_refresh_ssh_aliases_writes_one_stanza_per_file(ssh_dir):
 
 def test_refresh_ssh_aliases_keeps_attachments_independent(ssh_dir):
     # The regression that makes sharing a box safe: one file per box would have
-    # each project's refresh overwrite the last one's account, pointing you at
+    # each workspace's refresh overwrite the last one's account, pointing you at
     # the wrong home without ever erroring.
-    first = _project(project="binius", box="dev", agent_user="biniusbot")
-    second = _project(project="web", box="dev", agent_user="webbot")
+    first = _workspace(workspace="binius", box="dev", agent_user="biniusbot")
+    second = _workspace(workspace="web", box="dev", agent_user="webbot")
     devbox.cli._refresh_ssh_aliases("dev", "10.0.0.5", "alice", first)
     before = (ssh_dir / "dev.binius.conf").read_text()
     devbox.cli._refresh_ssh_aliases("dev", "10.0.0.5", "alice", second)
@@ -1910,9 +2226,9 @@ def test_refresh_ssh_aliases_keeps_attachments_independent(ssh_dir):
 def test_refresh_ssh_aliases_rewrites_cleanly_on_a_new_address(ssh_dir):
     # Written whole each time, so a re-created box can't leave a stale duplicate
     # stanza behind.
-    project = _project(project="binius")
-    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", "alice", project)
-    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.9", "alice", project)
+    workspace = _workspace(workspace="binius")
+    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", "alice", workspace)
+    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.9", "alice", workspace)
     conf = (ssh_dir / "binius.binius.conf").read_text()
     assert conf.count("Host devbox-binius\n") == 1
     assert "10.0.0.5" not in conf
@@ -1920,7 +2236,7 @@ def test_refresh_ssh_aliases_rewrites_cleanly_on_a_new_address(ssh_dir):
 
 def test_truncate_known_hosts_is_scoped_to_one_box(ssh_dir):
     # Creating box B must not invalidate box A's pinned key - which, on a shared
-    # box, would be every project attached to it.
+    # box, would be every workspace attached to it.
     devbox.cli._refresh_ssh_aliases("a", "10.0.0.5", "alice")
     devbox.config.known_hosts_path("a").write_text("10.0.0.5 ssh-ed25519 AAAA\n")
     devbox.cli.truncate_known_hosts("b")
@@ -1929,17 +2245,17 @@ def test_truncate_known_hosts_is_scoped_to_one_box(ssh_dir):
 
 
 def test_plan_sync_defaults_the_guest_home_to_the_agent(tmp_path):
-    # Synced files are agent skills and project config: they belong to the
+    # Synced files are agent skills and workspace config: they belong to the
     # account that does the work, not the privileged one.
     (tmp_path / "skills").mkdir()
-    proj = _project(sync=[_sync("$HOME/skills")], agent_user="botty")
+    proj = _workspace(sync=[_sync("$HOME/skills")], agent_user="botty")
     jobs = devbox.plan_sync(proj, host_home=str(tmp_path))
     assert jobs[0].guest_path == "/home/botty/skills"
 
 
 def _sync_args(envvars=False, files=False, mods=None):
     import argparse
-    return argparse.Namespace(name=None, project_dir=None, envvars=envvars, files=files, mods=mods)
+    return argparse.Namespace(name=None, workspace_dir=None, envvars=envvars, files=files, mods=mods)
 
 
 def test_split_mods_parsing():
@@ -1951,13 +2267,13 @@ def test_split_mods_parsing():
 def test_cmd_sync_requires_a_flag():
     gc = _global_config(devbox.Path("/nonexistent"))
     with pytest.raises(SystemExit):  # none of --envvars/--mods/--files
-        devbox.cli.cmd_sync(_sync_args(), gc, _project())
+        devbox.cli.cmd_sync(_sync_args(), gc, _workspace())
 
 
 def test_cmd_sync_files_without_entries_dies():
     gc = _global_config(devbox.Path("/nonexistent"))
-    with pytest.raises(SystemExit):  # --files but the project has no [[sync]]
-        devbox.cli.cmd_sync(_sync_args(files=True), gc, _project())
+    with pytest.raises(SystemExit):  # --files but the workspace has no [[sync]]
+        devbox.cli.cmd_sync(_sync_args(files=True), gc, _workspace())
 
 
 # ---- AWS creds / EC2 config --------------------------------------------------
@@ -2265,7 +2581,7 @@ def test_ec2_create_name_tag_strips_provider_prefix():
 def test_ec2_create_spot_adds_market_options():
     client = _FakeEC2()
     provider = devbox.Ec2Provider(_ec2_gc(spot=False), client=client)
-    provider.create(_ec2_spec(spot=True))  # project overrides global default
+    provider.create(_ec2_spec(spot=True))  # workspace overrides global default
     params = [kw for (op, kw) in client.calls if op == "run_instances"][0]
     assert params["InstanceMarketOptions"]["MarketType"] == "spot"
     assert params["InstanceMarketOptions"]["SpotOptions"]["SpotInstanceType"] == "persistent"
@@ -2466,7 +2782,7 @@ def test_lightsail_create_explicit_overrides_win():
 
 def test_lightsail_create_without_lightsail_section_uses_defaults():
     # [lightsail] is entirely optional: `provider = "aws"` alone is a complete
-    # project (unlike [ec2], which requires an instance_type).
+    # workspace (unlike [ec2], which requires an instance_type).
     client = _FakeLightsail()
     devbox.LightsailProvider(_aws_gc(), client=client).create(_ls_spec(lightsail=None))
     params = _create_params(client)
@@ -2631,7 +2947,7 @@ def _destroy_args(name=None, yes=False):
 
 def _patch_destroy(monkeypatch, provider, ssh_dir, attached=()):
     monkeypatch.setattr(devbox.cli, "get_provider", lambda name, gc: provider)
-    monkeypatch.setattr(devbox.cli, "_attached_projects",
+    monkeypatch.setattr(devbox.cli, "_attached_workspaces",
                         lambda provider, name: list(attached))
 
 
@@ -2639,9 +2955,9 @@ def test_cmd_destroy_yes_flag_destroys(monkeypatch, capsys, ssh_dir):
     provider = _RecordingProvider()
     _patch_destroy(monkeypatch, provider, ssh_dir)
     gc = _global_config(devbox.Path("/nonexistent"))
-    devbox.cli.cmd_destroy(_destroy_args(yes=True), gc, _project())
-    assert provider.destroyed == ["test-project"]
-    assert "Destroyed 'test-project'" in capsys.readouterr().out
+    devbox.cli.cmd_destroy(_destroy_args(yes=True), gc, _workspace())
+    assert provider.destroyed == ["test-workspace"]
+    assert "Destroyed 'test-workspace'" in capsys.readouterr().out
 
 
 def test_cmd_destroy_declined_leaves_untouched(monkeypatch, capsys, ssh_dir):
@@ -2651,33 +2967,33 @@ def test_cmd_destroy_declined_leaves_untouched(monkeypatch, capsys, ssh_dir):
     monkeypatch.setattr(devbox.cli.sys, "stdin", _FakeStdin(isatty=True))
     monkeypatch.setattr("builtins.input", lambda *a: "no")
     gc = _global_config(devbox.Path("/nonexistent"))
-    devbox.cli.cmd_destroy(_destroy_args(yes=False), gc, _project())
+    devbox.cli.cmd_destroy(_destroy_args(yes=False), gc, _workspace())
     assert provider.destroyed == []
     assert "Aborted" in capsys.readouterr().out
 
 
-def test_cmd_destroy_refuses_while_other_projects_are_attached(monkeypatch, ssh_dir):
+def test_cmd_destroy_refuses_while_other_workspaces_are_attached(monkeypatch, ssh_dir):
     # A shared box is somebody else's machine too: destroying it would take
     # their checkouts with it, so the blast radius has to be spelled out.
     provider = _RecordingProvider()
-    _patch_destroy(monkeypatch, provider, ssh_dir, attached=["test-project", "web"])
+    _patch_destroy(monkeypatch, provider, ssh_dir, attached=["test-workspace", "web"])
     gc = _global_config(devbox.Path("/nonexistent"))
     with pytest.raises(SystemExit):
-        devbox.cli.cmd_destroy(_destroy_args(yes=True), gc, _project())
+        devbox.cli.cmd_destroy(_destroy_args(yes=True), gc, _workspace())
     assert provider.destroyed == []
 
 
-def test_cmd_destroy_proceeds_when_this_project_is_the_only_one(monkeypatch, ssh_dir):
+def test_cmd_destroy_proceeds_when_this_workspace_is_the_only_one(monkeypatch, ssh_dir):
     provider = _RecordingProvider()
-    _patch_destroy(monkeypatch, provider, ssh_dir, attached=["test-project"])
+    _patch_destroy(monkeypatch, provider, ssh_dir, attached=["test-workspace"])
     gc = _global_config(devbox.Path("/nonexistent"))
-    devbox.cli.cmd_destroy(_destroy_args(yes=True), gc, _project())
-    assert provider.destroyed == ["test-project"]
+    devbox.cli.cmd_destroy(_destroy_args(yes=True), gc, _workspace())
+    assert provider.destroyed == ["test-workspace"]
 
 
-def test_confirm_destroy_names_the_attached_projects(monkeypatch, capsys):
+def test_confirm_destroy_names_the_attached_workspaces(monkeypatch, capsys):
     # What is about to be deleted, in the prompt: `destroy` now takes N
-    # projects' uncommitted work with it, not one.
+    # workspaces' uncommitted work with it, not one.
     monkeypatch.setattr(devbox.cli.sys, "stdin", _FakeStdin(isatty=True))
     monkeypatch.setattr("builtins.input", lambda *a: "no")
     devbox.cli._confirm_destroy("dev", "libvirt", False, attached=["binius", "web"])
@@ -2969,7 +3285,7 @@ def _run_args(func):
 
 
 def test_cli_run_turns_aws_auth_error_into_one_line(capsys):
-    def boom(args, gc, project):
+    def boom(args, gc, workspace):
         raise devbox.AwsAuthError("AWS credentials are missing; run `aws sso login`")
 
     with pytest.raises(SystemExit):
@@ -2982,7 +3298,7 @@ def test_cli_run_turns_aws_auth_error_into_one_line(capsys):
 def test_cli_run_turns_mid_command_expiry_into_a_login_hint(aws_config_file, capsys):
     # An expired token the server rejects can't be caught up front; too late to
     # prompt and resume, so say what to run.
-    def boom(args, gc, project):
+    def boom(args, gc, workspace):
         raise _FakeClientError("ExpiredToken")
 
     gc = _ec2_gc()
@@ -2993,7 +3309,7 @@ def test_cli_run_turns_mid_command_expiry_into_a_login_hint(aws_config_file, cap
 
 
 def test_cli_run_reraises_unrelated_errors():
-    def boom(args, gc, project):
+    def boom(args, gc, workspace):
         raise RuntimeError("unrelated")
 
     with pytest.raises(RuntimeError):

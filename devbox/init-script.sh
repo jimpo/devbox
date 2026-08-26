@@ -18,10 +18,10 @@
 # This covers only genuine first-boot concerns: the privileged user (+ its SSH
 # key), a baseline of packages the base mods lean on, the BASH_ENV wiring, and
 # the hostname. The actual provisioning is modular "mods" (jj, dotfiles, Claude
-# Code, repo bootstrap, and a project's own), driven entirely over SSH after
+# Code, repo bootstrap, and a workspace's own), driven entirely over SSH after
 # boot by `devbox create` / `devbox sync --mods` (see cli.py / provision.py) -
-# nothing of it is injected here, and a project's own first-boot needs are
-# served by a project mod, not by this file.
+# nothing of it is injected here, and a workspace's own first-boot needs are
+# served by a workspace mod, not by this file.
 #
 # A box has TWO accounts: the privileged one created here, and the unprivileged
 # `agent_user` that AI agents and the repo checkout live under. The agent user
@@ -50,7 +50,7 @@ DEVBOX_USER='%DEVBOX_USER%'
 DEVBOX_HOME='/home/%DEVBOX_USER%'
 DEVBOX_SSH_PUBKEY='%DEVBOX_SSH_PUBKEY%'
 DEVBOX_HOSTNAME='%DEVBOX_HOSTNAME%'
-# Makes provisioned tools (jj / claude / a project's own rustup, ...) available
+# Makes provisioned tools (jj / claude / a workspace's own rustup, ...) available
 # to NON-interactive bash (e.g. Claude Code's Bash tool): PAM exports BASH_ENV
 # from /etc/environment into the user's shells.
 #

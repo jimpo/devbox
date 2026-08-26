@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # mod: jj - a pinned prebuilt jj (jujutsu) release + the user identity. Kept
-# independent of any project's language toolchain: jj identity + the repo
-# bootstrap must work for every project, including non-Rust ones. Bump
+# independent of any workspace's language toolchain: jj identity + the repo
+# bootstrap must work for every workspace, including non-Rust ones. Bump
 # JJ_VERSION by hand; see https://github.com/jj-vcs/jj/releases .
 #
 # Idempotency: skips the download once the pinned version is installed;

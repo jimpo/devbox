@@ -1,4 +1,4 @@
-"""devbox: a global, multi-project dev-sandbox manager (libvirt + AWS).
+"""devbox: a global, multi-workspace dev-sandbox manager (libvirt + AWS).
 
 The package is split by concern - `config`, `initscript`, `cli`, and the
 `providers` package (a `Provider` seam with `libvirt`, `ec2`, and `aws`
@@ -26,25 +26,28 @@ from .initscript import (INIT_SCRIPT_PATH, render_init_script,  # noqa: F401
                          substitute_tokens)
 from .provision import (BOX_BASE_MODS, BUILTIN_MODS_DIR, DEFAULT_RUNAS,  # noqa: F401
                         DRIVER_PATH, GLOBAL_MODS_DIR, MOD_METADATA_KEYS,
-                        MOD_METADATA_TYPE, PROJECT_BASE_MODS, RUNAS_TARGETS,
-                        SCOPE_BOX, SCOPE_PROJECT, ModSpec, PayloadFile,
-                        box_playbook, build_box_payload, build_payload,
-                        build_tarball, env_for_owner, load_mod_specs,
-                        parse_mod_metadata, project_playbook, provision_log,
-                        render_env_file, render_manifest, resolve_env,
-                        resolve_jj_identity, resolve_mod, scoped_runas,
-                        validate_playbooks)
-from .config import (AwsConfig, BoxSpec, DEFAULT_BASE_IMAGE_URL,  # noqa: F401
+                        MOD_METADATA_TYPE, RUNAS_TARGETS, SCOPE_BOX,
+                        SCOPE_WORKSPACE, WORKSPACE_BASE_MODS, ModSpec,
+                        PayloadFile, box_playbook, build_box_payload,
+                        build_payload, build_tarball, env_for_owner,
+                        load_mod_specs, parse_mod_metadata, provision_log,
+                        render_env_file, render_manifest, render_repos,
+                        resolve_env, resolve_jj_identity, resolve_mod,
+                        scoped_runas, validate_playbooks, workspace_playbook)
+from .config import (ANCHOR_HOME, ANCHOR_REPO, ANCHOR_WORKSPACE,  # noqa: F401
+                     AwsConfig, BoxSpec, DEFAULT_BASE_IMAGE_URL,
                      DEFAULT_CACHE_DIR, DEFAULT_DISK_GB, DEFAULT_LIBVIRT_URI,
                      DEFAULT_LIGHTSAIL_BLUEPRINT, DEFAULT_LIGHTSAIL_BUNDLE,
                      DEFAULT_MEMORY_MIB, DEFAULT_NETWORK, DEFAULT_PROVIDER,
-                     DEFAULT_VCPUS, ENV_OWNERS, RESERVED_USERNAMES, USERNAME_RE,
-                     Ec2BoxConfig, Ec2Config, EnvVar,
-                     GlobalConfig, LightsailBoxConfig, PREFIXED_PROVIDERS,
-                     PROJECT_CONFIG_FILE, PROJECT_MARKER_DIR,
-                     PROVIDERS, ProjectConfig, RepoConfig, SyncEntry, compose_instance_name,
-                     find_project_dir, known_hosts_path, parse_instance_name,
-                     resolve_box_spec, resolve_instance, resolve_project)
+                     DEFAULT_VCPUS, ENV_OWNERS, MODS_SUBDIR, REPO_MARKER_CONFIG,
+                     REPO_MARKER_DIR, REPO_MODES, RESERVED_USERNAMES,
+                     USERNAME_RE, WORKSPACE_MARKER_FILE,
+                     Ec2BoxConfig, Ec2Config, EnvVar, GlobalConfig,
+                     LightsailBoxConfig, Marker, PREFIXED_PROVIDERS, PROVIDERS,
+                     RepoSpec, SyncEntry, WorkspaceConfig,
+                     compose_instance_name, find_workspace, known_hosts_path,
+                     parse_instance_name, resolve_box_spec, resolve_instance,
+                     resolve_workspace)
 from .sync import RsyncJob, plan_sync, run_envvars, run_sync  # noqa: F401
 from .providers import (AwsAuthError, Ec2Provider, Instance, InstanceSpec,  # noqa: F401
                         LibvirtProvider, LightsailProvider, Provider,

@@ -269,7 +269,7 @@ class LibvirtProvider(Provider):
 
     def _ensure_base_image(self) -> Path:
         """The shared, cached, GPG-verified base cloud image (one per host,
-        reused across projects)."""
+        reused across workspaces)."""
         expected_sha256 = fetch_verified_checksum(self.gc.base_image_url)
         self.gc.cache_dir.mkdir(parents=True, exist_ok=True)
         self.gc.cache_dir.chmod(0o755)

@@ -21,7 +21,7 @@ AWS_PROVIDERS = ("ec2", "aws")
 
 
 def get_provider(name: str, gc: GlobalConfig) -> Provider:
-    """The Provider for a given name (a project's or the target instance's)."""
+    """The Provider for a given name (a workspace's or the target instance's)."""
     cls = PROVIDER_REGISTRY.get(name)
     if cls is None:
         die(f"unknown provider '{name}'; choose one of {tuple(PROVIDER_REGISTRY)}")

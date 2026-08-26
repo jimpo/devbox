@@ -6,14 +6,14 @@
 # driver there - on `devbox create` (after boot) and on `devbox sync --mods`
 # alike.
 #
-# Layout next to this script:  mods/<name>.sh  manifest  context.env
+# Layout next to this script:  mods/<name>.sh  manifest  context.env  repos
 # ([env] creds are delivered separately as the agent's ~/.config/devbox/env.)
 #
 # THE DRIVER RUNS AS THE PRIVILEGED USER and drops privilege per mod. A box has
 # one privileged account (created at first boot by the init script, the SSH
-# target this arrives on) and one unprivileged `agent` per attached project,
+# target this arrives on) and one unprivileged `agent` per attached workspace,
 # created HERE, in the preamble below - not at first boot, so that attaching a
-# project reconverges an existing box instead of needing a new one. Almost every
+# workspace reconverges an existing box instead of needing a new one. Almost every
 # mod configures a user's home directory, and the user it should configure is the
 # agent, so a mod body runs WITHOUT sudo. System packages are installed by this
 # driver instead, and the rare mod that truly needs privilege gets a different
@@ -27,7 +27,7 @@
 # never read.
 #
 # TWO KINDS OF RUN, distinguished by whether DEVBOX_AGENT_USER is set:
-#   attachment run - one project's playbook, in its own account (the usual case)
+#   attachment run - one workspace's playbook, in its account (the usual case)
 #   box run        - the box's own playbook (empty DEVBOX_AGENT_USER); no agent
 #                    account is created or touched
 # Which mod runs in which is decided host-side: the manifest that arrives has
@@ -50,7 +50,7 @@
 #
 # Runs each mod in order, stops at the first failure and reports which mod, and
 # tees each mod's output to ~/provision/<agent>/<name>.log - one directory per
-# attachment, so two projects reconverging don't overwrite each other's logs.
+# attachment, so two workspaces reconverging don't overwrite each other's logs.
 # (The combined ~/provision-<agent>.log that `devbox status` tails is produced by
 # the outer tee in the caller.)
 set -uo pipefail
@@ -78,7 +78,11 @@ mkdir -p "$LOG_DIR"
 # enumerable by the privileged user. Root-owned but world-READABLE: only writing
 # a claim needs privilege, and checking one has to work without it.
 # (Overridable so the test harness can run the real script without root.)
-PROJECTS_DIR="${DEVBOX_PROJECTS_DIR:-/etc/devbox/projects}"
+WORKSPACES_DIR="${DEVBOX_WORKSPACES_DIR:-/etc/devbox/workspaces}"
+# Where the same claims were written when an attachment was called a project.
+# Read-only, and only when the account has no current marker: re-attaching writes
+# the current one, so a box migrates itself the first time devbox touches it.
+LEGACY_MARKERS_DIR="${DEVBOX_LEGACY_MARKERS_DIR:-/etc/devbox/projects}"
 
 # The mod bodies run as another user, so they must be able to read the payload.
 # `mktemp -d` gives 0700; the payload carries no secrets (see provision.py).
@@ -129,30 +133,44 @@ ensure_admin() {
 }
 
 # Refuse to take over an account that is not ours. An agent account is a
-# project's home on a shared machine, so "someone already lives here" has to be
-# an error rather than a silent co-tenancy: two projects sharing one home would
-# share a checkout and a credentials file.
+# workspace's home on a shared machine, so "someone already lives here" has to be
+# an error rather than a silent co-tenancy: two workspaces sharing one home would
+# share their checkouts and a credentials file.
 marker_field() { sed -n "s/^$2=//p" "$1" | head -n1; }
 
-check_account_claim() {
-  local agent="$1" marker="$PROJECTS_DIR/$agent" owner prev_host
+# The marker recording this account's owner: the current one, or the one a
+# devbox that still called workspaces "projects" left behind.
+account_marker() {
+  local agent="$1"
+  if [ -f "$WORKSPACES_DIR/$agent" ]; then
+    printf '%s' "$WORKSPACES_DIR/$agent"
+  elif [ -f "$LEGACY_MARKERS_DIR/$agent" ]; then
+    printf '%s' "$LEGACY_MARKERS_DIR/$agent"
+  fi
+}
 
-  if [ ! -f "$marker" ]; then
+check_account_claim() {
+  local agent="$1" marker owner prev_host
+  marker="$(account_marker "$agent")"
+
+  if [ -z "$marker" ]; then
     [ "${DEVBOX_ATTACH_ADOPT:-0}" = "1" ] && return 0
     fail "the account '$agent' already exists on this box but devbox has no record
-  of which project it belongs to (a box created before attachments were tracked,
+  of which workspace it belongs to (a box created before attachments were tracked,
   or an account somebody made by hand). Re-run with --adopt to claim it for
-  '${DEVBOX_PROJECT:-this project}', or pick a different agent_user."
+  '${DEVBOX_WORKSPACE:-this workspace}', or pick a different agent_user."
   fi
 
-  owner="$(marker_field "$marker" project)"
-  if [ -n "$owner" ] && [ -n "${DEVBOX_PROJECT:-}" ] && [ "$owner" != "$DEVBOX_PROJECT" ]; then
-    fail "the account '$agent' on this box belongs to project '$owner'
+  # `project` is the same field under its old name, in a legacy marker.
+  owner="$(marker_field "$marker" workspace)"
+  [ -n "$owner" ] || owner="$(marker_field "$marker" project)"
+  if [ -n "$owner" ] && [ -n "${DEVBOX_WORKSPACE:-}" ] && [ "$owner" != "$DEVBOX_WORKSPACE" ]; then
+    fail "the account '$agent' on this box belongs to workspace '$owner'
   (attached $(marker_field "$marker" attached_at) from $(marker_field "$marker" host)).
-  Set a different \`agent_user\` in .devbox/config.toml, or detach '$owner' first."
+  Set a different \`agent_user\` in this workspace's config, or detach '$owner' first."
   fi
 
-  # Same project from a different workstation is fine - say so, since it means
+  # Same workspace from a different workstation is fine - say so, since it means
   # two people (or two checkouts) are driving one account.
   prev_host="$(marker_field "$marker" host)"
   if [ -n "$prev_host" ] && [ -n "${DEVBOX_ATTACH_HOST:-}" ] \
@@ -161,22 +179,27 @@ check_account_claim() {
   fi
 }
 
-# Record which project owns this account. Written via a temp file in the same
+# Record which workspace owns this account. Written via a temp file in the same
 # directory + mv, so a reader never sees a half-written marker.
 write_marker() {
-  local agent="$1" marker="$PROJECTS_DIR/$agent"
-  sudo install -d -m 0755 "$PROJECTS_DIR"
+  local agent="$1" marker="$WORKSPACES_DIR/$agent"
+  sudo install -d -m 0755 "$WORKSPACES_DIR"
   # A leftover .tmp from a crashed run would defeat the install (see .bash_env
   # above) and then be promoted by the mv below as if it were this run's marker.
   sudo rm -f "$marker.tmp"
   sudo install -m 0644 /dev/stdin "$marker.tmp" <<EOF
-project=${DEVBOX_PROJECT:-}
+workspace=${DEVBOX_WORKSPACE:-}
 agent_user=$agent
-repo_dir=${DEVBOX_REPO_DIR:-}
+repo_dirs=${DEVBOX_REPO_DIRS:-}
 attached_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 host=${DEVBOX_ATTACH_HOST:-}
 EOF
   sudo mv "$marker.tmp" "$marker"
+  # The claim now lives under its current name; leaving the old one would keep
+  # `--attached` reporting this account twice.
+  [ "$WORKSPACES_DIR" != "$LEGACY_MARKERS_DIR" ] \
+    && sudo rm -f "$LEGACY_MARKERS_DIR/$agent"
+  return 0
 }
 
 ensure_agent() {
@@ -187,7 +210,7 @@ ensure_agent() {
 
   [ "$agent" != "$admin" ] || fail "the agent account and the box's privileged
   user are both '$agent'; the whole point of the split is that agents run
-  without sudo. Set \`agent_user\` in .devbox/config.toml."
+  without sudo. Set \`agent_user\` in this workspace's config."
 
   # zsh is installed by the init script, so it exists by the time the driver
   # first runs - but never point a login shell at a binary that isn't there.
@@ -249,22 +272,26 @@ ensure_agent() {
 
   # Home 0750. useradd only applies HOME_MODE to a home it creates, so a
   # pre-existing account (or a box created before this) still needs it - and it
-  # is what keeps one project's agent out of another's home.
+  # is what keeps one workspace's agent out of another's home.
   home="$(user_home "$agent")"
   [ -n "$home" ] && sudo chmod 0750 "$home"
 
   install_bash_env "$agent"
   write_marker "$agent"
 
-  # A repo checkout in the privileged user's home means this box was provisioned
-  # under the old single-user model. Nothing is migrated - the canonical checkout
-  # is now the agent's - so say so loudly rather than leaving two diverging trees.
-  if [ "${DEVBOX_REPO_MODE:-none}" != none ] && [ -n "${DEVBOX_REPO_DIR:-}" ] \
-     && [ -d "$(user_home "$admin")/$DEVBOX_REPO_DIR" ]; then
-    echo "devbox: WARNING: '$DEVBOX_REPO_DIR' exists in ${admin}'s home. This box predates" >&2
+  # A checkout in the privileged user's home means this box was provisioned under
+  # the old single-user model. Nothing is migrated - the canonical checkouts are
+  # now the agent's - so say so loudly rather than leaving two diverging trees.
+  local admin_home repo_dir
+  local -a repo_dirs
+  admin_home="$(user_home "$admin")"
+  IFS=',' read -r -a repo_dirs <<< "${DEVBOX_REPO_DIRS:-}"
+  for repo_dir in "${repo_dirs[@]}"; do
+    [ -n "$repo_dir" ] && [ -d "$admin_home/$repo_dir" ] || continue
+    echo "devbox: WARNING: '$repo_dir' exists in ${admin}'s home. This box predates" >&2
     echo "  the two-user split; the checkout devbox now uses is ${agent}'s. The old tree is" >&2
     echo "  left untouched and is NOT synced - recreate the box, or salvage it by hand." >&2
-  fi
+  done
 }
 
 # ---- apt (mods cannot install their own packages) ---------------------------
@@ -327,6 +354,9 @@ run_mod_as() {
     cd "$HOME" || exit 1
     if [ -f "$3/.config/devbox/env" ]; then . "$3/.config/devbox/env"; fi
     . "$1/context.env"
+    # Where the payload was unpacked, so a mod can read a file that is too long
+    # to be an environment variable - `repos`, which repo-bootstrap walks.
+    export DEVBOX_PAYLOAD_DIR="$1"
     exec bash "$2"
   ' _ "$HERE" "$file" "$env_home"
 }
@@ -354,14 +384,14 @@ if [ "$#" -gt 0 ] && [ "${1#--ensure-}" != "$1" ]; then
   esac
   exit 0
 elif [ "$#" -gt 0 ]; then
-  # Selective run: every requested name must be in this project's playbook.
+  # Selective run: every requested name must be in this workspace's playbook.
   declare -A known=()
   for i in "${!MOD_NAMES[@]}"; do known["${MOD_NAMES[$i]}"]="$i"; done
   for want in "$@"; do
     # `+set` tests key presence, not value: index 0 is a legitimate value that
     # `-z "${known[$want]:-}"` would misread as "not in the playbook".
     if [ -z "${known[$want]+set}" ]; then
-      printf 'devbox: unknown mod %q (this project runs: %s)\n' \
+      printf 'devbox: unknown mod %q (this workspace runs: %s)\n' \
         "$want" "${MOD_NAMES[*]}" >&2
       exit 2
     fi

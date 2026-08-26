@@ -168,8 +168,8 @@ class Ec2Provider(Provider):
     def create(self, spec: InstanceSpec) -> None:
         cfg = spec.ec2
         if cfg is None:
-            die("project has no [ec2] section; add instance_type (and optionally "
-                "architecture/ami/spot) under [ec2] to launch on EC2")
+            die("this box has no EC2 settings; pass --instance-type (and "
+                "optionally --arch/--ami/--spot) to `devbox box create`")
 
         if self._find(spec.name) is not None:
             die(f"instance '{spec.name}' already exists; run `devbox destroy` first")

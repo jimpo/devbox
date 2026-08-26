@@ -13,7 +13,7 @@
 #
 # In BOTH playbooks on purpose, and the reason `runas` scoping exists: the
 # box runs the admin half once (the privileged user needs a usable shell for
-# `devbox box ssh`, the debugging entry point), and each attaching project runs
+# `devbox box ssh`, the debugging entry point), and each attaching workspace runs
 # the agent half in its own account. That means one clone and one oh-my-zsh
 # install per account - a few minutes per attach, accepted deliberately. The apt
 # half lives in the `dotfiles-packages` mod, which runs once per box, as root.

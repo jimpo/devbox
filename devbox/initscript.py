@@ -10,7 +10,7 @@ cloud-config layer.
 The init script covers only genuine first-boot concerns (the login user + its
 SSH key, baseline packages, BASH_ENV wiring, hostname); provisioning (the mods)
 is driven entirely over SSH after boot (see cli.py / provision.py), not injected
-here, and so is a project's own setup (a project mod, not a first-boot hook).
+here, and so is a workspace's own setup (a workspace mod, not a first-boot hook).
 """
 from __future__ import annotations
 
@@ -34,17 +34,17 @@ def substitute_tokens(text: str, tokens: dict) -> str:
 
 def render_init_script(box: BoxSpec, gc: GlobalConfig) -> str:
     """The rendered first-boot user-data script for a box. Takes the box, not a
-    project: first boot sets up the machine and its privileged account, and knows
-    nothing about which projects will later attach to it."""
+    workspace: first boot sets up the machine and its privileged account, and knows
+    nothing about which workspaces will later attach to it."""
     pubkey = gc.read_ssh_pubkey()
     if not INIT_SCRIPT_PATH.is_file():
         die(f"devbox internal error: init script not found at {INIT_SCRIPT_PATH} "
             f"(broken install?)")
 
     tokens = {
-        # The PRIVILEGED user only - a project's unprivileged agent account is
+        # The PRIVILEGED user only - a workspace's unprivileged agent account is
         # created by the provisioning driver at attach, not at first boot (see
-        # init-script.sh), so that attaching a project reconverges an existing
+        # init-script.sh), so that attaching a workspace reconverges an existing
         # box instead of needing a new one.
         "DEVBOX_USER": box.admin_user,
         "DEVBOX_SSH_PUBKEY": pubkey,

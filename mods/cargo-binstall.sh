@@ -8,7 +8,7 @@
 # NO RUST TOOLCHAIN NEEDED: the release is a statically linked musl binary, and
 # it resolves and fetches crates entirely on its own - verified against a host
 # with no cargo/rustc at all. That is what makes it worth having in the base
-# playbook rather than in a project's rust mod: `cargo-binstall ripgrep` works
+# playbook rather than in a workspace's rust mod: `cargo-binstall ripgrep` works
 # on a box that has never seen rustup. Invoke it as `cargo-binstall` (the
 # `cargo binstall` subcommand form needs cargo, which the base box has not got).
 #
@@ -37,7 +37,7 @@ fi
 # ~/.cargo/env (see the driver's install_bash_env). That file is rustup's, and
 # on a box with no rust toolchain nothing creates it, so every tool installed
 # through binstall would be invisible. Write the equivalent snippet when it is
-# absent; rustup overwrites it with its own (equivalent) version if a project's
+# absent; rustup overwrites it with its own (equivalent) version if a workspace's
 # rust mod later runs, so the two cannot conflict.
 if [ ! -f "$HOME/.cargo/env" ]; then
   mkdir -p "$HOME/.cargo"

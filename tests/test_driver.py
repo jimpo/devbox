@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(
 
 ADMIN = "alice"
 AGENT = "agentbot"
-PROJECT = "binius"
+WORKSPACE = "binius"
 HOST = "laptop"
 
 # Each fake logs to $FAKE_LOG/<tool>.log and otherwise does the least it can.
@@ -108,8 +108,8 @@ class _Box:
     `agent=""` builds a BOX run (the box's own playbook, no attachment), which is
     exactly how the driver tells the two kinds of run apart."""
 
-    def __init__(self, root, mods, repo_mode="none", repo_dir="", agent=AGENT,
-                 project=PROJECT, scope=None, host=HOST):
+    def __init__(self, root, mods, repos=(), agent=AGENT,
+                 workspace=WORKSPACE, scope=None, host=HOST):
         self.root = root
         self.log_dir = root / "log"
         self.homes = root / "homes"
@@ -131,19 +131,21 @@ class _Box:
             path.write_text(body)
             path.chmod(0o755)
 
-        scope = scope or (devbox.SCOPE_PROJECT if agent else devbox.SCOPE_BOX)
+        scope = scope or (devbox.SCOPE_WORKSPACE if agent else devbox.SCOPE_BOX)
         (self.payload / "provision-driver.sh").write_text(devbox.DRIVER_PATH.read_text())
         # Real renderers, so this also pins the Python->bash format agreement.
         (self.payload / "manifest").write_text(devbox.render_manifest(mods, scope))
         (self.payload / "context.env").write_text(devbox.render_env_file({
             "DEVBOX_ADMIN_USER": ADMIN,
             "DEVBOX_AGENT_USER": agent,
-            "DEVBOX_PROJECT": project,
+            "DEVBOX_WORKSPACE": workspace,
             "DEVBOX_ATTACH_HOST": host,
             "DEVBOX_SSH_PUBKEY": "ssh-ed25519 AAAAtest user@host",
-            "DEVBOX_REPO_MODE": repo_mode,
-            "DEVBOX_REPO_DIR": repo_dir,
+            "DEVBOX_REPO_DIRS": ",".join(r.dir for r in repos),
         }))
+        # Real renderer again: the `repos` file is the other half of the
+        # Python->bash format agreement (see render_repos).
+        (self.payload / "repos").write_text(devbox.render_repos(repos))
         for spec in mods:
             path = self.payload / "mods" / f"{spec.name}.sh"
             path.write_text(_MOD.format(name=spec.name,
@@ -159,7 +161,8 @@ class _Box:
             "FAKE_LOG": str(self.log_dir),
             # The real markers are root-owned under /etc; point them at the fake
             # box so the driver's own writes and reads can run unprivileged.
-            "DEVBOX_PROJECTS_DIR": str(self.etc / "projects"),
+            "DEVBOX_WORKSPACES_DIR": str(self.etc / "workspaces"),
+            "DEVBOX_LEGACY_MARKERS_DIR": str(self.etc / "projects"),
             **env_overrides,
         }
         return subprocess.run(
@@ -176,12 +179,28 @@ class _Box:
 
     def marker(self, agent=None):
         """The ownership record the driver wrote for one account."""
-        path = self.etc / "projects" / (agent or self.agent)
+        path = self.etc / "workspaces" / (agent or self.agent)
         return path.read_text() if path.exists() else ""
+
+    def write_legacy_marker(self, owner, agent=None):
+        """The claim a devbox that still called a workspace a project left."""
+        d = self.etc / "projects"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / (agent or self.agent)).write_text(
+            f"project={owner}\nagent_user={agent or self.agent}\nhost={HOST}\n")
+
+    def legacy_marker_exists(self, agent=None):
+        return (self.etc / "projects" / (agent or self.agent)).exists()
 
     def ran(self):
         """[(mod, account)] in the order the driver ran them."""
         return [tuple(line.split(":")) for line in self.log("mods").splitlines()]
+
+
+def _repo(name, mode="push", dir=None, url=None):
+    """One entry of the workspace's `repos` payload file."""
+    return devbox.RepoSpec(name=name, mode=mode, dir=dir or name,
+                           host=devbox.Path(f"/host/{name}"), url=url)
 
 
 def _spec(name, runas=("agent",), packages=(), requires=(), extra=""):
@@ -256,13 +275,26 @@ def test_preamble_refuses_when_the_agent_is_in_a_root_equivalent_group(box):
 
 
 def test_preamble_warns_about_a_stale_checkout_in_the_admin_home(box):
-    # A repo in the privileged user's home means the box predates the split.
-    b = box([_spec("jj")], repo_mode="clone", repo_dir="binius64")
+    # A checkout in the privileged user's home means the box predates the split.
+    b = box([_spec("jj")], repos=[_repo("binius64")])
     (b.homes / ADMIN / "binius64").mkdir()
     r = b.run("--ensure-users")
     assert r.returncode == 0
     assert "the two-user split" in r.stderr
     assert "binius64" in r.stderr
+
+
+def test_preamble_warns_once_per_stale_checkout(box):
+    # A workspace holds several checkouts, so the warning is per repo, not per
+    # attachment - a box can predate the split for some of them and not others.
+    b = box([_spec("jj")], repos=[_repo("frontend"), _repo("backend"),
+                                 _repo("protos")])
+    (b.homes / ADMIN / "frontend").mkdir()
+    (b.homes / ADMIN / "protos").mkdir()
+    r = b.run("--ensure-users")
+    assert r.returncode == 0
+    assert "frontend" in r.stderr and "protos" in r.stderr
+    assert "backend" not in r.stderr
 
 
 # ---- mod dispatch -----------------------------------------------------------
@@ -285,13 +317,13 @@ def test_runas_root_and_admin_dispatch_to_the_right_accounts(box):
 
 # ---- box runs (no attachment) -----------------------------------------------
 def test_a_box_run_creates_no_agent_account(box):
-    # The box's own playbook: a machine that no project has attached to yet.
+    # The box's own playbook: a machine that no workspace has attached to yet.
     b = box([_spec("dotfiles-packages", runas=["root"]),
              _spec("dotfiles", runas=["admin", "agent"])], agent="")
     r = b.run()
     assert r.returncode == 0, r.stderr
     assert b.log("useradd") == ""
-    assert not (b.etc / "projects").exists()
+    assert not (b.etc / "workspaces").exists()
     # `dotfiles` keeps only its admin half - the agent half is an attachment's.
     assert b.ran() == [("dotfiles-packages", "root"), ("dotfiles", ADMIN)]
 
@@ -305,7 +337,7 @@ def test_a_box_run_still_wires_the_privileged_account(box):
 def test_a_box_run_refuses_an_agent_target_it_cannot_satisfy(box):
     # Unreachable through the host-side scope filter; a payload that got it
     # wrong anyway must stop rather than run the mod as somebody else.
-    b = box([_spec("jj", runas=["agent"])], agent="", scope=devbox.SCOPE_PROJECT)
+    b = box([_spec("jj", runas=["agent"])], agent="", scope=devbox.SCOPE_WORKSPACE)
     r = b.run()
     assert r.returncode == 2
     assert "no agent account" in r.stderr
@@ -313,35 +345,63 @@ def test_a_box_run_refuses_an_agent_target_it_cannot_satisfy(box):
 
 
 # ---- attachment ownership ---------------------------------------------------
-def test_attaching_records_which_project_owns_the_account(box):
-    b = box([_spec("jj")], repo_dir="binius64", repo_mode="clone")
+def test_attaching_records_which_workspace_owns_the_account(box):
+    b = box([_spec("jj")], repos=[_repo("frontend"), _repo("backend")])
     assert b.run("--ensure-agent").returncode == 0
     marker = b.marker()
-    assert f"project={PROJECT}" in marker
+    assert f"workspace={WORKSPACE}" in marker
     assert f"agent_user={AGENT}" in marker
-    assert "repo_dir=binius64" in marker
+    assert "repo_dirs=frontend,backend" in marker
     assert f"host={HOST}" in marker
 
 
-def test_re_attaching_the_same_project_is_a_no_op(box):
+def test_a_legacy_marker_still_identifies_the_owner(box):
+    # A box last attached by a devbox that wrote `project=` must not read as an
+    # account nobody claims - that would demand --adopt to reach your own home.
+    b = box([_spec("jj")])
+    (b.homes / AGENT).mkdir()           # exists, from a previous attachment
+    b.write_legacy_marker(WORKSPACE)
+    assert b.run("--ensure-agent").returncode == 0
+    assert f"workspace={WORKSPACE}" in b.marker()
+
+
+def test_a_legacy_marker_owned_by_another_workspace_still_refuses(box):
+    b = box([_spec("jj")])
+    (b.homes / AGENT).mkdir()           # exists, from a previous attachment
+    b.write_legacy_marker("someone-else")
+    r = b.run("--ensure-agent")
+    assert r.returncode != 0
+    assert "someone-else" in r.stderr
+
+
+def test_attaching_retires_the_legacy_marker(box):
+    # Both markers surviving would have `--attached` count the account twice.
+    b = box([_spec("jj")])
+    (b.homes / AGENT).mkdir()           # exists, from a previous attachment
+    b.write_legacy_marker(WORKSPACE)
+    assert b.run("--ensure-agent").returncode == 0
+    assert not b.legacy_marker_exists()
+
+
+def test_re_attaching_the_same_workspace_is_a_no_op(box):
     b = box([_spec("jj")])
     assert b.run("--ensure-agent").returncode == 0
     first = b.log("useradd")
     r = b.run("--ensure-agent")
     assert r.returncode == 0, r.stderr
     assert b.log("useradd") == first          # no second useradd
-    assert f"project={PROJECT}" in b.marker()
+    assert f"workspace={WORKSPACE}" in b.marker()
 
 
-def test_attaching_refuses_an_account_owned_by_another_project(box):
-    # Two projects sharing one home would share a checkout and a creds file, so
+def test_attaching_refuses_an_account_owned_by_another_workspace(box):
+    # Two workspaces sharing one home would share a checkout and a creds file, so
     # "someone already lives here" has to be an error, not silent co-tenancy.
     b = box([_spec("jj")])
     assert b.run("--ensure-agent").returncode == 0
-    other = box([_spec("jj")], project="other-project")
+    other = box([_spec("jj")], workspace="other-workspace")
     r = other.run("--ensure-agent")
     assert r.returncode != 0
-    assert PROJECT in r.stderr          # names the project that already has it
+    assert WORKSPACE in r.stderr          # names the workspace that already has it
     assert "agent_user" in r.stderr     # and says how to resolve it
 
 
@@ -359,7 +419,7 @@ def test_adopt_claims_an_unclaimed_pre_existing_account(box):
     (b.homes / AGENT).mkdir()
     r = b.run("--ensure-agent", DEVBOX_ATTACH_ADOPT="1")
     assert r.returncode == 0, r.stderr
-    assert f"project={PROJECT}" in b.marker()
+    assert f"workspace={WORKSPACE}" in b.marker()
 
 
 def test_re_attaching_from_another_workstation_is_noted_not_refused(box):
@@ -371,12 +431,12 @@ def test_re_attaching_from_another_workstation_is_noted_not_refused(box):
     assert "laptop" in r.stderr
 
 
-def test_two_projects_can_share_one_box(box, tmp_path):
+def test_two_workspaces_can_share_one_box(box, tmp_path):
     # The whole point: the preamble touches only its own accounts, so attaching
-    # a second project leaves the first's home, key and marker intact.
+    # a second workspace leaves the first's home, key and marker intact.
     first = _Box(tmp_path, [_spec("jj")])
     assert first.run().returncode == 0
-    second = _Box(tmp_path, [_spec("jj")], agent="webbot", project="web")
+    second = _Box(tmp_path, [_spec("jj")], agent="webbot", workspace="web")
     r = second.run()
     assert r.returncode == 0, r.stderr
 
@@ -384,9 +444,9 @@ def test_two_projects_can_share_one_box(box, tmp_path):
         assert (first.homes / agent).is_dir()
         assert "ssh-ed25519" in (first.homes / agent / ".ssh" / "authorized_keys").read_text()
         assert ".local/bin" in (first.homes / agent / ".bash_env").read_text()
-    assert f"project={PROJECT}" in first.marker(AGENT)
-    assert "project=web" in first.marker("webbot")
-    # The second attach must not have re-created the first project's account.
+    assert f"workspace={WORKSPACE}" in first.marker(AGENT)
+    assert "workspace=web" in first.marker("webbot")
+    # The second attach must not have re-created the first workspace's account.
     assert first.log("useradd").count(AGENT) == 1
 
 
@@ -399,7 +459,7 @@ def test_ensure_admin_alone_touches_no_agent_account(box):
 
 def test_a_multi_target_mod_runs_once_per_account_with_separate_logs(box):
     # A mod that names no agent target keeps all of them in either scope - a
-    # project mod that has both root and privileged-user work, say.
+    # workspace mod that has both root and privileged-user work, say.
     b = box([_spec("cuda", runas=["root", "admin"])])
     assert b.run().returncode == 0
     assert b.ran() == [("cuda", "root"), ("cuda", ADMIN)]
@@ -414,7 +474,7 @@ def test_a_single_target_mod_keeps_the_familiar_log_path(box):
 
 
 def test_per_mod_logs_are_scoped_to_the_attachment(box):
-    # Two projects reconverging on one box must not overwrite each other's logs.
+    # Two workspaces reconverging on one box must not overwrite each other's logs.
     b = box([_spec("jj")])
     assert b.run().returncode == 0
     assert (b.homes / ADMIN / "provision" / AGENT / "jj.log").exists()

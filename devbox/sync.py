@@ -1,11 +1,11 @@
 """Host->box file sync: push host-local, non-VCS-tracked files (agent skills,
-git-excluded project files) to a devbox, re-runnably, over rsync.
+git-excluded workspace files) to a devbox, re-runnably, over rsync.
 
 A mod runs *on the box* and can't read host-local files, so host-only files
 fundamentally need a host-side push - distinct from mods (which handle repo- or
-GitHub-sourced files). Config is `[[sync]]` (host = $HOME/~/absolute-anchored)
-and `[[repo.sync]]` (repo-relative: host = the marker dir, guest = ~/<repo.dir>);
-see config.SyncEntry.
+GitHub-sourced files). Every rule says what its two ends are anchored at (see
+config.SyncEntry): `$HOME`/`~`/absolute, the workspace root (host) against the
+agent's home (box), or one named repo's checkout on each side.
 
 Delete semantics - **mirror per synced unit**: an entry with `include` expands
 to one rsync per named child (`src/<name> -> dst/<name>`), each mirrored
@@ -22,7 +22,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
-from .config import ProjectConfig
+from .config import (ANCHOR_HOME, ANCHOR_REPO, ANCHOR_WORKSPACE,
+                     WorkspaceConfig)
 from .provision import env_for_owner, render_env_file
 from .util import die
 
@@ -33,9 +34,9 @@ from .util import die
 # tool and a human at a shell.
 #
 # Each entry lands in exactly one of the two files, per its `owner` (see
-# config.EnvVar): this project's agent by default, the box's privileged user for
-# a cred that only an admin/root mod needs. Homes are 0750 with a
-# per-user group and the files 0600, so no agent can read another project's
+# config.EnvVar): this workspace's agent by default, the box's privileged user
+# for a cred that only an admin/root mod needs. Homes are 0750 with a
+# per-user group and the files 0600, so no agent can read another workspace's
 # creds, nor the admin's; the privileged side can read them all.
 GUEST_ENV_REL = ".config/devbox/env"
 _ENV_SOURCE_LINE = '[ -f "$HOME/.config/devbox/env" ] && . "$HOME/.config/devbox/env"'
@@ -123,22 +124,38 @@ def _job(host_src: str, guest_dst: str) -> RsyncJob:
     return RsyncJob(host_src, guest_dst, mirror=src.is_dir())
 
 
-def plan_sync(project: ProjectConfig, host_home: str = None, guest_home: str = None) -> list:
-    """Resolve the project's sync entries into concrete rsync jobs (one per
+def _anchored_paths(entry, workspace: WorkspaceConfig,
+                    host_home: str, guest_home: str) -> tuple:
+    """One entry's (host src, guest dst), resolved against its own anchor.
+
+    The three anchors differ only in what each side starts from, and every one of
+    them puts the guest end under the agent's home - which is the whole of the
+    box-side story: one account, holding this workspace's checkouts."""
+    if entry.anchor == ANCHOR_HOME:
+        return _expand(entry.src, host_home), _expand(entry.dst, guest_home)
+    if entry.anchor == ANCHOR_WORKSPACE:
+        return (posixpath.join(str(workspace.root), entry.src),
+                posixpath.join(guest_home, entry.dst))
+    repo = workspace.repo(entry.repo)
+    if repo is None:  # unreachable: the parser only names repos it just resolved
+        die(f"devbox sync: [[repos.sync]] names the repo {entry.repo!r}, which "
+            f"this workspace does not have")
+    return (posixpath.join(str(repo.host), entry.src),
+            posixpath.join(guest_home, repo.dir, entry.dst))
+
+
+def plan_sync(workspace: WorkspaceConfig, host_home: str = None,
+              guest_home: str = None) -> list:
+    """Resolve the workspace's sync entries into concrete rsync jobs (one per
     mirror unit). `host_home`/`guest_home` are injectable for tests; they default
     to the host's real home and the box's `/home/<agent_user>` - synced files are
-    agent skills, project config and the like, which belong to the account that
+    agent skills, workspace config and the like, which belong to the account that
     does the work, not the privileged one."""
     host_home = host_home if host_home is not None else str(Path.home())
-    guest_home = guest_home if guest_home is not None else f"/home/{project.agent_user}"
+    guest_home = guest_home if guest_home is not None else f"/home/{workspace.agent_user}"
     jobs = []
-    for entry in project.sync:
-        if entry.repo_relative:
-            host_src = posixpath.join(str(project.marker_dir), entry.src)
-            guest_dst = posixpath.join(guest_home, project.repo.dir, entry.dst)
-        else:
-            host_src = _expand(entry.src, host_home)
-            guest_dst = _expand(entry.dst, guest_home)
+    for entry in workspace.sync:
+        host_src, guest_dst = _anchored_paths(entry, workspace, host_home, guest_home)
         if entry.include:
             # Each included child is its own mirror unit (see module docstring).
             for name in entry.include:
@@ -162,11 +179,11 @@ def _rsync_argv(job: RsyncJob, alias: str) -> list:
     return argv
 
 
-def run_sync(project: ProjectConfig, alias: str,
+def run_sync(workspace: WorkspaceConfig, alias: str,
              host_home: str = None, guest_home: str = None) -> None:
     """rsync each mirror unit to the box through the `devbox-<name>` SSH alias
     (which carries the user, host, and known-hosts). Idempotent + incremental."""
-    jobs = plan_sync(project, host_home=host_home, guest_home=guest_home)
+    jobs = plan_sync(workspace, host_home=host_home, guest_home=guest_home)
     for job in jobs:
         arrow = "mirror" if job.mirror else "copy"
         print(f"==> sync ({arrow}) {job.host_path} -> {job.guest_path}")
