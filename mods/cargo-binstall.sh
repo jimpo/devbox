@@ -13,7 +13,8 @@
 # `cargo binstall` subcommand form needs cargo, which the base box has not got).
 #
 # Idempotency: skips the download once the pinned version is installed; the
-# ~/.cargo/env write below is guarded on the file's absence.
+# ~/.cargo/env write below is guarded on the file's absence, and the ~/.zshenv
+# source line on its own presence.
 set -euo pipefail
 
 BINSTALL_VERSION="1.21.1"
@@ -50,4 +51,16 @@ case ":${PATH}:" in
     *) export PATH="$HOME/.cargo/bin:$PATH" ;;
 esac
 CARGOENV
+fi
+
+# ~/.cargo/env is on the path of non-interactive bash through ~/.bash_env (the
+# BASH_ENV target, written by the driver). zsh reads neither, so source it from
+# ~/.zshenv too - the file EVERY zsh reads, so ~/.cargo/bin reaches a human at a
+# shell and `ssh <box> '<cmd>'` alike. Whoever owns ~/.cargo/env - this mod's
+# stub or rustup's - the line is the same, so the wiring belongs here, next to
+# the file it sources.
+CARGO_ENV_LINE='[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"'
+touch "$HOME/.zshenv"
+if ! grep -qxF "$CARGO_ENV_LINE" "$HOME/.zshenv"; then
+  printf '%s\n' "$CARGO_ENV_LINE" >>"$HOME/.zshenv"
 fi

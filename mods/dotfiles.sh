@@ -20,7 +20,8 @@
 #
 # Idempotency: oh-my-zsh is a no-op when already present; the devbox zsh env
 # block is appended once. (setup.sh's own steps must be re-run-safe - a configenv
-# concern.)
+# concern; it owns ~/.zshrc and leaves ~/.zshenv alone, which is what makes the
+# env block below safe to append there.)
 set -euo pipefail
 
 CFG="$(mktemp -d)"
@@ -31,15 +32,19 @@ cd "$CFG"
 # dotfiles. -f = force-overwrite (non-interactive; no cp clobber prompts).
 sh setup.sh -f
 
-# devbox-specific interactive-zsh env (configenv doesn't set this): put jj /
-# claude (~/.local/bin) and cargo on PATH for login shells. Appended once.
-if ! grep -q 'devbox common env' "$HOME/.zshrc" 2>/dev/null; then
-  cat >> "$HOME/.zshrc" <<'ZRC'
+# devbox-specific zsh env (configenv doesn't set this): put jj / claude
+# (~/.local/bin) on PATH. In ~/.zshenv, which EVERY zsh reads - a human at a
+# shell, and `ssh <box> '<cmd>'`, which runs the login shell non-interactively
+# and never reads ~/.zshrc. This is the zsh half of what ~/.bash_env (the
+# BASH_ENV target, written by the provisioning driver) does for bash; ~/.zshenv
+# is also where run_envvars wires the [env] creds. Appended once. A Rust
+# toolchain puts ~/.cargo on PATH itself.
+if ! grep -q 'devbox common env' "$HOME/.zshenv" 2>/dev/null; then
+  cat >> "$HOME/.zshenv" <<'ZENV'
 
 # --- devbox common env ---
-[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 export PATH="$HOME/.local/bin:$PATH"
-ZRC
+ZENV
 fi
 
 rm -rf "$CFG"
