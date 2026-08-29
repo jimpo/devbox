@@ -29,7 +29,10 @@ modular-provisioning logic (mod resolution
 precedence — now keyed on the marker's own mods directory — the `# /// mod`
 metadata block — `requires`/`runas`/`packages`, plus
 its rejection of unknown keys, bad values, duplicate and mislabeled fences — the
-two playbooks and `scoped_runas`'s narrowing of each mod's targets, manifest
+two playbooks and `scoped_runas`'s narrowing of each mod's targets (including
+`github-auth`'s box scope and its `/etc/gitconfig` target — what keeps the
+credential helper out of the `~/.gitconfig` that `dotfiles` overwrites — and
+`repo-bootstrap` requiring it across the playbook boundary), manifest
 rendering, `render_repos` + the `repos` payload file, env-file quoting,
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases

@@ -1277,11 +1277,47 @@ def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_workspaces(isola
         "tree-sitter-cli\troot\tunzip",
         "dotfiles\tadmin\t",
         "vim\tadmin\t",
+        "github-auth\troot\t",
     ]
     by_name = {s.name: s for s in workspace}
     assert devbox.scoped_runas(by_name["dotfiles"].runas, devbox.SCOPE_WORKSPACE) == ["agent"]
     assert "dotfiles-packages" in by_name["dotfiles"].requires
     assert "tree-sitter-cli" in by_name["dotfiles"].requires
+
+
+def test_github_auth_is_a_root_box_mod_writing_etc_gitconfig(isolated_mods):
+    # The GitHub credential helper is box-wide state, so it belongs to the box
+    # playbook: one root-written /etc/gitconfig line, correct for every account
+    # because the helper answers from the CALLING account's own GITHUB_TOKEN.
+    #
+    # That location is also the regression guard. `dotfiles` copies configenv's
+    # own gitconfig over ~/.gitconfig, so a helper written into a home directory
+    # is erased before repo-bootstrap ever clones, and every private clone
+    # fails. Nothing reaches /etc, so the mod carries no ordering constraint.
+    assert "github-auth" in devbox.box_playbook()
+    assert "github-auth" not in devbox.WORKSPACE_BASE_MODS
+    spec = {s.name: s
+            for s in devbox.load_mod_specs(devbox.box_playbook(), None)}["github-auth"]
+    assert spec.runas == ["root"]
+    code = [line for line in spec.path.read_text().splitlines()
+            if not line.strip().startswith("#")]   # prose may discuss ~/.gitconfig
+    assert any("/etc/gitconfig" in line for line in code)
+    assert not any("$HOME" in line or "~/" in line for line in code)
+    # `gh auth setup-git` is the specific way back into a home directory: it
+    # writes the helper into ~/.gitconfig, naming no path this test could see.
+    assert not any("setup-git" in line for line in code)
+
+
+def test_repo_bootstrap_gets_github_auth_from_the_box_playbook(isolated_mods):
+    # A private `jj git clone` still depends on github-auth; the dependency now
+    # crosses playbooks. The box playbook runs first, so it is satisfied - and
+    # `requires` keeps saying so rather than the fact going undocumented.
+    workspace = _workspace(mode="clone", dir="r", url="https://x/y")
+    specs = {s.name: s
+             for s in devbox.load_mod_specs(devbox.workspace_playbook(workspace), None)}
+    assert "github-auth" in specs["repo-bootstrap"].requires
+    assert "github-auth" not in specs
+    devbox.validate_playbooks(workspace)   # must not die on the absent dependency
 
 
 def test_render_env_file_shell_quotes_values():

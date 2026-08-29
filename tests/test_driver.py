@@ -299,10 +299,10 @@ def test_preamble_warns_once_per_stale_checkout(box):
 
 # ---- mod dispatch -----------------------------------------------------------
 def test_mods_run_in_manifest_order_as_the_agent_by_default(box):
-    b = box([_spec("jj"), _spec("github-auth"), _spec("repo-bootstrap")])
+    b = box([_spec("jj"), _spec("claude-code"), _spec("repo-bootstrap")])
     r = b.run()
     assert r.returncode == 0, r.stderr
-    assert b.ran() == [("jj", AGENT), ("github-auth", AGENT), ("repo-bootstrap", AGENT)]
+    assert b.ran() == [("jj", AGENT), ("claude-code", AGENT), ("repo-bootstrap", AGENT)]
 
 
 def test_runas_root_and_admin_dispatch_to_the_right_accounts(box):

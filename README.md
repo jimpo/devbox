@@ -648,18 +648,20 @@ thing (jj, dotfiles, Claude Code, a workspace's rust toolchain, …). There are 
 playbooks**, because a box and an attachment need different things:
 
 ```
-box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim
+box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim →
+                                    github-auth
                                     # runs once per box, as root / the admin
 
-workspace playbook (built-in base):   jj → github-auth → dotfiles → vim → neovim →
+workspace playbook (built-in base):   jj → dotfiles → vim → neovim →
                                     claude-code → cargo-binstall → repo-bootstrap
 workspace mods (config.toml):         + rust + wasm-tools + …
                                     # runs once per attachment, in its account
 ```
 
-Ordering encodes the constraints (jj + github-auth before repo-bootstrap so a
-private `jj git clone` can authenticate; `dotfiles-packages`, the apt half,
-before `dotfiles`, the per-user half). The 95% case is "just add rust":
+Ordering encodes the constraints (jj before repo-bootstrap, which clones with
+it; `dotfiles-packages`, the apt half, before `dotfiles`, the per-user half).
+`github-auth`, the other half of a private `jj git clone`, sits in the box
+playbook, which runs first. The 95% case is "just add rust":
 `mods = ["rust"]`.
 
 **A box takes no config, so its playbook is fixed** — `dotfiles-packages` is the
@@ -924,8 +926,21 @@ with unrelated workspaces. Prefer a workspace's own `[env]` for anything scoped.
 
 **GitHub auth** is just `GITHUB_TOKEN` in `[env]`: `gh` reads it natively (no
 `gh auth login`, so nothing lands in `~/.config/gh/hosts.yml`), and the
-`github-auth` mod runs `gh auth setup-git` so `git`/`jj git` HTTPS use gh's
-credential helper — private clones and pushes work.
+`github-auth` mod points git's credential helper at `gh auth git-credential` so
+`git`/`jj git` HTTPS use it — private clones and pushes work. The clone URL stays
+plain HTTPS; gh is the helper behind it, not the transport.
+
+That helper line lives in **`/etc/gitconfig`**, written once per box as root. It
+holds no secret — it names a helper, and the helper answers with whatever
+`GITHUB_TOKEN` the *calling* account has in its own `~/.config/devbox/env`, so
+one system-wide line is right for every account on the box, the privileged one
+included. It is also out of reach of `dotfiles`, which copies its own gitconfig
+over `~/.gitconfig`. With no token the helper prints nothing and exits 1, git
+falls through, and public clones are unaffected.
+
+The box playbook runs at `devbox box create` and `devbox box sync --mods`, not
+at `devbox create` — so an existing box picks this up on its next `devbox box
+sync --mods`.
 
 **Delivery & idempotency:** `devbox sync --envvars` ships the map over SSH (piped,
 never echoed to a log), rewriting both managed files in full each run — so

@@ -85,18 +85,22 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # the apt half of the dotfiles setup, plus a usable shell and editor for the
 # privileged account, which is the box's debugging entry point
 # (`devbox ssh --admin`). `tree-sitter-cli` precedes `dotfiles` because the
-# latter's nvim config needs it to build parsers. Fixed and built-in: there is
-# no box config file, so a box grows beyond this only when an attached workspace
-# contributes a `runas = ["root"]` mod.
-BOX_BASE_MODS = ("dotfiles-packages", "tree-sitter-cli", "dotfiles", "vim")
+# latter's nvim config needs it to build parsers. `github-auth` is here rather
+# than in the workspace playbook because it writes /etc/gitconfig, which every
+# account on the box then shares: the line it writes names a credential helper,
+# and the helper answers from the calling account's own GITHUB_TOKEN. Fixed and
+# built-in: there is no box config file, so a box grows beyond this only when an
+# attached workspace contributes a `runas = ["root"]` mod.
+BOX_BASE_MODS = ("dotfiles-packages", "tree-sitter-cli", "dotfiles", "vim",
+                 "github-auth")
 
 # The workspace playbook: what one attachment needs inside its own account.
-# Ordering constraints are encoded here: jj + github-auth must precede
-# repo-bootstrap so a private `jj git clone` can authenticate, and dotfiles must
-# precede vim (which installs the plugins ~/.vimrc declares). `dotfiles`/`vim`
-# appear in BOTH playbooks on purpose - each declares `runas = ["admin", "agent"]`, and
-# each scope runs only its own half. A workspace's `mods` are appended after this.
-WORKSPACE_BASE_MODS = ("jj", "github-auth", "dotfiles", "vim", "neovim",
+# Ordering constraints are encoded here: jj must precede repo-bootstrap (which
+# clones with it), and dotfiles must precede vim (which installs the plugins
+# ~/.vimrc declares). `dotfiles`/`vim` appear in BOTH playbooks on purpose -
+# each declares `runas = ["admin", "agent"]`, and each scope runs only its own
+# half. A workspace's `mods` are appended after this.
+WORKSPACE_BASE_MODS = ("jj", "dotfiles", "vim", "neovim",
                        "claude-code", "cargo-binstall", "repo-bootstrap")
 
 # Which playbook a provisioning run is executing. The scope decides which

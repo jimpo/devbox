@@ -7,8 +7,9 @@
 # mod: repo-bootstrap - get the workspace's checkouts onto the box, one per
 # [[repos]] entry. "clone" pulls an existing repo via jj; "push" leaves an empty
 # colocated jj+git repo ready to receive `jj git push` from the host. Ordered
-# last in the base playbook (after jj + github-auth, so a private clone can
-# authenticate).
+# last in the workspace playbook, after jj. `github-auth` is the other
+# dependency of a private clone, and it satisfies this from the box playbook,
+# which runs first.
 #
 # Every checkout lands in this one account, which is what makes them share a set
 # of git/jj credentials - the point of putting several repos in one workspace.
