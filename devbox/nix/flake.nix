@@ -118,6 +118,9 @@
         modules = [
           # The option surface, and the rendered workspace values.
           ./options.nix
+          # devbox's own shell plumbing: the agent's ~/.zshenv. Not a mod, so
+          # it is always in the generation and reads no `devbox.mods` flag.
+          ./zshenv.nix
           # Converted mods, alphabetically, one entry per line.
           ./modules/cargo-binstall.nix
           ./modules/jj.nix

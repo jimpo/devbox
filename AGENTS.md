@@ -197,7 +197,10 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 - `sync.py` — host→box file sync (`[[sync]]`/`[[repos.sync]]`) via `run_sync`
   (per-mirror-unit rsync jobs over this workspace's own alias, anchored at its
   account's home), and `run_envvars` (writes the 0600 `[env]` file into that
-  account's home over the box's privileged alias, wires its ~/.zshenv). Used by
+  account's home over the box's privileged alias, and wires that account's
+  ~/.zshenv where devbox owns it — the privileged user's; an agent's is a file
+  of its home-manager generation, `nix/zshenv.nix`, which sources the same
+  0600 path). Used by
   `devbox sync --files`/`--envvars`; both auto-run on `create`. Every rule
   carries its own anchor (`ANCHOR_HOME`/`ANCHOR_WORKSPACE`/`ANCHOR_REPO`), so
   reading one tells you where both ends land; all three put the guest end under
@@ -261,7 +264,15 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   **not** supported — workspace > global > built-in shadowing does not
   translate to the module system, and the escape hatch stays a bash mod, which
   works exactly as it always has. **No cred ever enters a nix expression**:
-  /nix/store is world-readable and shared by every attachment.
+  /nix/store is world-readable and shared by every attachment. `zshenv.nix` is
+  the one module that is not a mod — always in the generation, gated on no
+  flag: it owns the agent's `~/.zshenv` (the file every zsh reads, `ssh <box>
+  '<cmd>'` included), puts `~/.local/bin` on PATH through `home.sessionPath`,
+  and *sources* the 0600 `~/.config/devbox/env` from it rather than carrying a
+  value out of it. It deliberately does not enable `programs.zsh`, which would
+  make the generation own `~/.zshrc` as well — that file belongs to the
+  `dotfiles` bash mod, and one file written by both halves is what breaks the
+  second activation.
 - `provision-driver.sh` — runs as the privileged user. `ensure_admin` wires that
   account; `ensure_agent` creates the attaching workspace's (idempotent, also
   reachable as `--ensure-agent`, enabling lingering so that account's systemd

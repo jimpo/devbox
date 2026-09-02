@@ -34,10 +34,11 @@
 # `uname -m` is the answer.
 #
 # `-b devbox-backup` moves a file the generation wants to own but did not write
-# aside to `<file>.devbox-backup`, rather than aborting the switch. A box that
-# has been provisioned by the bash mods has such files (a ~/.zshrc from
-# `dotfiles`, say), and a failed activation would leave the account with no
-# generation at all.
+# aside to `<file>.devbox-backup`, rather than aborting the switch. An account
+# that bash mods have set up has such a file (a plain ~/.zshenv, which
+# nix/zshenv.nix owns), and a failed activation would leave the account with no
+# generation at all. Only the first switch meets one: after it, every file the
+# generation owns is its own symlink and no mod writes there.
 #
 # Idempotency: `home-manager switch` is a reconcile - an unchanged flake
 # produces the same generation and touches nothing.

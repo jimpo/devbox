@@ -30,8 +30,10 @@ from .util import die
 # The box-side, devbox-managed 0600 env file, one per account, in that account's
 # home. Holds the account's slice of the effective [env] map as `export KEY=val`
 # lines; sourced from ~/.bash_env (the BASH_ENV target, what non-interactive bash
-# reads) and ~/.zshenv (interactive zsh) so the creds reach both an agent's Bash
-# tool and a human at a shell.
+# reads) and from ~/.zshenv (every zsh) so the creds reach both an agent's Bash
+# tool and a human at a shell. Which side writes that ~/.zshenv depends on the
+# account: the privileged one's is wired below, and an agent's is a file of its
+# home-manager generation (devbox/nix/zshenv.nix), which sources the same path.
 #
 # Each entry lands in exactly one of the two files, per its `owner` (see
 # config.EnvVar): this workspace's agent by default, the box's privileged user
@@ -39,16 +41,24 @@ from .util import die
 # per-user group and the files 0600, so no agent can read another workspace's
 # creds, nor the admin's; the privileged side can read them all.
 GUEST_ENV_REL = ".config/devbox/env"
+# The privileged account's zsh wiring. An agent's generation writes the same
+# line into its own ~/.zshenv (devbox/nix/zshenv.nix); the `[ -f ]` guard is what
+# lets either side run first - a shell that starts before the file is written
+# just has no creds.
 _ENV_SOURCE_LINE = '[ -f "$HOME/.config/devbox/env" ] && . "$HOME/.config/devbox/env"'
 
 
 def run_envvars(alias: str, env: dict, agent_user: str) -> None:
     """Write the box's devbox-managed [env] files (0600) - the agent's and the
-    privileged user's, each from its owner's slice of `env` - and ensure each
-    ~/.zshenv sources its own (~/.bash_env is wired by the provisioning driver).
-    Both are rewritten in full every run, so a key dropped from config, or moved
-    to the other owner, is dropped from the account that had it. Content is piped
-    over stdin (never echoed to a log, never in argv).
+    privileged user's, each from its owner's slice of `env` - and wire the
+    privileged user's ~/.zshenv to source its own. Both are rewritten in full
+    every run, so a key dropped from config, or moved to the other owner, is
+    dropped from the account that had it. Content is piped over stdin (never
+    echoed to a log, never in argv).
+
+    The agent's shells reach its file without help from here: ~/.bash_env comes
+    from the provisioning driver, and ~/.zshenv from that account's home-manager
+    generation (devbox/nix/zshenv.nix), which owns the file whole.
 
     `alias` is the PRIVILEGED user's alias: it owns one of the files, and reaches
     the other's home with sudo. The agent's home must already exist - `devbox
@@ -66,10 +76,7 @@ def run_envvars(alias: str, env: dict, agent_user: str) -> None:
         # file from /dev/stdin, hence the rm; install still creates the file
         # 0600, so the creds are never briefly world-readable.
         f'sudo rm -f {home}/.config/devbox/env; '
-        f'sudo install -o {user} -g {user} -m 0600 /dev/stdin {home}/.config/devbox/env; '
-        f'sudo touch {home}/.zshenv; sudo chown {user}:{user} {home}/.zshenv; '
-        f'sudo grep -qxF {line} {home}/.zshenv || '
-        f'printf "%s\\n" {line} | sudo tee -a {home}/.zshenv >/dev/null'
+        f'sudo install -o {user} -g {user} -m 0600 /dev/stdin {home}/.config/devbox/env'
     ))
     # The privileged user is the SSH user here, writing its own home: no sudo.
     _write_env_file(alias, env_for_owner(env, "admin"), "the privileged user", (

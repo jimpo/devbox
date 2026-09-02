@@ -1253,6 +1253,37 @@ def test_the_jj_module_reads_its_flag_and_the_workspaces_identity():
     assert "config.devbox.workspace.jjEmail" in text
 
 
+def test_the_agents_zshenv_is_the_generations_and_holds_no_creds():
+    # ~/.zshenv is the file EVERY zsh reads, including `ssh <box> '<cmd>'`, so
+    # it is where the [env] creds and ~/.local/bin have to reach an agent.
+    flake = (devbox.NIX_DIR / "flake.nix").read_text()
+    zshenv = (devbox.NIX_DIR / "zshenv.nix").read_text()
+    # The module's expressions, without the comments that discuss them.
+    code = "\n".join(line for line in zshenv.splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert "./zshenv.nix" in flake
+    assert 'home.file.".zshenv"' in code
+    assert "home.sessionPath" in code
+    # It SOURCES the 0600 env file rather than carrying a value from it:
+    # /nix/store is world-readable and shared by every attachment on the box.
+    assert f'"$HOME/{devbox.sync.GUEST_ENV_REL}"' in code
+    # devbox's own plumbing, not an optional mod: always in the generation, and
+    # gated on no `devbox.mods.<name>.enable` flag.
+    assert "devbox.mods" not in code
+    # `programs.zsh` would make the generation own ~/.zshrc too, and that file
+    # is the `dotfiles` bash mod's (configenv installs oh-my-zsh into it). One
+    # file written by both halves is what breaks the SECOND activation.
+    assert "programs.zsh" not in code
+
+
+def test_dotfiles_writes_zshenv_only_in_the_account_home_manager_does_not_own():
+    # The mod runs in both accounts. The privileged one keeps its apt zsh and
+    # gets the block; the agent's ~/.zshenv is a symlink into the store, and
+    # appending to it would break the account's next activation.
+    mod = (devbox.BUILTIN_MODS_DIR / "dotfiles.sh").read_text()
+    assert '[ "$(id -un)" = "${DEVBOX_ADMIN_USER:-}" ] &&' in mod
+
+
 # ---- resolve_env (global + workspace [env], workspace overrides per-key) --------
 def test_resolve_env_merges_global_and_workspace():
     gc = _global_config(devbox.Path("/nonexistent"),
@@ -2463,10 +2494,16 @@ def test_run_envvars_writes_one_managed_file_per_account(monkeypatch):
     # the agent's home needs sudo.
     assert "/home/agentbot/.config/devbox/env" in agent_cmd
     assert "-o agentbot -g agentbot -m 0600" in agent_cmd
-    assert "/home/agentbot/.zshenv" in agent_cmd
+    # The agent's ~/.zshenv belongs to its home-manager generation, which
+    # sources that file itself: writing to the store symlink here would break
+    # the account's next activation.
+    assert ".zshenv" not in agent_cmd
     # Its own home needs no sudo at all.
     assert "sudo" not in admin_cmd
     assert "$HOME/.config/devbox/env" in admin_cmd
+    # The privileged account is not managed by home-manager, so its own zsh
+    # wiring stays here.
+    assert "$HOME/.zshenv" in admin_cmd
     # Each account gets its own entries and no others...
     assert agent_in == b"export GITHUB_TOKEN=github_pat_x\nexport K='v w'\n"
     assert admin_in == b"export CLOUDFLARE_TOKEN=cf_tok\n"
