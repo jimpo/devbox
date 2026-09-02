@@ -303,7 +303,7 @@ which is what makes a change spanning them a single agent's job.
 | `devbox status` | cloud-init progress plus the tail of this workspace's `~/provision-<agent_user>.log`. |
 | `devbox ip` | Print the box's IPv4. |
 | `devbox sync --envvars` | (Re-)write the devbox-managed 0600 `[env]` files — scoped creds/vars (`GITHUB_TOKEN`, API keys) into the shell env of the account each one's `owner` names. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
-| `devbox sync --mods[=a,b,c]` | (Re-)run this workspace's **mods** over SSH — reconverge (bump jj, add a plugin, re-apply a rust mod) without destroy+create. No list runs the whole workspace playbook; a comma-separated list runs just those (fast iteration). |
+| `devbox sync --mods[=a,b,c]` | (Re-)run this workspace's **mods** over SSH — reconverge (add a plugin, re-apply a rust mod) without destroy+create. No list runs the whole workspace playbook; a comma-separated list runs just those (fast iteration). |
 | `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repos.sync]]`) onto the box via rsync — agent skills, git-excluded workspace files. Re-runnable + incremental. See "Host→box file sync" below. |
 | `devbox jj fetch [REPO]` | jj-fetch one checkout's bookmarked work into your local repo: refreshes the SSH alias (address via the provider), ensures the jj remote, and runs `jj git fetch`. Which checkout: the named one, else the one the working directory is inside, else the workspace's only one. See "Exchanging commits" below. |
 | `devbox host` | Refresh the SSH aliases used for `jj fetch` (below); prints this workspace's alias, and names the admin one. |
@@ -460,9 +460,12 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    already have set, if you use jj). It's only truly required if that
    fallback also fails (no `jj` on the host, or no identity configured
    there either), in which case `devbox create` dies with a clear message.
-   devbox's provisioning (the built-in `jj` mod) always runs
-   `jj config set --user user.name/user.email` in the sandbox, using
-   whichever source resolved.
+   Whichever source resolves, the identity is what the built-in `jj`
+   module writes into the agent's `~/.config/jj/config.toml` on the box.
+   home-manager owns that file, so it is a read-only symlink into the nix
+   store and `jj config set --user` on the box fails; jj also reads
+   `~/.config/jj/conf.d/*.toml`, which nothing manages and which takes
+   precedence, so that is where a by-hand override goes.
 
    `[env]` is a map of environment variables — scoped credentials, API
    keys — injected into every box (see [Credentials](#credentials-env) below).
@@ -815,7 +818,7 @@ belongs to another workspace, if it exists with no record at all (pass `--adopt`
 or if the agent has somehow acquired sudo or a root-equivalent group. It is a
 driver preamble rather than a mod on purpose: it must always run, must not be
 shadowable by a workspace's own mods directory, and must not be skippable via
-`devbox sync --mods=jj`.
+`devbox sync --mods=dotfiles`.
 
 **Idempotency contract:** every mod either overwrites unconditionally or guards
 on "already done", so `create` and every reconverge are safe. Each built-in

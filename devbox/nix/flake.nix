@@ -119,6 +119,7 @@
           # The option surface, and the rendered workspace values.
           ./options.nix
           # Converted mods, alphabetically, one entry per line.
+          ./modules/jj.nix
         ];
       };
     in

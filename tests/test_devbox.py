@@ -832,12 +832,21 @@ def _payload_map(workspace, gc, admin_user="alice"):
     return {pf.path: pf for pf in devbox.build_payload(workspace, gc, admin_user)}
 
 
+def _bash_base_mods():
+    """The bash half of the workspace base playbook, in playbook order: the
+    names the driver still runs, and so the manifest lines a plain attachment
+    has. A converted mod keeps its place in WORKSPACE_BASE_MODS and the
+    generation provides it, so it has no line."""
+    return [n for n in devbox.WORKSPACE_BASE_MODS
+            if n not in devbox.nix_module_names()]
+
+
 def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubkey):
     payload = _payload_map(_workspace(mode="clone", dir="r", url="https://x/y"), _global_config(pubkey))
     assert payload["provision-driver.sh"].content == devbox.DRIVER_PATH.read_text()
     manifest_names = [line.split("\t")[0]
                       for line in payload["manifest"].content.splitlines()]
-    assert manifest_names == list(devbox.WORKSPACE_BASE_MODS)
+    assert manifest_names == _bash_base_mods()
     ctx = payload["context.env"].content
     # Both accounts, named explicitly - a bare DEVBOX_USER would be ambiguous now.
     assert "export DEVBOX_ADMIN_USER=alice" in ctx
@@ -859,7 +868,7 @@ def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubke
     # box's 0600 ~/.config/devbox/env (see run_envvars).
     assert "secret.env" not in payload
     assert "GITHUB_TOKEN" not in ctx
-    for name in devbox.WORKSPACE_BASE_MODS:
+    for name in _bash_base_mods():
         assert f"mods/{name}.sh" in payload
 
 
@@ -908,7 +917,7 @@ def test_build_payload_appends_workspace_mods(isolated_mods, pubkey, tmp_path):
     payload = _payload_map(_workspace(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
     manifest_names = [line.split("\t")[0]
                       for line in payload["manifest"].content.splitlines()]
-    assert manifest_names == [*devbox.WORKSPACE_BASE_MODS, "rust"]
+    assert manifest_names == [*_bash_base_mods(), "rust"]
     assert payload["mods/rust.sh"].content == "#!/usr/bin/env bash\necho rust\n"
 
 
@@ -1010,7 +1019,6 @@ def test_build_payload_ships_the_flake_next_to_the_mods(isolated_mods, pubkey):
     workspace_nix = payload["nix/workspace.nix"].content
     assert 'agentUser = "agentbot";' in workspace_nix
     # A bash mod is not a module: it runs from the manifest and gets no flag.
-    # (Every mod in the base playbook is still a script today.)
     for name in devbox.WORKSPACE_BASE_MODS:
         if name not in devbox.nix_module_names():
             assert f"{devbox.nix_attr_name(name)}.enable" not in workspace_nix
@@ -1031,8 +1039,8 @@ def test_home_manager_is_an_agent_mod_that_needs_the_boxs_nix(isolated_mods):
     assert "home-manager" in devbox.WORKSPACE_BASE_MODS
     assert "home-manager" not in devbox.BOX_BASE_MODS
     spec = {s.name: s for s in
-            devbox.load_mod_specs(devbox.workspace_playbook(_workspace()),
-                                  None)}["home-manager"]
+            devbox.resolve_playbook(devbox.workspace_playbook(_workspace()),
+                                    None).specs}["home-manager"]
     assert spec.runas == ["agent"]
     assert spec.requires == ["nix"]
     text = spec.path.read_text()
@@ -1058,9 +1066,9 @@ def converted(tmp_path, monkeypatch):
         mods = tmp_path / "builtin-mods"
         devbox.shutil.copytree(devbox.BUILTIN_MODS_DIR, mods)
         modules = tmp_path / "modules"
-        modules.mkdir()
+        devbox.shutil.copytree(devbox.NIX_MODULES_DIR, modules)
         for name in names:
-            (mods / f"{name}.sh").unlink()
+            (mods / f"{name}.sh").unlink(missing_ok=True)
             (modules / f"{name}.nix").write_text("{ }\n")
         monkeypatch.setattr(devbox.provision, "BUILTIN_MODS_DIR", mods)
         monkeypatch.setattr(devbox.provision, "NIX_MODULES_DIR", modules)
@@ -1104,8 +1112,8 @@ def test_a_converted_opt_in_mod_keeps_a_workspaces_config_working(converted, pub
     marker_dir = tmp_path / "ws"
     marker_dir.mkdir()
     workspace = _workspace(marker_dir=marker_dir, mods=["uv"])
-    assert devbox.resolve_playbook(devbox.workspace_playbook(workspace),
-                                   workspace.marker.mods_dir).modules == ["uv"]
+    assert "uv" in devbox.resolve_playbook(
+        devbox.workspace_playbook(workspace), workspace.marker.mods_dir).modules
     payload = _payload_map(workspace, _global_config(pubkey))
     assert "mods/uv.sh" not in payload
     assert "uv.enable = true;" in payload["nix/workspace.nix"].content
@@ -1182,6 +1190,37 @@ def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():
     # Both inputs pinned to an exact rev, so the lock nix writes on the box is
     # deterministic without one being checked in.
     assert re.search(r"github:NixOS/nixpkgs/[0-9a-f]{40}", flake)
+
+
+def test_every_shipped_module_is_imported_by_the_flake():
+    # A module ships by file presence, but only the flake's `modules` list makes
+    # nix evaluate it: a file that is not listed lands on the box inert.
+    flake = (devbox.NIX_DIR / "flake.nix").read_text()
+    for name in devbox.nix_module_names():
+        assert f"./modules/{name}.nix" in flake
+
+
+def test_jj_is_the_generations_and_repo_bootstrap_still_requires_it(isolated_mods):
+    # No script answers to `jj`, so the base playbook resolves the name to the
+    # module and the driver gets no line for it. `repo-bootstrap` still names it
+    # in `requires`, and a module satisfies that wherever it sits - the
+    # generation carrying it is switched by `home-manager`, first in the base.
+    workspace = _workspace(mode="clone", dir="r", url="https://x/y")
+    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace), None)
+    assert "jj" in playbook.modules
+    assert "jj" not in [s.name for s in playbook.specs]
+    assert "jj" in {s.name: s for s in playbook.specs}["repo-bootstrap"].requires
+    devbox.validate_playbooks(workspace)
+
+
+def test_the_jj_module_reads_its_flag_and_the_workspaces_identity():
+    # The two halves of the module contract: it is inert unless the generation
+    # provides it, and the author identity comes from the rendered workspace
+    # values rather than from anything a module could read off the box.
+    text = (devbox.NIX_MODULES_DIR / "jj.nix").read_text()
+    assert "config.devbox.mods.jj.enable" in text
+    assert "config.devbox.workspace.jjName" in text
+    assert "config.devbox.workspace.jjEmail" in text
 
 
 # ---- resolve_env (global + workspace [env], workspace overrides per-key) --------
@@ -1497,9 +1536,11 @@ def test_render_manifest_narrows_the_runas_column_to_the_scope():
 def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
     # Every shipped mod's `# /// mod` block parses, and its `runas` targets are
     # known. Guards the metadata itself, which nothing else type-checks.
-    names = [*devbox.box_playbook(), *devbox.workspace_playbook(_workspace())]
-    specs = devbox.load_mod_specs(names, None)
-    assert [s.name for s in specs] == names
+    specs = [*devbox.resolve_playbook(devbox.box_playbook(), None,
+                                      devbox.SCOPE_BOX).specs,
+             *devbox.resolve_playbook(devbox.workspace_playbook(_workspace()),
+                                      None).specs]
+    assert [s.name for s in specs] == [*devbox.box_playbook(), *_bash_base_mods()]
     for spec in specs:
         assert spec.runas, f"{spec.name} resolved to no runas target"
         for target in spec.runas:
@@ -1509,8 +1550,11 @@ def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
 def test_shipped_mods_never_call_sudo(isolated_mods):
     # A mod body runs as an account without sudo. `sudo` in a mod is a bug now:
     # apt goes through `packages`, and real privilege through `runas = ["root"]`.
-    names = [*devbox.box_playbook(), *devbox.workspace_playbook(_workspace())]
-    for spec in devbox.load_mod_specs(names, None):
+    specs = [*devbox.resolve_playbook(devbox.box_playbook(), None,
+                                      devbox.SCOPE_BOX).specs,
+             *devbox.resolve_playbook(devbox.workspace_playbook(_workspace()),
+                                      None).specs]
+    for spec in specs:
         for line in spec.path.read_text().splitlines():
             stripped = line.strip()
             if stripped.startswith("#"):
@@ -1523,8 +1567,10 @@ def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_workspaces(isola
     # the privileged user gets the dotfiles once per box (so `devbox box ssh`,
     # the debugging shell, is usable), and each attachment gets them in its own
     # account - without redoing the admin's on every attach.
-    box = devbox.load_mod_specs(devbox.box_playbook(), None)
-    workspace = devbox.load_mod_specs(devbox.workspace_playbook(_workspace()), None)
+    box = devbox.resolve_playbook(devbox.box_playbook(), None,
+                                  devbox.SCOPE_BOX).specs
+    workspace = devbox.resolve_playbook(
+        devbox.workspace_playbook(_workspace()), None).specs
     assert devbox.render_manifest(box, devbox.SCOPE_BOX).splitlines() == [
         "dotfiles-packages\troot\t",   # the apt half: once, as root, per box
         "tree-sitter-cli\troot\tunzip",
@@ -1588,8 +1634,8 @@ def test_repo_bootstrap_gets_github_auth_from_the_box_playbook(isolated_mods):
     # crosses playbooks. The box playbook runs first, so it is satisfied - and
     # `requires` keeps saying so rather than the fact going undocumented.
     workspace = _workspace(mode="clone", dir="r", url="https://x/y")
-    specs = {s.name: s
-             for s in devbox.load_mod_specs(devbox.workspace_playbook(workspace), None)}
+    specs = {s.name: s for s in devbox.resolve_playbook(
+        devbox.workspace_playbook(workspace), None).specs}
     assert "github-auth" in specs["repo-bootstrap"].requires
     assert "github-auth" not in specs
     devbox.validate_playbooks(workspace)   # must not die on the absent dependency

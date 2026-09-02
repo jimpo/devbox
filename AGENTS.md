@@ -106,7 +106,7 @@ It does not and cannot exercise `box create`/`up`/`stop`/`destroy`/`host`/
 `create`/`detach`/`list --attached`/`jj fetch` end-to-end against real infra
 (`jj fetch`'s actual `jj git fetch` needs a
 booted, provisioned box), the actual behavior of the built-in mods on a real
-box (jj install, dotfiles, Claude Code, repo bootstrap, the multi-user nix
+box (dotfiles, Claude Code, repo bootstrap, the multi-user nix
 install and its daemon — though
 `repo-bootstrap`'s loop over the `repos` file is plain bash and can be run by
 hand against fake `jj`/`git`), **anything nix evaluates** (this host has no
@@ -145,6 +145,13 @@ for the configuration itself, are the evaluation checks pytest cannot run —
 manual, on a box, against a payload directory (keep one by running the driver
 by hand, or point them at a copy of `devbox/nix/` with a `workspace.nix`
 beside it).
+
+For the `jj` module, on the same box: `ssh <agent-alias> 'jj --version'` finds
+jujutsu from `~/.nix-profile/bin`; `jj config get user.name` in a checkout
+returns the workspace's identity; `jj config set --user ui.pager cat` fails,
+because home-manager owns `~/.config/jj/config.toml`; and the same setting in
+`~/.config/jj/conf.d/local.toml` takes effect, which is the by-hand override
+route on the box.
 
 `tests/conftest.py` just puts the repo root on `sys.path` so `import devbox`
 resolves the package (works with or without an editable install). Tests
