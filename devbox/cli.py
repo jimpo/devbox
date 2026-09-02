@@ -838,39 +838,90 @@ def cmd_box_sync(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> 
     print("done.")
 
 
+# The nix state one account owns, relative to its home. Every one of these is,
+# or holds, a GC root, so the account's whole store closure stays alive for as
+# long as they do - and on the nix the box installs (2.35, multi-user) they all
+# sit inside the home: a non-root user's profiles live under
+# $XDG_STATE_HOME/nix/profiles (`home-manager`, `home-manager-<N>-link` and the
+# `profile` that `~/.nix-profile` points at, one link per generation), and
+# home-manager 26.05 keeps its "current generation" root in
+# $XDG_STATE_HOME/home-manager/gcroots. /nix/var/nix/{profiles,gcroots}/per-user
+# is the other place a profile or a root for a named account can sit, so detach
+# clears that too rather than trusting the layout to stay put.
+AGENT_NIX_STATE = (".local/state/nix/profiles", ".local/state/home-manager",
+                   ".nix-profile")
+
+
+def _detach_script(agent: str, purge: bool) -> str:
+    """The root-owned teardown a detach runs on the box, as one shell command.
+
+    The ownership record and the authorized key go first, so a run cut short
+    leaves an account nothing can reach rather than a reachable account nothing
+    claims.
+
+    IT DROPS THE NIX ROOTS AND STOPS - no `nix-collect-garbage`. Collection is
+    the box's policy and the box's policy (mods/nix.sh) is min-free/max-free:
+    the daemon reclaims unreferenced paths mid-build, once the disk is actually
+    running short. A sweep here would instead spend minutes of a teardown
+    discarding byproducts every OTHER workspace on the box is about to reuse, at
+    a moment chosen by whoever happened to detach. Dropping the roots is the
+    part only detach can do; freeing the space is the daemon's, whenever it
+    needs it. Each root is registered with the daemon as an indirect root under
+    /nix/var/nix/gcroots/auto, and nix unlinks a stale one itself, so removing
+    the paths below is the whole of the job.
+
+    `rm -rf` on a path that is not there succeeds, which is also the whole of
+    the "box that never installed nix" case.
+
+    The three directories are read from the environment for the same reason the
+    driver reads its two: it is what lets a test point this at a fake box."""
+    a = shlex.quote(agent)
+    home_state = " ".join(f'"$h"/{p}' for p in AGENT_NIX_STATE)
+    parts = [
+        "set -e",
+        'm="${DEVBOX_WORKSPACES_DIR:-' + MARKERS_DIR + '}"',
+        'lm="${DEVBOX_LEGACY_MARKERS_DIR:-' + LEGACY_MARKERS_DIR + '}"',
+        'n="${NIX_STATE_DIR:-/nix/var/nix}"',
+        f'sudo rm -f "$m"/{a} "$lm"/{a}',
+        f'h="$(getent passwd {a} | cut -d: -f6)"',
+        '[ -n "$h" ] || exit 0',
+        'sudo truncate -s 0 "$h/.ssh/authorized_keys" 2>/dev/null || true',
+        'sudo rm -f "$h/.config/devbox/env"',
+        f'sudo rm -rf {home_state}',
+        f'sudo rm -rf "$n"/profiles/per-user/{a} "$n"/gcroots/per-user/{a}',
+        f'sudo usermod --lock --expiredate 1 {a}',
+    ]
+    if purge:
+        # userdel refuses while a session is alive, hence the terminate first.
+        parts += [
+            f'sudo loginctl terminate-user {a} 2>/dev/null || true',
+            f'sudo pkill -KILL -u {a} 2>/dev/null || true',
+            "sleep 1",
+            f'sudo userdel -r {a}',
+        ]
+    return "; ".join(parts)
+
+
 def cmd_detach(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
     """Give up this workspace's account on its box.
 
-    Non-destructive by default: the ownership record, the authorized key and the
-    credentials go, so nothing can reach the account any more - but the home, and
-    with it any uncommitted work, stays, so re-attaching is instant. `--purge` is
-    the one that deletes; `userdel` refuses while a session is alive, hence the
-    terminate first."""
+    Non-destructive by default: the ownership record, the authorized key, the
+    credentials and the account's nix profile go, so nothing can reach the
+    account any more and its store closure becomes collectable - but the files,
+    and with them any uncommitted work, stay, so re-attaching is instant. The
+    generation is not among them: it is derived, and `devbox create` switches
+    the account back to one. `--purge` is the one that deletes."""
     name, provider_name, provider = _resolve_target(args, workspace, gc)
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    agent = shlex.quote(workspace.agent_user)
     _, admin_alias = _refresh_ssh_aliases(name, ip, _admin_user(provider, name))
 
     if args.purge and not _confirm_destroy(
             f"{workspace.agent_user}@{name}", provider_name, args.yes):
         print("Aborted; nothing removed.")
         return
-    remote = (
-        f'set -e; sudo rm -f {MARKERS_DIR}/{agent} {LEGACY_MARKERS_DIR}/{agent}; '
-        f'h="$(getent passwd {agent} | cut -d: -f6)"; '
-        f'[ -n "$h" ] || exit 0; '
-        f'sudo truncate -s 0 "$h/.ssh/authorized_keys" 2>/dev/null || true; '
-        f'sudo rm -f "$h/.config/devbox/env"; '
-        f'sudo usermod --lock --expiredate 1 {agent}'
-    )
-    if args.purge:
-        remote += (
-            f'; sudo loginctl terminate-user {agent} 2>/dev/null || true; '
-            f'sudo pkill -KILL -u {agent} 2>/dev/null || true; sleep 1; '
-            f'sudo userdel -r {agent}'
-        )
+    remote = _detach_script(workspace.agent_user, args.purge)
     r = subprocess.run(["ssh", admin_alias, "bash", "-c", shlex.quote(remote)])
     if r.returncode != 0:
         die(f"detaching '{workspace.agent_user}' from '{name}' failed "
@@ -879,7 +930,8 @@ def cmd_detach(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceC
     conf = SSH_DIR / f"{name}.{workspace.workspace}.conf"
     conf.unlink(missing_ok=True)
     kept = ("" if args.purge else
-            f"\nIts home is untouched; `devbox create` re-attaches it.")
+            "\nIts files stay; its nix generation is dropped and `devbox create`"
+            "\nrebuilds one when it re-attaches.")
     print(f"Detached '{workspace.workspace}' from '{name}'.{kept}")
 
 

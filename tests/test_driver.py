@@ -75,6 +75,19 @@ exit 0
     "chown": r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_LOG/chown.log"
 """,
+    # The account-teardown pair. `userdel -r` takes the home with it, which is
+    # what makes a purge different from a plain detach.
+    "usermod": r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG/usermod.log"
+""",
+    "userdel": r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG/userdel.log"
+user="${@: -1}"
+case " $* " in *" -r "*) rm -rf "$FAKE_HOMES/$user" ;; esac
+""",
+    "pkill": r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG/pkill.log"
+""",
     "apt-get": r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_LOG/apt-get.log"
 """,
@@ -124,9 +137,12 @@ class _Box:
         self.payload = root / "payload"
         self.bin = root / "bin"
         self.etc = root / "etc"
+        # The box's nix state directory (/nix/var/nix on a real box), where the
+        # daemon keeps the roots it owns.
+        self.nix_state = root / "nix-var"
         self.agent = agent
         for d in (self.log_dir, self.homes, self.payload, self.bin, self.etc,
-                  self.payload / "mods"):
+                  self.nix_state, self.payload / "mods"):
             d.mkdir(parents=True, exist_ok=True)
         # The privileged user already exists (the init script made it at boot);
         # an agent does not - the driver's preamble is what creates it. root has
@@ -160,8 +176,8 @@ class _Box:
                                         extra=getattr(spec, "_extra", "")))
             path.chmod(0o755)
 
-    def run(self, *args, **env_overrides):
-        env = {
+    def _env(self, **overrides):
+        return {
             **os.environ,
             "PATH": f"{self.bin}:{os.environ['PATH']}",
             "HOME": str(self.homes / ADMIN),
@@ -171,11 +187,58 @@ class _Box:
             # box so the driver's own writes and reads can run unprivileged.
             "DEVBOX_WORKSPACES_DIR": str(self.etc / "workspaces"),
             "DEVBOX_LEGACY_MARKERS_DIR": str(self.etc / "projects"),
-            **env_overrides,
+            # Same seam for /nix/var/nix, which detach clears of this account.
+            "NIX_STATE_DIR": str(self.nix_state),
+            **overrides,
         }
+
+    def run(self, *args, **env_overrides):
         return subprocess.run(
             ["bash", str(self.payload / "provision-driver.sh"), *args],
-            capture_output=True, text=True, env=env)
+            capture_output=True, text=True, env=self._env(**env_overrides))
+
+    def detach(self, agent=None, purge=False, **env_overrides):
+        """The root-owned teardown `devbox detach` sends to the box, run here.
+
+        It is a shell command built host-side (cli._detach_script) rather than a
+        driver mode - detach ships no payload, so there is no driver on the box
+        to call - but it is the same kind of privileged account surgery the
+        driver does, against the same fakes."""
+        script = devbox.cli._detach_script(agent or self.agent, purge)
+        return subprocess.run(["bash", "-c", script], capture_output=True,
+                              text=True, env=self._env(**env_overrides))
+
+    def seed_nix_state(self, agent=None):
+        """What an account looks like after a `home-manager switch`: the
+        generation profile and one link per generation it has had, the nix
+        profile `~/.nix-profile` points at, and home-manager's own GC root -
+        every one of them inside the account's own home, which is where nix
+        2.35 and home-manager 26.05 put a non-root user's. The per-user
+        directories under the box's nix state are the other place a root for a
+        named account can sit."""
+        home = self.homes / (agent or self.agent)
+        gen = "/nix/store/00000000-home-manager-generation"
+        profiles = home / ".local" / "state" / "nix" / "profiles"
+        profiles.mkdir(parents=True, exist_ok=True)
+        for link in ("home-manager", "home-manager-1-link", "home-manager-2-link",
+                     "profile", "profile-1-link"):
+            (profiles / link).symlink_to(gen)
+        (home / ".nix-profile").symlink_to(profiles / "profile")
+        gcroots = home / ".local" / "state" / "home-manager" / "gcroots"
+        gcroots.mkdir(parents=True, exist_ok=True)
+        (gcroots / "current-home").symlink_to(gen)
+        for d in ("profiles", "gcroots"):
+            (self.nix_state / d / "per-user" / (agent or self.agent)).mkdir(
+                parents=True, exist_ok=True)
+
+    def nix_roots(self, agent=None):
+        """Every path this account's GC roots would live at, existing or not."""
+        home = self.homes / (agent or self.agent)
+        return [home / ".local" / "state" / "nix" / "profiles",
+                home / ".local" / "state" / "home-manager",
+                home / ".nix-profile",
+                self.nix_state / "profiles" / "per-user" / (agent or self.agent),
+                self.nix_state / "gcroots" / "per-user" / (agent or self.agent)]
 
     def log(self, name):
         path = self.log_dir / f"{name}.log"
@@ -659,3 +722,87 @@ def test_the_full_run_ensures_users_first(box):
     b = box([_spec("jj")])
     assert b.run().returncode == 0
     assert (b.homes / AGENT).is_dir()
+
+
+# ---- detach -----------------------------------------------------------------
+# `devbox detach` is the other half of `ensure_agent`: root-owned account
+# surgery on the box. A home-manager generation, its profile and every past
+# generation are nix GC roots, so an account that is detached but still holds
+# them pins its whole store closure forever - a box that has hosted a dozen
+# workspaces then fills with the closures of workspaces nobody uses.
+def test_detach_removes_the_agents_profile_and_gc_roots(box):
+    b = box([_spec("home-manager")])
+    assert b.run("--ensure-users").returncode == 0
+    b.seed_nix_state()
+    r = b.detach()
+    assert r.returncode == 0, r.stderr
+    for path in b.nix_roots():
+        assert not os.path.lexists(path), path
+
+
+def test_detach_keeps_the_account_files_it_drops_the_generation_from(box):
+    # The default detach is non-destructive: a generation is derived and gets
+    # rebuilt on re-attach, so it goes; work does not.
+    b = box([_spec("home-manager")])
+    assert b.run("--ensure-users").returncode == 0
+    b.seed_nix_state()
+    work = b.homes / AGENT / "repo"
+    work.mkdir()
+    (work / "notes.txt").write_text("uncommitted\n")
+    assert b.detach().returncode == 0
+    assert (work / "notes.txt").read_text() == "uncommitted\n"
+    assert not os.path.lexists(b.homes / AGENT / ".nix-profile")
+    assert b.marker() == ""                      # the claim is given up
+    assert "--lock" in b.log("usermod")           # and nothing can log in
+
+
+def test_detach_is_clean_on_a_box_with_no_nix(box):
+    # An older box, or one whose `nix` mod never ran: there is no store, no
+    # profile and no state directory, and the teardown still has to succeed.
+    b = box([_spec("jj")])
+    assert b.run("--ensure-users").returncode == 0
+    r = b.detach()
+    assert r.returncode == 0, r.stderr
+    assert b.marker() == ""
+    assert (b.homes / AGENT).is_dir()
+
+
+def test_detach_runs_no_garbage_collection(box):
+    # Dropping the roots is the part only detach can do; freeing the space is
+    # the daemon's, under the min-free/max-free policy the box installs. A sweep
+    # here would discard byproducts the other workspaces are about to reuse.
+    b = box([_spec("home-manager")])
+    assert b.run("--ensure-users").returncode == 0
+    b.seed_nix_state()
+    assert b.detach().returncode == 0
+    assert "nix-collect-garbage" not in b.log("sudo")
+    assert "nix-store" not in b.log("sudo")
+
+
+def test_purging_takes_the_whole_home_and_its_roots(box):
+    b = box([_spec("home-manager")])
+    assert b.run("--ensure-users").returncode == 0
+    b.seed_nix_state()
+    r = b.detach(purge=True)
+    assert r.returncode == 0, r.stderr
+    assert not (b.homes / AGENT).exists()
+    for path in b.nix_roots():
+        assert not os.path.lexists(path), path
+
+
+def test_detaching_one_workspace_leaves_the_others_profile_intact(box, tmp_path):
+    # Two workspaces on one box share most of their closure, and nix keeps the
+    # shared paths alive for whoever still roots them. What devbox has to get
+    # right is narrower: detach must touch only the account it was given.
+    first = _Box(tmp_path, [_spec("home-manager")])
+    assert first.run().returncode == 0
+    first.seed_nix_state()
+    second = _Box(tmp_path, [_spec("home-manager")], agent="webbot", workspace="web")
+    assert second.run().returncode == 0
+    second.seed_nix_state()
+
+    assert first.detach().returncode == 0
+    for path in second.nix_roots("webbot"):
+        assert os.path.lexists(path), path
+    assert "workspace=web" in second.marker("webbot")
+    assert (second.homes / "webbot" / ".bash_env").exists()

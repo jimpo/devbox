@@ -94,13 +94,23 @@ the `~/.bash_env` nix wiring (both accounts name the store's `/etc/profile.d`
 script and their own `~/.nix-profile`, and sourcing the real file puts the
 home-manager generation ahead of `~/.local/bin`),
 the per-repo stale-checkout warning, per-attachment log directories, and two
-workspaces sharing one fake box without disturbing each other. The fake `sudo`
+workspaces sharing one fake box without disturbing each other. The same fakes
+also drive the **detach teardown** — `cli._detach_script`, which is a shell
+command built host-side rather than a driver mode, because detach ships no
+payload and so has no driver on the box to call, but which is the same
+root-owned account surgery: the agent's nix profile, its generation links and
+home-manager's GC roots going away while the account's files stay, a box that
+never installed nix detaching cleanly, no garbage collection anywhere in the
+run, `--purge` taking the whole home with it, and detaching one of two
+workspaces leaving the other's profile and ownership marker intact. The fake
+`sudo`
 executes the command for real, so the control flow is genuine; only the privilege
 is simulated. It builds the manifest and the `repos` file with the real
 `render_manifest`/`render_repos`, so it also pins the Python→bash format
 agreement. `DEVBOX_WORKSPACES_DIR`/`DEVBOX_LEGACY_MARKERS_DIR` exist so the
-driver's root-owned markers can be redirected into the fake box — the one seam in
-the driver that only the tests use.
+driver's root-owned markers can be redirected into the fake box, and
+`NIX_STATE_DIR` (nix's own variable) does the same for the per-user directories
+under `/nix/var/nix` — the seams that only the tests use.
 
 It does not and cannot exercise `box create`/`up`/`stop`/`destroy`/`host`/
 `create`/`detach`/`list --attached`/`jj fetch` end-to-end against real infra
@@ -127,7 +137,14 @@ own account, that the multi-repo one has both checkouts in that one home and
 `devbox jj fetch` picks the right one from each, that `sudo -n true` fails as
 either agent, that neither can read the other's `~/.config/devbox/env`, that a
 second `devbox create` is a clean reconverge, and that `devbox detach` in one
-leaves the other untouched.
+leaves the other untouched. Then, with both still attached, do the **shared-closure
+check**: `devbox detach` one of them, run `sudo nix-collect-garbage` as the box's
+privileged account (which is what the store's min-free/max-free would eventually
+do by itself), and check that the workspace still attached is unharmed — its
+`home-manager generations` still resolve, `devbox ssh` still finds the tools its
+generation provides, and `devbox sync --mods=home-manager` is still a no-op
+reconverge. Two workspaces share most of their closure, so this is what says that
+dropping one's roots frees only what nothing else roots.
 
 For the home-manager half, on the same box: that `devbox create` ends with the
 `home-manager` mod reporting a switch; that `ssh <box-alias> 'command -v nix'`
@@ -344,6 +361,20 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   `list` goes through `_list_boxes`, which reads every provider it can and
   reports the rest as warnings — a read-only global view is worth more partial
   than not at all, and one lapsed AWS session shouldn't hide the local boxes.
+  `detach` sends one root-owned teardown to the box (`_detach_script`): the
+  ownership marker, the authorized key, the creds, and the account's nix
+  profile — the generation profile, every generation link, the `~/.nix-profile`
+  the packages go in and home-manager's own GC roots, all of which sit under
+  the account's home on the nix the box installs, plus the per-user directories
+  under `/nix/var/nix` for the other layouts a root can sit in. **A generation
+  is a GC root**, so an account that keeps one keeps its whole store closure,
+  and a box that has hosted a dozen workspaces would fill with the closures of
+  workspaces nobody uses. The files stay (a generation is derived, and
+  `devbox create` switches the account back to one); `--purge` takes the home
+  too. It drops the roots and runs **no** `nix-collect-garbage`: collection is
+  the box's min-free/max-free policy (see the `nix` mod), and a sweep at
+  teardown would spend minutes discarding byproducts the box's other
+  workspaces are about to reuse, at a moment whoever detached happened to pick.
 - `__init__.py` — re-exports a flat `devbox.X` API for convenience/tests.
 
 `pyproject.toml` (hatchling) declares the `devbox.cli:main` entry point,
