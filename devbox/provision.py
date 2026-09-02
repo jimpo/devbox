@@ -123,16 +123,22 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # `nix` is box-scoped for the same reason: /nix and the nix-daemon are one
 # machine-wide store that every attached workspace shares, and only the
 # privileged account is a trusted user of it.
-BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim", "github-auth", "nix")
+# `vim-plug` is the box's half of vim: the privileged account has no
+# generation, so its plugins are fetched imperatively, from the ~/.vimrc
+# `dotfiles` writes. An agent's vim is the flake's module of that name, which is
+# why the two halves are named apart - one name resolves to one implementation.
+BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim-plug", "github-auth",
+                 "nix")
 
 # The workspace playbook: what one attachment needs inside its own account.
 # Ordering constraints are encoded here: jj must precede repo-bootstrap (which
-# clones with it), and dotfiles must precede vim (which installs the plugins
-# ~/.vimrc declares). `dotfiles`/`vim` appear in BOTH playbooks on purpose -
-# each declares `runas = ["admin", "agent"]`, and each scope runs only its own
-# half. A workspace's `mods` are appended after this.
+# clones with it). `dotfiles` appears in BOTH playbooks on purpose - it declares
+# `runas = ["admin", "agent"]`, and each scope runs only its own half. A
+# workspace's `mods` are appended after this.
 # `home-manager` runs first: it is the declarative half of the account, and a
-# bash mod after it can use what the generation put on the PATH.
+# bash mod after it can use what the generation put on the PATH. `vim` is a name
+# that half provides: there is no mods/vim.sh, so it resolves to the flake's
+# nix/modules/vim.nix (see resolve_playbook).
 WORKSPACE_BASE_MODS = ("home-manager", "jj", "dotfiles", "vim", "neovim",
                        "claude-code", "cargo-binstall", "repo-bootstrap")
 

@@ -179,9 +179,11 @@ machine:
   matters to you; devbox doesn't ship one.
 - **Shared CPU, RAM and disk.** N agents running `cargo build` contend, and one
   can ENOSPC the rest. Box sizing is now an N-workspace decision.
-- **Duplication, deliberately.** Each account gets its own oh-my-zsh, jj binary,
-  Claude Code install and vim plugins — a few minutes and a few hundred MB per
-  attach, accepted in exchange for accounts that don't share state.
+- **Duplication, deliberately.** Each account gets its own oh-my-zsh, jj binary
+  and Claude Code install — a few minutes and a few hundred MB per
+  attach, accepted in exchange for accounts that don't share state. (What the
+  generation provides is the exception: /nix/store is one machine-wide store, so
+  two accounts on the same plugin set share the paths.)
 - **One provisioning run per box at a time.** Concurrent attaches share apt's
   lock (devbox sets `DPkg::Lock::Timeout=600`) and the ownership markers are
   written atomically, but nothing serializes two full runs.
@@ -651,7 +653,7 @@ thing (jj, dotfiles, Claude Code, a workspace's rust toolchain, …). There are 
 playbooks**, because a box and an attachment need different things:
 
 ```
-box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim →
+box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim-plug →
                                     github-auth → nix
                                     # runs once per box, as root / the admin
 
@@ -690,10 +692,17 @@ workspace that needs something of its own ships a bash mod, exactly as before.
 Nothing from `[env]` may appear in a nix expression: `/nix/store` is
 world-readable and shared by every attachment.
 
-**`dotfiles` and `vim` are in both playbooks on purpose** — each declares
+**`dotfiles` is in both playbooks on purpose** — it declares
 `runas = ["admin", "agent"]`, and each scope runs only its own half. The box runs the
 admin half once (so `devbox box ssh`, the debugging shell, is usable) and each
 attachment runs the agent half in its own account, without redoing the admin's.
+
+**vim is split by name instead**, because its two halves are different
+implementations. An agent's is `nix/modules/vim.nix`, which takes the plugin set
+(base16-vim, vim-go, rust.vim) from the store; the privileged account has no
+generation, so its is `vim-plug`, a box mod that fetches vim-plug and runs
+`:PlugInstall` against the ~/.vimrc `dotfiles` wrote. They cannot share the name
+`vim`: a script of that name would shadow the module everywhere.
 
 **Resolution** — each mod name resolves to a `<name>.sh` script by precedence
 **workspace > global > built-in**, so a workspace can shadow a built-in by name:
@@ -832,7 +841,7 @@ needs it. The box playbook is indexed first, so a workspace mod may depend on a 
 mod — the machine exists before any attachment does. It is **not** a resolver —
 it never reorders or auto-inserts; it just validates order (so a future reorder
 can't silently break things). Built-in examples: `repo-bootstrap`
-`requires = ["jj", "github-auth"]`, `vim` `requires = ["dotfiles"]`.
+`requires = ["jj", "github-auth"]`, `vim-plug` `requires = ["dotfiles"]`.
 
 ### Example: a rust workspace
 

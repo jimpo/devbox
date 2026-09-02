@@ -59,6 +59,12 @@ in
   };
 
   config = {
+    # Unfree packages are allowed. nixpkgs' vim/neovim plugin updater stamps
+    # `meta.license = unfree` on every plugin whose licence it could not detect
+    # - base16-vim and vim-go among them - so an editor's plugin set does not
+    # evaluate without this.
+    nixpkgs.config.allowUnfree = true;
+
     devbox.workspace = {
       inherit (workspace) agentUser homeDirectory jjName jjEmail;
     };

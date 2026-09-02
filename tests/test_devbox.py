@@ -1659,13 +1659,48 @@ def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_workspaces(isola
     assert devbox.render_manifest(box, devbox.SCOPE_BOX).splitlines() == [
         "dotfiles-packages\troot\t",   # the apt half: once, as root, per box
         "dotfiles\tadmin\t",
-        "vim\tadmin\t",
+        "vim-plug\tadmin\t",
         "github-auth\troot\t",
         "nix\troot\txz-utils",
     ]
     by_name = {s.name: s for s in workspace}
     assert devbox.scoped_runas(by_name["dotfiles"].runas, devbox.SCOPE_WORKSPACE) == ["agent"]
     assert "dotfiles-packages" in by_name["dotfiles"].requires
+
+
+def test_vim_is_a_module_for_the_agent_and_a_script_for_the_admin(isolated_mods):
+    # The one mod whose two halves are different implementations. An agent's vim
+    # is the flake's module, so no `vim.sh` may exist anywhere - a script of that
+    # name wins at every level of the precedence, and the generation would ship
+    # the module switched off. The privileged account has no generation, so its
+    # half stays a bash mod, under a name of its own and after `dotfiles`, which
+    # writes the ~/.vimrc it installs the plugins for.
+    assert "vim" in devbox.WORKSPACE_BASE_MODS
+    assert "vim" in devbox.nix_module_names()
+    assert devbox.find_mod_script("vim", None) is None
+    assert "vim" in devbox.resolve_playbook(
+        devbox.workspace_playbook(_workspace()), None).modules
+    box = devbox.box_playbook()
+    assert "vim-plug" in box
+    assert "vim-plug" not in devbox.WORKSPACE_BASE_MODS
+    assert box.index("dotfiles") < box.index("vim-plug")
+    spec = {s.name: s for s in devbox.load_mod_specs(box, None)}["vim-plug"]
+    assert spec.runas == ["admin"]
+    assert spec.requires == ["dotfiles"]
+
+
+def test_the_vim_module_declares_the_plugin_set_and_reads_its_own_flag():
+    # The plugins are stated in the module because nix cannot read them out of
+    # the ~/.vimrc that names them, and `vimPlugins` normalizes an upstream name
+    # (`rust.vim` is `rust-vim`), so the three attribute names are pinned here.
+    text = (devbox.NIX_MODULES_DIR / "vim.nix").read_text()
+    assert "config.devbox.mods.vim.enable" in text
+    for plugin in ("base16-vim", "rust-vim", "vim-go"):
+        assert plugin in text
+    # `-u <generated vimrc>` makes vim skip the account's own file, so the
+    # generated one sources it back - otherwise the dotfiles' vim config, which
+    # is still the bash half's business, would stop applying.
+    assert "source ~/.vimrc" in text
 
 
 def test_github_auth_is_a_root_box_mod_writing_etc_gitconfig(isolated_mods):

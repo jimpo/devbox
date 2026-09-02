@@ -36,7 +36,9 @@ credential helper out of the `~/.gitconfig` that `dotfiles` overwrites — and
 `repo-bootstrap` requiring it across the playbook boundary, and `nix`'s box
 scope + the `trusted-users` line that names the privileged account and never an
 agent, and `home-manager`'s agent scope + its `requires = ["nix"]` across that
-same boundary), manifest
+same boundary, and the vim split — `vim` resolving to the flake's module with no
+`vim.sh` anywhere, and the admin's `vim-plug` script box-scoped after
+`dotfiles`), manifest
 rendering, `render_repos` + the `repos` payload file, env-file quoting,
 the home-manager flake (`render_workspace_nix`: the rendered attribute set, nix
 string escaping and bare-vs-quoted attribute names, a `<name>.enable` flag per
@@ -169,6 +171,13 @@ returns the workspace's identity; `jj config set --user ui.pager cat` fails,
 because home-manager owns `~/.config/jj/config.toml`; and the same setting in
 `~/.config/jj/conf.d/local.toml` takes effect, which is the by-hand override
 route on the box.
+
+For the vim split, on that same box: `vim` opens with no error in BOTH accounts
+(the admin's plugins from `vim-plug` under `~/.vim/plugged`, the agent's from
+the generation), `:scriptnames` as the agent lists the store's vimrc and the
+account's own `~/.vimrc`, and `:colorscheme` there answers base16-chalk — that
+last one is what proves the store's plugins loaded before the account's vimrc
+ran, since configenv's file sets it while being sourced.
 
 `tests/conftest.py` just puts the repo root on `sys.path` so `import devbox`
 resolves the package (works with or without an editable install). Tests

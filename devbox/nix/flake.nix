@@ -126,6 +126,7 @@
           ./modules/jj.nix
           ./modules/neovim.nix
           ./modules/uv.nix
+          ./modules/vim.nix
         ];
       };
     in
