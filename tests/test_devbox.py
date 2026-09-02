@@ -3366,3 +3366,93 @@ def test_check_name_unique_degrades_auth_failure_to_a_warning(monkeypatch, capsy
     out = capsys.readouterr().out
     assert "could not check ec2 for name collisions" in out
     assert "aws sso login" in out
+
+
+# -- partial `list` when a provider's credentials have lapsed (JIM-145) --
+class _StubListProvider:
+    """Provider seam stub for the listing: either boxes or a failure."""
+
+    def __init__(self, name, boxes=(), error=None):
+        self.name = name
+        self.boxes = list(boxes)
+        self.error = error
+        self.list_calls = 0
+
+    def list(self):
+        self.list_calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.boxes
+
+
+def _instance(name, provider="libvirt", state="running"):
+    return devbox.Instance(name=name, provider=provider, state=state,
+                           resources="2 vCPU / 2 GiB", created_at=None)
+
+
+def _list_args(attached=False):
+    import argparse
+    return argparse.Namespace(attached=attached)
+
+
+def test_list_boxes_reports_a_stale_provider_instead_of_failing(monkeypatch):
+    local = _StubListProvider("libvirt", boxes=[_instance("dev")])
+    stale = _StubListProvider("ec2", error=devbox.AwsAuthError(
+        "credentials expired; run `aws sso login`"))
+    monkeypatch.setattr(devbox.cli, "all_providers", lambda gc: [local, stale])
+    listed, unreachable = devbox.cli._list_boxes(_ec2_gc())
+    assert [p.name for p, _ in listed] == ["libvirt"]
+    assert unreachable == [("ec2", "credentials expired; run `aws sso login`")]
+
+
+def test_list_boxes_asks_the_second_aws_provider_nothing(monkeypatch):
+    # ec2 and aws/Lightsail share one set of creds, so the first failure stands
+    # in for the second - listing it again would only re-ask for the same login.
+    stale = _StubListProvider("ec2", error=devbox.AwsAuthError("expired"))
+    other = _StubListProvider("aws", boxes=[_instance("aws-dev", provider="aws")])
+    monkeypatch.setattr(devbox.cli, "all_providers", lambda gc: [stale, other])
+    listed, unreachable = devbox.cli._list_boxes(_ec2_gc())
+    assert listed == []
+    assert unreachable == [("ec2", "expired"), ("aws", "expired")]
+    assert other.list_calls == 0
+
+
+def test_list_boxes_turns_a_server_side_rejection_into_a_login_hint(monkeypatch,
+                                                                    aws_config_file):
+    stale = _StubListProvider("ec2", error=_FakeClientError("ExpiredToken"))
+    monkeypatch.setattr(devbox.cli, "all_providers", lambda gc: [stale])
+    gc = _ec2_gc()
+    gc.aws = _aws("dev")
+    _, unreachable = devbox.cli._list_boxes(gc)
+    assert "aws sso login --profile dev" in unreachable[0][1]
+
+
+def test_list_boxes_reraises_other_failures(monkeypatch):
+    broken = _StubListProvider("libvirt", error=RuntimeError("virsh is gone"))
+    monkeypatch.setattr(devbox.cli, "all_providers", lambda gc: [broken])
+    with pytest.raises(RuntimeError):
+        devbox.cli._list_boxes(_ec2_gc())
+
+
+def test_cmd_box_list_prints_the_boxes_it_can_see(monkeypatch, capsys):
+    local = _StubListProvider("libvirt", boxes=[_instance("dev")])
+    stale = _StubListProvider("ec2", error=devbox.AwsAuthError(
+        "credentials expired; run `aws sso login`"))
+    monkeypatch.setattr(devbox.cli, "all_providers", lambda gc: [local, stale])
+    devbox.cli.cmd_box_list(_list_args(), _ec2_gc())
+    out = capsys.readouterr().out
+    assert "warning: could not list ec2 boxes: credentials expired" in out
+    assert "dev" in out and "No devbox-managed boxes." not in out
+
+
+def test_cmd_box_list_attached_reuses_the_listing(monkeypatch, capsys):
+    # --attached must not re-list the providers: a second pass would ask the
+    # stale one for credentials all over again.
+    local = _StubListProvider("libvirt", boxes=[_instance("dev")])
+    stale = _StubListProvider("ec2", error=devbox.AwsAuthError("expired"))
+    monkeypatch.setattr(devbox.cli, "all_providers", lambda gc: [local, stale])
+    monkeypatch.setattr(devbox.cli, "_attached_workspaces",
+                        lambda provider, name: ["web"])
+    devbox.cli.cmd_box_list(_list_args(attached=True), _ec2_gc())
+    assert local.list_calls == 1 and stale.list_calls == 1
+    assert "web" in capsys.readouterr().out

@@ -53,7 +53,7 @@ from .config import (BoxSpec, DEFAULT_PROVIDER, GlobalConfig, PROVIDERS,
 from .provision import (build_box_payload, build_payload, build_tarball,
                         provision_log, resolve_env)
 from .sync import run_envvars, run_sync
-from .providers import (AwsAuthError, InstanceSpec, all_providers,
+from .providers import (AWS_PROVIDERS, AwsAuthError, InstanceSpec, all_providers,
                         auth_error_message, get_provider, is_auth_error)
 from .util import die
 
@@ -521,19 +521,60 @@ def cmd_status(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceC
     _tail_provision_log(provider, name, provision_log(workspace.agent_user))
 
 
+def _auth_failure_message(gc: GlobalConfig, err: Exception) -> Optional[str]:
+    """The user-facing line for a provider that can't be reached because its
+    credentials are missing or expired, or None when `err` is any other failure
+    (which stays fatal)."""
+    if isinstance(err, AwsAuthError):
+        return str(err)
+    if gc.aws is not None and is_auth_error(err):
+        return auth_error_message(gc.aws, err)
+    return None
+
+
+def _list_boxes(gc: GlobalConfig) -> tuple:
+    """Every provider's boxes as `[(provider, instances)]`, plus the providers
+    that could not be reached as `[(name, message)]`.
+
+    A listing is a read-only global view, so credentials that have lapsed cost
+    the user the rows they cover, not the whole command: the boxes devbox can
+    still see are listed and the rest is reported as a warning. Both AWS-family
+    providers share one set of creds, so the first one's failure stands in for
+    the others - re-listing them would only re-ask for the same login."""
+    listed, unreachable = [], []
+    aws_failure = None
+    for provider in all_providers(gc):
+        if aws_failure is not None and provider.name in AWS_PROVIDERS:
+            unreachable.append((provider.name, aws_failure))
+            continue
+        try:
+            listed.append((provider, provider.list()))
+        except Exception as err:  # noqa: BLE001 - re-raised unless it's an auth failure
+            message = _auth_failure_message(gc, err)
+            if message is None:
+                raise
+            if provider.name in AWS_PROVIDERS:
+                aws_failure = message
+            unreachable.append((provider.name, message))
+    return listed, unreachable
+
+
 def cmd_box_list(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
     # Global view: every devbox-managed box, unioned across providers. EC2 is
     # account-wide; libvirt is this-host-only.
-    boxes = [inst for provider in all_providers(gc) for inst in provider.list()]
-    boxes.sort(key=lambda i: i.name)
+    listed, unreachable = _list_boxes(gc)
+    for name, message in unreachable:
+        print(f"warning: could not list {name} boxes: {message}")
+    boxes = sorted((inst for _, insts in listed for inst in insts),
+                   key=lambda i: i.name)
     if not boxes:
         print("No devbox-managed boxes.")
         return
     # Who is attached lives on each box, so it costs an SSH per row - opt-in.
     attached = {}
     if getattr(args, "attached", False):
-        for provider in all_providers(gc):
-            for box in provider.list():
+        for provider, insts in listed:
+            for box in insts:
                 attached[box.name] = _attached_workspaces(provider, box.name)
 
     header = ["NAME", "PROVIDER", "STATE", "RESOURCES", "UP"]

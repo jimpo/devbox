@@ -44,7 +44,10 @@ picking the right one of several — `include` mirror-unit expansion, rsync argv
 `_select_repo` (by name, from the cwd, the lone-repo fallback, and the refusal
 when several are ambiguous),
 the libvirt
-`<metadata>` stamp/parse + `list` formatting (monkeypatched `virsh`), and the
+`<metadata>` stamp/parse + `list` formatting (monkeypatched `virsh`), the
+partial listing (`_list_boxes`: a provider whose creds have lapsed becomes a
+warning, the second AWS provider is not asked again, other failures still
+raise, and `--attached` reuses the one listing), and the
 **EC2 provider against a fake EC2 client** (`Ec2Provider` with an injected
 `client=`: list/state/address, run-instances request shape, spot, AMI lookup,
 subnet capacity fallback, lifecycle), the **aws/Lightsail provider against a
@@ -222,6 +225,9 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   account on its box. `devbox create` is porcelain over "ensure the box, then
   attach". `_select_repo` picks which checkout a repo-scoped command (`jj fetch`)
   means: an explicit name, else the one the cwd is inside, else the lone one.
+  `list` goes through `_list_boxes`, which reads every provider it can and
+  reports the rest as warnings — a read-only global view is worth more partial
+  than not at all, and one lapsed AWS session shouldn't hide the local boxes.
 - `__init__.py` — re-exports a flat `devbox.X` API for convenience/tests.
 
 `pyproject.toml` (hatchling) declares the `devbox.cli:main` entry point,
