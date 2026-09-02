@@ -64,6 +64,14 @@ mkdir -p "$FAKE_HOMES/$user"
     "passwd": r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_LOG/passwd.log"
 """,
+    # systemd's session manager. There is none here, so it records the call and
+    # succeeds - or fails on demand, which is the box that has no user manager
+    # to linger.
+    "loginctl": r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG/loginctl.log"
+[ "${FAKE_LOGINCTL_FAILS:-0}" = "1" ] && exit 1
+exit 0
+""",
     "chown": r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_LOG/chown.log"
 """,
@@ -255,6 +263,33 @@ def test_preamble_writes_bash_env_for_both_accounts(box):
         content = (b.homes / user / ".bash_env").read_text()
         assert ".local/bin" in content
         assert ".config/devbox/env" in content
+
+
+def test_preamble_enables_lingering_for_the_agent(box):
+    # A lingering account keeps a systemd user manager with no session open, so
+    # a service the agent enables outlives its SSH connection.
+    b = box([_spec("jj")])
+    assert b.run("--ensure-users").returncode == 0
+    assert f"enable-linger {AGENT}" in b.log("loginctl")
+    assert ADMIN not in b.log("loginctl")
+
+
+def test_a_box_run_lingers_nobody(box):
+    # No attachment, so there is no unprivileged account to keep a user manager
+    # for.
+    b = box([_spec("dotfiles", runas=["admin"])], agent="")
+    assert b.run().returncode == 0
+    assert b.log("loginctl") == ""
+
+
+def test_lingering_failure_does_not_stop_the_attachment(box):
+    # A box with no systemd has no user manager to linger; provisioning is
+    # otherwise unaffected, so it is a note rather than a failure.
+    b = box([_spec("jj")])
+    r = b.run(FAKE_LOGINCTL_FAILS="1")
+    assert r.returncode == 0, r.stderr
+    assert "lingering" in r.stderr
+    assert b.ran() == [("jj", AGENT)]
 
 
 def test_preamble_refuses_when_the_agent_has_sudo(box):

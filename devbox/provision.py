@@ -91,8 +91,11 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # and the helper answers from the calling account's own GITHUB_TOKEN. Fixed and
 # built-in: there is no box config file, so a box grows beyond this only when an
 # attached workspace contributes a `runas = ["root"]` mod.
+# `nix` is box-scoped for the same reason: /nix and the nix-daemon are one
+# machine-wide store that every attached workspace shares, and only the
+# privileged account is a trusted user of it.
 BOX_BASE_MODS = ("dotfiles-packages", "tree-sitter-cli", "dotfiles", "vim",
-                 "github-auth")
+                 "github-auth", "nix")
 
 # The workspace playbook: what one attachment needs inside its own account.
 # Ordering constraints are encoded here: jj must precede repo-bootstrap (which

@@ -408,7 +408,7 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    [defaults]
    vcpus = 6
    memory_mib = 12288
-   disk_gb = 60
+   disk_gb = 100
 
    [ssh]
    pubkey_path = "~/.ssh/id_ed25519.pub"
@@ -648,8 +648,8 @@ thing (jj, dotfiles, Claude Code, a workspace's rust toolchain, …). There are 
 playbooks**, because a box and an attachment need different things:
 
 ```
-box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim →
-                                    github-auth
+box playbook (fixed, built-in):     dotfiles-packages → tree-sitter-cli →
+                                    dotfiles → vim → github-auth → nix
                                     # runs once per box, as root / the admin
 
 workspace playbook (built-in base):   jj → dotfiles → vim → neovim →
@@ -664,9 +664,11 @@ it; `dotfiles-packages`, the apt half, before `dotfiles`, the per-user half).
 playbook, which runs first. The 95% case is "just add rust":
 `mods = ["rust"]`.
 
-**A box takes no config, so its playbook is fixed** — `dotfiles-packages` is the
-one genuinely box-level mod in the base (apt, as root); everything else installs
-into somebody's home. A workspace that needs more *system* state ships a
+**A box takes no config, so its playbook is fixed** — `dotfiles-packages` (apt,
+as root), `github-auth` (one `/etc/gitconfig` line) and `nix` (the multi-user
+nix store and its daemon, which every attached workspace shares) are the
+genuinely box-level mods in the base; everything else installs into somebody's
+home. A workspace that needs more *system* state ships a
 `runas = ["root"]` mod of its own, which runs on the shared box when it attaches;
 devbox prints a warning naming it, since that writes state every other workspace
 sees.
@@ -785,7 +787,8 @@ that is where the driver runs.
 Before any mod, on every run, the driver ensures the accounts it is about to use:
 it wires the privileged user's `~/.bash_env`, then — for a workspace run — creates
 that workspace's account if absent (no supplementary groups, `0750` home, locked
-password, your SSH key authorized), records who owns it in
+password, your SSH key authorized), enables lingering for it so its systemd user
+services outlive an SSH session, records who owns it in
 `/etc/devbox/workspaces/<agent_user>`, and **refuses to continue** if the account
 belongs to another workspace, if it exists with no record at all (pass `--adopt`),
 or if the agent has somehow acquired sudo or a root-equivalent group. It is a

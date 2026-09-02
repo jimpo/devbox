@@ -1278,6 +1278,7 @@ def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_workspaces(isola
         "dotfiles\tadmin\t",
         "vim\tadmin\t",
         "github-auth\troot\t",
+        "nix\troot\txz-utils",
     ]
     by_name = {s.name: s for s in workspace}
     assert devbox.scoped_runas(by_name["dotfiles"].runas, devbox.SCOPE_WORKSPACE) == ["agent"]
@@ -1306,6 +1307,27 @@ def test_github_auth_is_a_root_box_mod_writing_etc_gitconfig(isolated_mods):
     # `gh auth setup-git` is the specific way back into a home directory: it
     # writes the helper into ~/.gitconfig, naming no path this test could see.
     assert not any("setup-git" in line for line in code)
+
+
+def test_nix_is_a_root_box_mod_that_trusts_only_the_privileged_account(isolated_mods):
+    # /nix and the nix-daemon are the machine's, shared by every attachment, so
+    # the mod is box-scoped and runs as root.
+    assert "nix" in devbox.box_playbook()
+    assert "nix" not in devbox.WORKSPACE_BASE_MODS
+    spec = {s.name: s for s in devbox.load_mod_specs(devbox.box_playbook(), None)}["nix"]
+    assert spec.runas == ["root"]
+    code = [line for line in spec.path.read_text().splitlines()
+            if not line.strip().startswith("#")]   # prose explains the boundary
+    text = "\n".join(code)
+    # The security boundary: a trusted user can push arbitrary paths into the
+    # shared store, which another workspace's agent would then run. Only the
+    # privileged account may be one, so the agent must not appear here at all.
+    assert "trusted-users = root $DEVBOX_ADMIN_USER" in text
+    assert "DEVBOX_AGENT_USER" not in text
+    # Multi-user (daemon) mode, unattended, and the two experimental features
+    # the workspace setup is built on.
+    assert "--daemon" in text and "--yes" in text
+    assert "experimental-features = nix-command flakes" in text
 
 
 def test_repo_bootstrap_gets_github_auth_from_the_box_playbook(isolated_mods):
@@ -2382,6 +2404,18 @@ def test_resolve_box_spec_flags_win_over_the_defaults(global_config, monkeypatch
     box = devbox.resolve_box_spec(args, global_config, "dev")
     assert (box.vcpus, box.memory_mib, box.disk_gb) == (2, 2048, 10)
     assert box.admin_user == "bob"
+
+
+def test_the_default_disk_has_room_for_a_shared_nix_store(global_config, monkeypatch):
+    # A box holds several workspaces' checkouts and build trees on top of one
+    # /nix store, which is a few GB on its own. The default carries that;
+    # `[defaults] disk_gb` and --disk still size a box that needs something else
+    # (see test_resolve_box_spec_flags_win_over_the_defaults).
+    assert devbox.DEFAULT_DISK_GB >= 100
+    monkeypatch.setenv("USER", "alice")
+    box = devbox.resolve_box_spec(_box_args("dev"), devbox.GlobalConfig.load(
+        devbox.Path("/nonexistent-global-config.toml")), "dev")
+    assert box.disk_gb == devbox.DEFAULT_DISK_GB
 
 
 def test_resolve_box_spec_composes_the_canonical_cloud_name(global_config, monkeypatch):

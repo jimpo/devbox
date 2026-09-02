@@ -14,7 +14,8 @@ uv tool install --editable .     # point the live `devbox` command at this check
 `tests/` exercises pure logic and provider paths reachable without real infra:
 global/workspace config loading + merging (`GlobalConfig.load`,
 `resolve_workspace`, `resolve_instance`, `parse_instance_name`), the
-box/workspace split (`resolve_box_spec` from argv, the rejection of box-level
+box/workspace split (`resolve_box_spec` from argv, the default disk size a
+shared `/nix` store has to fit inside, the rejection of box-level
 keys in a workspace's config, `box` defaulting, `agent_user` defaulting +
 username/reserved-name validation), the two marker spellings (`find_workspace`:
 walk-up for either, nearest level wins, both-at-once refused, and the
@@ -32,7 +33,9 @@ its rejection of unknown keys, bad values, duplicate and mislabeled fences — t
 two playbooks and `scoped_runas`'s narrowing of each mod's targets (including
 `github-auth`'s box scope and its `/etc/gitconfig` target — what keeps the
 credential helper out of the `~/.gitconfig` that `dotfiles` overwrites — and
-`repo-bootstrap` requiring it across the playbook boundary), manifest
+`repo-bootstrap` requiring it across the playbook boundary, and `nix`'s box
+scope + the `trusted-users` line that names the privileged account and never an
+agent), manifest
 rendering, `render_repos` + the `repos` payload file, env-file quoting,
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
@@ -71,7 +74,9 @@ runs, failure propagation, the isolation assertions, and the whole attach story:
 box runs (empty `DEVBOX_AGENT_USER`) creating no account, ownership markers
 written/refused/adopted (including a legacy `project=` marker still identifying
 its owner, still refusing another workspace, and being retired on attach), the
-per-repo stale-checkout warning, per-attachment log directories, and two
+`loginctl enable-linger` on the attaching account (a box run lingers nobody, and
+a box with no user manager to linger gets a note rather than a failed attach),
+the per-repo stale-checkout warning, per-attachment log directories, and two
 workspaces sharing one fake box without disturbing each other. The fake `sudo`
 executes the command for real, so the control flow is genuine; only the privilege
 is simulated. It builds the manifest and the `repos` file with the real
@@ -84,7 +89,8 @@ It does not and cannot exercise `box create`/`up`/`stop`/`destroy`/`host`/
 `create`/`detach`/`list --attached`/`jj fetch` end-to-end against real infra
 (`jj fetch`'s actual `jj git fetch` needs a
 booted, provisioned box), the actual behavior of the built-in mods on a real
-box (jj install, dotfiles, Claude Code, repo bootstrap — though
+box (jj install, dotfiles, Claude Code, repo bootstrap, the multi-user nix
+install and its daemon — though
 `repo-bootstrap`'s loop over the `repos` file is plain bash and can be run by
 hand against fake `jj`/`git`), the parts of the driver
 that a fake `sudo` can only simulate (real `useradd` flags, sudoers, apt, whether
@@ -163,7 +169,13 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   account's slice of it), and payload assembly (driver + resolved `mods/*.sh` +
   `context.env` + manifest + `repos`). Ships `provision-driver.sh` + `mods/*.sh`.
   Delivered over SSH (tar → extract → run driver) by `box create`, `create` and
-  `devbox sync --mods`. The checkouts travel as the `repos` file rather than as
+  `devbox sync --mods`. The box base includes `nix`, which installs the
+  multi-user (daemon) nix store with the upstream installer pinned by version —
+  box-scoped because the store is the machine's and every attachment shares it,
+  with `trusted-users` holding the privileged account only (a trusted user could
+  push paths into the shared store for another workspace's agent to run), flakes
+  enabled, and no GC timer: the daemon's `min-free`/`max-free` reclaim
+  unreferenced paths only when the disk runs short. The checkouts travel as the `repos` file rather than as
   context variables — there can be any number of them, and a shell environment is
   a poor list; `repo-bootstrap` reads it through `DEVBOX_PAYLOAD_DIR`.
   Creds are NOT in the payload — each mod sources the `~/.config/devbox/env` of
@@ -171,7 +183,9 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   payload safe to make agent-readable.
 - `provision-driver.sh` — runs as the privileged user. `ensure_admin` wires that
   account; `ensure_agent` creates the attaching workspace's (idempotent, also
-  reachable as `--ensure-agent`, recording ownership in `/etc/devbox/workspaces/`
+  reachable as `--ensure-agent`, enabling lingering so that account's systemd
+  user services outlive an SSH session — a no-op where there is no `loginctl` —
+  recording ownership in `/etc/devbox/workspaces/`
   and refusing an account that belongs to another workspace, one with no record
   at all, or one that has acquired sudo). A box last attached by an older devbox
   has its claim under `/etc/devbox/projects/` with a `project=` field; that path

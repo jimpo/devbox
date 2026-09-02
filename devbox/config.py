@@ -123,7 +123,13 @@ DEFAULT_BASE_IMAGE_URL = (
 )
 DEFAULT_VCPUS = 6
 DEFAULT_MEMORY_MIB = 12288
-DEFAULT_DISK_GB = 60
+# A box hosts several workspaces, each with its own checkouts and build trees,
+# on top of a /nix store that grows to a few GB and is shared by all of them.
+# The libvirt image is sparse (a bigger virtual disk costs nothing until it is
+# written), and on EC2 this is the gp3 root volume, so the cost of the headroom
+# is small next to a box that wedges mid-task with a full disk. `[defaults]
+# disk_gb` / `--disk` set it per host and per box.
+DEFAULT_DISK_GB = 100
 DEFAULT_SSH_PUBKEY_PATH = "~/.ssh/id_ed25519.pub"
 
 # EC2 AMI defaults (Canonical's Ubuntu cloud images). The global [ec2] section

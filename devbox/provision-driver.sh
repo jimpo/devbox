@@ -276,6 +276,17 @@ ensure_agent() {
   home="$(user_home "$agent")"
   [ -n "$home" ] && sudo chmod 0750 "$home"
 
+  # Linger, so this account keeps a systemd user manager whether or not anyone
+  # is logged in: a service the agent enables (a tunnel, a language server) runs
+  # for as long as the box is up, and not just for the length of an SSH session.
+  # A box without systemd has no loginctl and no user manager to linger, so the
+  # attachment proceeds either way.
+  if command -v loginctl >/dev/null 2>&1; then
+    sudo loginctl enable-linger "$agent" >/dev/null 2>&1 \
+      || echo "devbox: note: could not enable lingering for '$agent'; its user" \
+              "services will run only while it is logged in." >&2
+  fi
+
   install_bash_env "$agent"
   write_marker "$agent"
 
