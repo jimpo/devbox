@@ -652,8 +652,9 @@ box playbook (fixed, built-in):     dotfiles-packages → tree-sitter-cli →
                                     dotfiles → vim → github-auth → nix
                                     # runs once per box, as root / the admin
 
-workspace playbook (built-in base):   jj → dotfiles → vim → neovim →
-                                    claude-code → cargo-binstall → repo-bootstrap
+workspace playbook (built-in base):   home-manager → jj → dotfiles → vim →
+                                    neovim → claude-code → cargo-binstall →
+                                    repo-bootstrap
 workspace mods (config.toml):         + rust + wasm-tools + …
                                     # runs once per attachment, in its account
 ```
@@ -672,6 +673,19 @@ home. A workspace that needs more *system* state ships a
 `runas = ["root"]` mod of its own, which runs on the shared box when it attaches;
 devbox prints a warning naming it, since that writes state every other workspace
 sees.
+
+**`home-manager` is the declarative half of an attachment's home.** It runs
+first in the workspace playbook and switches the agent account to the
+home-manager flake that rides in the payload beside `mods/` (`nix/flake.nix`,
+`nix/options.nix`, `nix/modules/<mod>.nix`, plus a `nix/workspace.nix` devbox
+renders per attachment). A mod is either a bash script or a module in that
+flake, never both, and a converted mod keys on its own
+`devbox.mods.<name>.enable` flag. It is **agent-only**: the box's privileged
+account keeps its apt zsh/vim, so `devbox box ssh` works whatever state a
+generation is in. Workspace-local `.nix` modules are not supported — a
+workspace that needs something of its own ships a bash mod, exactly as before.
+Nothing from `[env]` may appear in a nix expression: `/nix/store` is
+world-readable and shared by every attachment.
 
 **`dotfiles` and `vim` are in both playbooks on purpose** — each declares
 `runas = ["admin", "agent"]`, and each scope runs only its own half. The box runs the

@@ -57,6 +57,14 @@ so that changing `agent_user` reconverges instead of needing a rebuild.
 The workspace's checkouts ride along as a `repos` payload file rather than as
 context variables, since there can be any number of them; `repo-bootstrap` reads
 it through DEVBOX_PAYLOAD_DIR, which the driver exports into each mod.
+
+**The declarative half.** An attachment's payload also carries a home-manager
+flake (`nix/`, from NIX_DIR), which `mods/home-manager.sh` switches the agent
+account to. A mod is either a bash script or a module in that flake, never both;
+`nix/workspace.nix` is rendered per attachment (see render_workspace_nix) the
+way `manifest` and `repos` are, and carries no creds - /nix/store is
+world-readable and shared by every attachment on the box. The flake is
+agent-only: a box run ships none of it, and the privileged account stays on apt.
 """
 from __future__ import annotations
 
@@ -78,6 +86,16 @@ from .util import die
 # The built-in mods (shipped in the package) and the standalone driver.
 BUILTIN_MODS_DIR = Path(__file__).parent.parent / "mods"
 DRIVER_PATH = Path(__file__).parent / "provision-driver.sh"
+# The home-manager flake shipped with devbox: `flake.nix`, `options.nix` and one
+# `modules/<mod>.nix` per converted mod. Every `.nix` file under it travels in
+# the payload verbatim, so adding a module needs no change here.
+NIX_DIR = Path(__file__).parent / "nix"
+# Where it lands in the payload, next to `mods/`. The home-manager mod names it
+# through DEVBOX_PAYLOAD_DIR.
+NIX_PAYLOAD_DIR = "nix"
+# The one file in that directory devbox renders rather than ships (see
+# render_workspace_nix), named here so a stray copy in NIX_DIR cannot shadow it.
+NIX_WORKSPACE_FILE = "workspace.nix"
 # Global user mods, shared across a user's workspaces.
 GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 
@@ -103,7 +121,9 @@ BOX_BASE_MODS = ("dotfiles-packages", "tree-sitter-cli", "dotfiles", "vim",
 # ~/.vimrc declares). `dotfiles`/`vim` appear in BOTH playbooks on purpose -
 # each declares `runas = ["admin", "agent"]`, and each scope runs only its own
 # half. A workspace's `mods` are appended after this.
-WORKSPACE_BASE_MODS = ("jj", "dotfiles", "vim", "neovim",
+# `home-manager` runs first: it is the declarative half of the account, and a
+# bash mod after it can use what the generation put on the PATH.
+WORKSPACE_BASE_MODS = ("home-manager", "jj", "dotfiles", "vim", "neovim",
                        "claude-code", "cargo-binstall", "repo-bootstrap")
 
 # Which playbook a provisioning run is executing. The scope decides which
@@ -487,6 +507,101 @@ def render_env_file(env: dict) -> str:
     return "".join(f"export {key}={shlex.quote(value)}\n" for key, value in env.items())
 
 
+# ---- the home-manager flake (the agent's declarative half) -------------------
+# The `mods` bash scripts install into a home imperatively; the flake under
+# NIX_DIR describes one declaratively, and `mods/home-manager.sh` switches the
+# agent account to it. Both halves ride in the same payload, and a mod is in one
+# or the other, never both.
+#
+# `workspace.nix` is to the flake what `manifest`/`repos` are to the driver: the
+# rendered file that turns a shipped, static program into this attachment's. It
+# carries what _workspace_context already computes, as a plain attribute set -
+# NEVER a cred, because /nix/store is world-readable and shared by every
+# attachment on the box (creds stay in the 0600 ~/.config/devbox/env that
+# run_envvars writes).
+
+# Nix's own escapes for a double-quoted string. `$` is escaped everywhere rather
+# than only before `{`, which is legal (`\$` is `$`) and leaves no way for a
+# value to open an antiquotation.
+_NIX_ESCAPES = {"\\": "\\\\", '"': '\\"', "$": "\\$",
+                "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+# An attribute name that needs no quoting: nix identifiers admit `-` and `'`,
+# which covers every mod name devbox ships.
+_NIX_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_'-]*\Z")
+# ... except a keyword, which cannot be a bare attribute name.
+_NIX_KEYWORDS = frozenset(("if", "then", "else", "assert", "with", "let", "in",
+                           "rec", "inherit", "or"))
+
+
+def nix_string(value: str) -> str:
+    """One nix string literal, escaped. The nix equivalent of shlex.quote for
+    the env file: a jj name with a quote, a backslash or a `${` in it survives
+    as itself instead of becoming syntax."""
+    return '"' + "".join(_NIX_ESCAPES.get(ch, ch) for ch in value) + '"'
+
+
+def nix_attr_name(name: str) -> str:
+    """One attribute name, bare where nix allows it and quoted where it does
+    not - so a mod called `repo-bootstrap` reads naturally and one called
+    anything else is still valid nix rather than a parse error."""
+    if _NIX_IDENT_RE.match(name) and name not in _NIX_KEYWORDS:
+        return name
+    return nix_string(name)
+
+
+def render_workspace_nix(context: dict, mods: list) -> str:
+    """The payload's `nix/workspace.nix`: this attachment's values as a plain
+    nix attribute set, imported by the flake's options.nix.
+
+    `mods` is the effective workspace playbook, rendered as one
+    `<name>.enable = true` per entry (deduplicated, playbook order): the module
+    system's vocabulary is options, not filenames, so a converted mod's module
+    keys on its flag rather than on being present in a directory. Every mod in
+    the playbook gets a flag, including the ones no module implements yet -
+    options.nix declares them free-form for exactly that reason."""
+    agent = context["DEVBOX_AGENT_USER"]
+    seen, enables = set(), []
+    for name in mods:
+        if name in seen:
+            continue
+        seen.add(name)
+        enables.append(f"    {nix_attr_name(name)}.enable = true;\n")
+    return (
+        "# Generated by devbox (provision.render_workspace_nix) for one\n"
+        "# attachment, and shipped in the provisioning payload. Editing it on\n"
+        "# the box is pointless: the payload is a per-run temp directory.\n"
+        "#\n"
+        "# Data only, and no credentials - /nix/store is world-readable.\n"
+        "{\n"
+        f"  agentUser = {nix_string(agent)};\n"
+        # The same home the driver creates and run_sync/run_envvars write into.
+        f"  homeDirectory = {nix_string(f'/home/{agent}')};\n"
+        f"  jjName = {nix_string(context['DEVBOX_JJ_NAME'])};\n"
+        f"  jjEmail = {nix_string(context['DEVBOX_JJ_EMAIL'])};\n"
+        + ("  mods = { };\n" if not enables
+           else "  mods = {\n" + "".join(enables) + "  };\n")
+        + "}\n")
+
+
+def nix_payload_files(context: dict, mods: list) -> list:
+    """The flake directory as payload files: every shipped `.nix` file under
+    NIX_DIR, plus the rendered `workspace.nix`.
+
+    Walked rather than listed, so a sibling adding `modules/<mod>.nix` ships it
+    by writing the file - there is no second place to register it."""
+    if not (NIX_DIR / "flake.nix").is_file():
+        die(f"devbox internal error: the home-manager flake is not at "
+            f"{NIX_DIR} (broken install?)")
+    files = [PayloadFile(f"{NIX_PAYLOAD_DIR}/{NIX_WORKSPACE_FILE}",
+                         render_workspace_nix(context, mods), 0o644)]
+    for path in sorted(NIX_DIR.rglob("*.nix")):
+        rel = path.relative_to(NIX_DIR).as_posix()
+        if rel == NIX_WORKSPACE_FILE:
+            continue
+        files.append(PayloadFile(f"{NIX_PAYLOAD_DIR}/{rel}", path.read_text(), 0o644))
+    return files
+
+
 # ---- payload assembly -------------------------------------------------------
 def _assemble(specs: list, context: dict, scope: str, repos: list = ()) -> list:
     """The payload files for one run: the driver, the scope-narrowed manifest,
@@ -520,8 +635,13 @@ def build_box_payload(admin_user: str, gc: GlobalConfig) -> list:
 
 def build_payload(workspace: WorkspaceConfig, gc: GlobalConfig, admin_user: str) -> list:
     """The full provisioning payload for one attachment (driver + manifest +
-    context + repos + resolved mods), as PayloadFiles. Tarred and run over SSH by
-    both `devbox create` and `devbox sync --mods` - the identical set either way.
+    context + repos + resolved mods + the home-manager flake), as PayloadFiles.
+    Tarred and run over SSH by both `devbox create` and `devbox sync --mods` -
+    the identical set either way.
+
+    The flake travels with an attachment and not with a box, because
+    home-manager describes one account's home: a box run has no account to
+    switch, and the privileged one is deliberately left on apt.
 
     Validates BOTH configured playbooks' metadata (`runas` targets and
     `requires` ordering) first. This is the single choke point: build_payload
@@ -530,8 +650,10 @@ def build_payload(workspace: WorkspaceConfig, gc: GlobalConfig, admin_user: str)
     deps are checked against the box's cumulative state, not the subset."""
     validate_playbooks(workspace)
     specs = load_mod_specs(workspace_playbook(workspace), workspace.marker.mods_dir)
-    return _assemble(specs, _workspace_context(workspace, gc, admin_user),
-                     SCOPE_WORKSPACE, workspace.repos)
+    context = _workspace_context(workspace, gc, admin_user)
+    payload = _assemble(specs, context, SCOPE_WORKSPACE, workspace.repos)
+    payload.extend(nix_payload_files(context, [s.name for s in specs]))
+    return payload
 
 
 def build_tarball(payload: list) -> bytes:

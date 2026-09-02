@@ -265,6 +265,39 @@ def test_preamble_writes_bash_env_for_both_accounts(box):
         assert ".config/devbox/env" in content
 
 
+def test_preamble_puts_nix_on_the_non_interactive_path(box):
+    # nix's installer wires /etc/profile.d and the interactive shell rc files;
+    # `ssh box '<cmd>'` - what devbox and an agent's Bash tool run - reads
+    # neither, so ~/.bash_env is where the store and this account's
+    # home-manager generation have to be named. Both accounts: the file is one
+    # per user and the admin's shells need the store too.
+    b = box([_spec("jj")])
+    b.run("--ensure-users")
+    for user in (ADMIN, AGENT):
+        content = (b.homes / user / ".bash_env").read_text()
+        assert "/etc/profile.d/nix.sh" in content
+        assert "$HOME/.nix-profile/bin" in content
+        # home.sessionVariables reach a non-interactive shell through this.
+        assert ".nix-profile/etc/profile.d/hm-session-vars.sh" in content
+
+
+def test_bash_env_puts_the_home_manager_generation_ahead_of_local_bin(box):
+    # Source the real file and read the PATH it produces: the generation is the
+    # declarative answer, so a binary an imperative mod left in ~/.local/bin
+    # before its conversion must not shadow it.
+    b = box([_spec("jj")])
+    b.run("--ensure-users")
+    home = b.homes / AGENT
+    proc = subprocess.run(
+        ["bash", "-c", f'. "{home}/.bash_env"; printf "%s" "$PATH"'],
+        capture_output=True, text=True, env={**os.environ, "HOME": str(home),
+                                             "PATH": "/usr/bin:/bin"})
+    assert proc.returncode == 0, proc.stderr
+    entries = proc.stdout.split(":")
+    assert entries.index(f"{home}/.nix-profile/bin") < \
+        entries.index(f"{home}/.local/bin")
+
+
 def test_preamble_enables_lingering_for_the_agent(box):
     # A lingering account keeps a systemd user manager with no session open, so
     # a service the agent enables outlives its SSH connection.

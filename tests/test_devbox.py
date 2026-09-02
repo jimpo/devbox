@@ -1,6 +1,7 @@
 import os
 import dataclasses
 import argparse
+import re
 import subprocess
 
 import pytest
@@ -929,6 +930,126 @@ def test_build_payload_jj_identity_host_fallback(isolated_mods, pubkey, monkeypa
     ctx = _payload_map(_workspace(), gc)["context.env"].content
     assert "export DEVBOX_JJ_NAME='Host Jj Name'" in ctx
     assert "export DEVBOX_JJ_EMAIL=host@example.com" in ctx
+
+
+# ---- the home-manager flake (nix/, and the rendered workspace.nix) ----------
+def _nix_context(agent="agentbot", jj_name="Alice Example",
+                 jj_email="alice@example.com"):
+    """The slice of the provisioning context workspace.nix is rendered from."""
+    return {"DEVBOX_AGENT_USER": agent, "DEVBOX_JJ_NAME": jj_name,
+            "DEVBOX_JJ_EMAIL": jj_email}
+
+
+def test_render_workspace_nix_is_an_attribute_set_of_this_attachments_values():
+    # The same job render_manifest does for the driver: the shipped flake is
+    # static, and this one rendered file is what makes it this attachment's.
+    rendered = devbox.render_workspace_nix(_nix_context(), ["jj"])
+    assert 'agentUser = "agentbot";' in rendered
+    # The account's home, which is where every mod and every sync rule lands.
+    assert 'homeDirectory = "/home/agentbot";' in rendered
+    assert 'jjName = "Alice Example";' in rendered
+    assert 'jjEmail = "alice@example.com";' in rendered
+    assert rendered.startswith("#")      # says who generated it
+    assert rendered.rstrip().endswith("}")
+
+
+def test_render_workspace_nix_escapes_strings():
+    # Nix's own escapes, not shell's: a value with a quote, a backslash or an
+    # antiquotation in it has to survive as itself instead of becoming syntax.
+    rendered = devbox.render_workspace_nix(
+        _nix_context(jj_name=r'A "B" \ ${C}', jj_email="a\tb\nc"), [])
+    assert r'jjName = "A \"B\" \\ \${C}";' in rendered
+    assert r'jjEmail = "a\tb\nc";' in rendered
+
+
+def test_nix_string_and_attr_name_quote_only_what_nix_needs():
+    assert devbox.nix_string("plain") == '"plain"'
+    # Nix identifiers admit '-', so every mod name devbox ships reads bare.
+    assert devbox.nix_attr_name("repo-bootstrap") == "repo-bootstrap"
+    # A keyword or anything else is quoted rather than left to be a parse error.
+    assert devbox.nix_attr_name("with") == '"with"'
+    assert devbox.nix_attr_name("2fa") == '"2fa"'
+    assert devbox.nix_attr_name("a b") == '"a b"'
+
+
+def test_render_workspace_nix_turns_the_playbook_into_enable_options():
+    # Filenames do not translate to the module system; options do. Every mod in
+    # the playbook gets a flag, including ones no module implements yet.
+    rendered = devbox.render_workspace_nix(
+        _nix_context(), ["jj", "repo-bootstrap", "jj"])
+    assert "  mods = {\n" in rendered
+    assert "    jj.enable = true;\n" in rendered
+    assert "    repo-bootstrap.enable = true;\n" in rendered
+    # Deduplicated: a workspace may list a base mod again, and an attribute set
+    # cannot hold the same name twice.
+    assert rendered.count("jj.enable") == 1
+
+
+def test_render_workspace_nix_empty_mods_is_still_an_attribute_set():
+    assert "mods = { };" in devbox.render_workspace_nix(_nix_context(), [])
+
+
+def test_build_payload_ships_the_flake_next_to_the_mods(isolated_mods, pubkey):
+    payload = _payload_map(_workspace(), _global_config(pubkey))
+    assert payload["nix/flake.nix"].content == \
+        (devbox.NIX_DIR / "flake.nix").read_text()
+    assert payload["nix/options.nix"].content == \
+        (devbox.NIX_DIR / "options.nix").read_text()
+    # Every shipped .nix file travels, so adding a module is one new file and no
+    # second place to register it.
+    for path in devbox.NIX_DIR.rglob("*.nix"):
+        rel = path.relative_to(devbox.NIX_DIR).as_posix()
+        assert f"nix/{rel}" in payload
+    # ... and the one rendered file, carrying this attachment's playbook.
+    workspace_nix = payload["nix/workspace.nix"].content
+    assert 'agentUser = "agentbot";' in workspace_nix
+    for name in devbox.WORKSPACE_BASE_MODS:
+        assert f"{devbox.nix_attr_name(name)}.enable = true;" in workspace_nix
+
+
+def test_build_box_payload_ships_no_flake(isolated_mods, pubkey):
+    # home-manager describes one account's home: a box run has no attachment to
+    # switch, and the privileged account stays on apt.
+    payload = {pf.path: pf for pf in
+               devbox.build_box_payload("alice", _global_config(pubkey))}
+    assert not any(p.startswith("nix/") for p in payload)
+
+
+def test_home_manager_is_an_agent_mod_that_needs_the_boxs_nix(isolated_mods):
+    # The declarative half of an attachment: agent-scoped (the box's privileged
+    # account is deliberately left on apt), and it uses the store the box mod
+    # owns - a dependency satisfied across the playbook boundary.
+    assert "home-manager" in devbox.WORKSPACE_BASE_MODS
+    assert "home-manager" not in devbox.BOX_BASE_MODS
+    spec = {s.name: s for s in
+            devbox.load_mod_specs(devbox.workspace_playbook(_workspace()),
+                                  None)}["home-manager"]
+    assert spec.runas == ["agent"]
+    assert spec.requires == ["nix"]
+    text = spec.path.read_text()
+    # `path:` and not a bare path: a flake in a git work tree ignores untracked
+    # files, and the payload is not a repo.
+    assert 'path:$flake#agent-$system' in text
+    # The switch writes nothing into the payload, which belongs to the
+    # privileged account: the flake's pins already make resolution
+    # deterministic, so there is no lock file to record. It is home-manager's
+    # flag, so it follows the `--`, not `nix run`.
+    switch = [line for line in text.splitlines()
+              if line.startswith("nix run ")][0]
+    assert switch.index(" -- ") < switch.index("--no-write-lock-file")
+
+
+def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():
+    # The CLI that runs the switch and the flake it switches to are one
+    # version, so a bump cannot half-land.
+    flake = (devbox.NIX_DIR / "flake.nix").read_text()
+    mod = (devbox.BUILTIN_MODS_DIR / "home-manager.sh").read_text()
+    revs = re.findall(r"github:nix-community/home-manager/([0-9a-f]{40})", flake)
+    assert len(revs) == 1
+    assert f'HM_REV="{revs[0]}"' in mod
+    # Both inputs pinned to an exact rev, so the lock nix writes on the box is
+    # deterministic without one being checked in.
+    assert re.search(r"github:NixOS/nixpkgs/[0-9a-f]{40}", flake)
 
 
 # ---- resolve_env (global + workspace [env], workspace overrides per-key) --------

@@ -20,6 +20,8 @@ packages = ["devbox"]
 [tool.hatch.build.targets.wheel.force-include]
 "devbox/init-script.sh" = "devbox/init-script.sh"
 "devbox/provision-driver.sh" = "devbox/provision-driver.sh"
+# The home-manager flake (devbox/nix/) needs no entry: `packages` above already
+# carries every file under the package, so adding a module is one new file.
 
 [dependency-groups]
 dev = [

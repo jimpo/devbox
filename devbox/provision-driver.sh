@@ -97,10 +97,22 @@ SOFT_PRIVILEGED_GROUPS=(docker lxd)
 user_home() { getent passwd "$1" | cut -d: -f6; }
 
 # The per-user shell plumbing devbox owns: puts ~/.local/bin (where jj, claude
-# etc. install), any ~/.cargo/env, and that user's [env] creds on the path of
+# etc. install), any ~/.cargo/env, that user's [env] creds, and nix - both the
+# box-wide store and this account's own home-manager generation - on the path of
 # NON-interactive bash - what Claude Code's Bash tool reads. Reached via
 # BASH_ENV=/etc/devbox/bash_env (wired system-wide at first boot), which sources
 # whichever user's file applies. Overwritten unconditionally (idempotent).
+#
+# NIX IS HERE BECAUSE ITS OWN WIRING IS NOT ENOUGH. The installer writes
+# /etc/profile.d, /etc/bash.bashrc and /etc/zshrc, which login and interactive
+# shells read; `ssh box '<cmd>'` - what devbox and an agent's Bash tool run - is
+# neither. Without this, every tool that moves into the nix generation becomes
+# invisible to exactly the shells that matter. The generation is put AHEAD of
+# ~/.local/bin: it is the declarative answer, and a leftover binary an
+# imperative mod installed before its conversion must not shadow it.
+#
+# This is also the only reason the home-manager mod can find `nix` at all: it
+# runs as the agent under `sudo -u`, in a non-interactive bash.
 install_bash_env() {
   local user="$1" home group
   home="$(user_home "$user")"
@@ -120,6 +132,24 @@ install_bash_env() {
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+# The box-wide multi-user store: NIX_PROFILES, NIX_SSL_CERT_FILE and the daemon
+# profile's bin. Its own guard makes a second sourcing a no-op. Both spellings,
+# because which one the installer writes has changed across nix releases.
+if [ -r /etc/profile.d/nix.sh ]; then
+  . /etc/profile.d/nix.sh
+elif [ -r /etc/profile.d/nix-daemon.sh ]; then
+  . /etc/profile.d/nix-daemon.sh
+fi
+# This account's home-manager generation: its session variables first (that is
+# where home.sessionVariables lands), then its bin directory, ahead of
+# everything above.
+if [ -r "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh" ]; then
+  . "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh"
+fi
+case ":$PATH:" in
+  *":$HOME/.nix-profile/bin:"*) ;;
+  *) export PATH="$HOME/.nix-profile/bin:$PATH" ;;
 esac
 BENV
 }

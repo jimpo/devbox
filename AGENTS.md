@@ -35,8 +35,14 @@ two playbooks and `scoped_runas`'s narrowing of each mod's targets (including
 credential helper out of the `~/.gitconfig` that `dotfiles` overwrites — and
 `repo-bootstrap` requiring it across the playbook boundary, and `nix`'s box
 scope + the `trusted-users` line that names the privileged account and never an
-agent), manifest
+agent, and `home-manager`'s agent scope + its `requires = ["nix"]` across that
+same boundary), manifest
 rendering, `render_repos` + the `repos` payload file, env-file quoting,
+the home-manager flake (`render_workspace_nix`: the rendered attribute set, nix
+string escaping and bare-vs-quoted attribute names, the playbook becoming
+`<name>.enable` options, and `nix_payload_files` shipping every `.nix` file
+under `NIX_DIR` with an attachment but none with a box; plus the pin agreement
+between `flake.nix`'s `home-manager` input and the mod's `nix run`),
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
 (`_refresh_ssh_aliases`: one stanza per file, the collapse rule, per-box
@@ -76,6 +82,9 @@ written/refused/adopted (including a legacy `project=` marker still identifying
 its owner, still refusing another workspace, and being retired on attach), the
 `loginctl enable-linger` on the attaching account (a box run lingers nobody, and
 a box with no user manager to linger gets a note rather than a failed attach),
+the `~/.bash_env` nix wiring (both accounts name the store's `/etc/profile.d`
+script and their own `~/.nix-profile`, and sourcing the real file puts the
+home-manager generation ahead of `~/.local/bin`),
 the per-repo stale-checkout warning, per-attachment log directories, and two
 workspaces sharing one fake box without disturbing each other. The fake `sudo`
 executes the command for real, so the control flow is genuine; only the privilege
@@ -92,7 +101,10 @@ booted, provisioned box), the actual behavior of the built-in mods on a real
 box (jj install, dotfiles, Claude Code, repo bootstrap, the multi-user nix
 install and its daemon — though
 `repo-bootstrap`'s loop over the `repos` file is plain bash and can be run by
-hand against fake `jj`/`git`), the parts of the driver
+hand against fake `jj`/`git`), **anything nix evaluates** (this host has no
+`nix`, so `nix flake check`, the `home-manager switch` itself, and whether a
+module builds are on-box manual steps outside pytest — pytest covers the
+rendering and the payload, never the evaluation), the parts of the driver
 that a fake `sudo` can only simulate (real `useradd` flags, sudoers, apt, whether
 an agent genuinely lacks privilege), or a
 live EC2/Lightsail launch — those need a real libvirt daemon + booted VM, or
@@ -108,6 +120,23 @@ own account, that the multi-repo one has both checkouts in that one home and
 either agent, that neither can read the other's `~/.config/devbox/env`, that a
 second `devbox create` is a clean reconverge, and that `devbox detach` in one
 leaves the other untouched.
+
+For the home-manager half, on the same box: that `devbox create` ends with the
+`home-manager` mod reporting a switch; that `ssh <box-alias> 'command -v nix'`
+and `ssh <box-alias> 'echo $PATH'` — a NON-interactive session, the one Claude
+Code's Bash tool uses — find nix and list `~/.nix-profile/bin` ahead of
+`~/.local/bin`; that a second `devbox sync --mods=home-manager` is a no-op
+reconverge ("No change so reusing latest profile generation"); that both
+workspaces have their own generation (`home-manager generations` as each agent,
+and `ls -l ~/.nix-profile` pointing into that account's own profile); and that
+the box's privileged account has none — it is still on apt zsh/vim, which is
+what keeps `devbox box ssh` working whatever a generation does. `nix flake
+check "path:<payload>/nix"`, and
+`nix build "path:<payload>/nix#homeConfigurations.agent-x86_64-linux.activationPackage" --no-link`
+for the configuration itself, are the evaluation checks pytest cannot run —
+manual, on a box, against a payload directory (keep one by running the driver
+by hand, or point them at a copy of `devbox/nix/` with a `workspace.nix`
+beside it).
 
 `tests/conftest.py` just puts the repo root on `sys.path` so `import devbox`
 resolves the package (works with or without an editable install). Tests
@@ -181,6 +210,27 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   Creds are NOT in the payload — each mod sources the `~/.config/devbox/env` of
   the account that owns them (written by `run_envvars`), which is what keeps the
   payload safe to make agent-readable.
+- `nix/` — the home-manager flake, the **declarative half** of an agent's home,
+  shipped in an attachment's payload beside `mods/` (`nix_payload_files` walks
+  every `.nix` file under `NIX_DIR`, so adding a module is one new file and no
+  registration) and switched by the `home-manager` mod. A mod is a bash script
+  or a module here, never both. `flake.nix` pins nixpkgs and home-manager to
+  exact revs and carries the module conventions in one comment block; there is
+  deliberately **no `flake.lock`** — the pins make the lock nix writes on the
+  box deterministic, and no host here has `nix` to generate or verify one
+  (adopting a checked-in lock is the natural follow-up once one does).
+  `options.nix` declares `devbox.workspace.*` and the free-form
+  `devbox.mods.<name>.enable`, and is the only file that imports the rendered
+  `workspace.nix` — which `render_workspace_nix` writes per attachment (agent
+  user, home, jj identity, and the playbook as enable options), the same job
+  `render_manifest` does for the driver, escaping strings for nix rather than
+  for the shell. Home-manager is **agent-only**: a box run ships none of this,
+  and the privileged account keeps its apt zsh/vim so `devbox box ssh` stays
+  the machine's debugging entry point. Workspace-local `.nix` modules are
+  **not** supported — workspace > global > built-in shadowing does not
+  translate to the module system, and the escape hatch stays a bash mod, which
+  works exactly as it always has. **No cred ever enters a nix expression**:
+  /nix/store is world-readable and shared by every attachment.
 - `provision-driver.sh` — runs as the privileged user. `ensure_admin` wires that
   account; `ensure_agent` creates the attaching workspace's (idempotent, also
   reachable as `--ensure-agent`, enabling lingering so that account's systemd
@@ -195,7 +245,17 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   runas target (default: the agent). Context and creds are re-sourced inside
   the target shell, never passed through `sudo`'s argv — the creds being the
   target account's `[env]` entries, or the privileged user's for a `root` mod
-  (`env_owner`).
+  (`env_owner`). `install_bash_env` writes the per-user `~/.bash_env` that
+  `BASH_ENV=/etc/devbox/bash_env` resolves to, and it is the **only** thing
+  that puts nix on a non-interactive PATH: the installer wires
+  `/etc/profile.d` and the interactive rc files, which `ssh box '<cmd>'` —
+  devbox itself, and Claude Code's Bash tool — reads none of. It names the
+  store's profile script, the account's `hm-session-vars.sh`, and
+  `~/.nix-profile/bin` **ahead of** `~/.local/bin`, so a binary left there by
+  a mod that has since been converted cannot shadow the generation. It is also
+  how the `home-manager` mod finds `nix` at all, running as the agent under
+  `sudo -u`. `rsync` and the login `zsh` stay apt packages for the mirror-image
+  reason: a nix profile binary is not reliably on a PATH devbox does not own.
 - `initscript.py` — renders the shipped `init-script.sh` (literal
   `%DEVBOX_USER%`/`%DEVBOX_SSH_PUBKEY%`/`%DEVBOX_HOSTNAME%` substitution) into
   the user-data every provider gets. It takes a `BoxSpec`, not a workspace: first
@@ -246,5 +306,7 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 
 `pyproject.toml` (hatchling) declares the `devbox.cli:main` entry point,
 force-includes the package data files (`devbox/init-script.sh`,
-`devbox/provision-driver.sh`) into the wheel, and declares the one runtime dep, `boto3` (the ec2 +
+`devbox/provision-driver.sh`, and the whole `devbox/nix/` flake directory — one
+entry, so a new module needs no build change) into the wheel, and declares the
+one runtime dep, `boto3` (the ec2 +
 aws/Lightsail providers).
