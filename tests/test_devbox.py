@@ -914,7 +914,8 @@ def test_build_payload_carries_no_creds(isolated_mods, pubkey):
 def test_build_payload_appends_workspace_mods(isolated_mods, pubkey, tmp_path):
     (tmp_path / ".devbox" / "mods").mkdir(parents=True)
     (tmp_path / ".devbox" / "mods" / "rust.sh").write_text("#!/usr/bin/env bash\necho rust\n")
-    payload = _payload_map(_workspace(marker_dir=tmp_path, mods=["rust"]), _global_config(pubkey))
+    workspace = _workspace(marker_dir=tmp_path, mods=["rust"])
+    payload = _payload_map(workspace, _global_config(pubkey))
     manifest_names = [line.split("\t")[0]
                       for line in payload["manifest"].content.splitlines()]
     assert manifest_names == [*_bash_base_mods(), "rust"]
@@ -1066,6 +1067,9 @@ def converted(tmp_path, monkeypatch):
         mods = tmp_path / "builtin-mods"
         devbox.shutil.copytree(devbox.BUILTIN_MODS_DIR, mods)
         modules = tmp_path / "modules"
+        # A copy of the shipped modules, so the mods already converted in this
+        # tree keep resolving to the generation while the fake conversion is
+        # laid on top of them.
         devbox.shutil.copytree(devbox.NIX_MODULES_DIR, modules)
         for name in names:
             (mods / f"{name}.sh").unlink(missing_ok=True)
@@ -1084,7 +1088,7 @@ def test_a_converted_base_mod_resolves_to_the_generation(converted, pubkey):
     converted("jj")
     playbook = devbox.resolve_playbook(
         devbox.workspace_playbook(_workspace()), None)
-    assert playbook.modules == ["jj"]
+    assert "jj" in playbook.modules
     # No ModSpec and no manifest line: the driver never hears about it.
     assert "jj" not in [s.name for s in playbook.specs]
     payload = _payload_map(_workspace(), _global_config(pubkey))
@@ -1106,27 +1110,29 @@ def test_a_converted_mod_still_satisfies_a_requires(converted):
 
 def test_a_converted_opt_in_mod_keeps_a_workspaces_config_working(converted, pubkey,
                                                                  tmp_path):
-    # `uv` ships a mods/uv.sh but is not in the base list, so a workspace names
-    # it in its own `mods`. After conversion that config is unchanged.
-    converted("uv")
+    # `claude-linear-mcp` ships a mods/claude-linear-mcp.sh but is not in the
+    # base list, so a workspace names it in its own `mods`. After conversion
+    # that config is unchanged.
+    converted("claude-linear-mcp")
     marker_dir = tmp_path / "ws"
     marker_dir.mkdir()
-    workspace = _workspace(marker_dir=marker_dir, mods=["uv"])
-    assert "uv" in devbox.resolve_playbook(
-        devbox.workspace_playbook(workspace), workspace.marker.mods_dir).modules
+    workspace = _workspace(marker_dir=marker_dir, mods=["claude-linear-mcp"])
+    assert "claude-linear-mcp" in devbox.resolve_playbook(
+        devbox.workspace_playbook(workspace),
+        workspace.marker.mods_dir).modules
     payload = _payload_map(workspace, _global_config(pubkey))
-    assert "mods/uv.sh" not in payload
-    assert "uv.enable = true;" in payload["nix/workspace.nix"].content
+    assert "mods/claude-linear-mcp.sh" not in payload
+    assert "claude-linear-mcp.enable = true;" in payload["nix/workspace.nix"].content
 
 
 def test_a_module_the_playbook_never_names_is_shipped_but_off(converted, pubkey,
                                                               tmp_path):
     # Every module gets a flag whether or not this workspace asked for it: a
     # missing attribute is an evaluation error in nix, not a false.
-    converted("uv")
+    converted("claude-linear-mcp")
     payload = _payload_map(_workspace(), _global_config(pubkey))
-    assert "nix/modules/uv.nix" in payload
-    assert "uv.enable = false;" in payload["nix/workspace.nix"].content
+    assert "nix/modules/claude-linear-mcp.nix" in payload
+    assert "claude-linear-mcp.enable = false;" in payload["nix/workspace.nix"].content
 
 
 def test_a_workspace_script_shadows_a_converted_mod(converted, pubkey, tmp_path):
@@ -1141,7 +1147,7 @@ def test_a_workspace_script_shadows_a_converted_mod(converted, pubkey, tmp_path)
     workspace = _workspace(marker_dir=marker_dir)
     playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
                                        workspace.marker.mods_dir)
-    assert playbook.modules == []
+    assert "jj" not in playbook.modules
     assert "jj" in [s.name for s in playbook.specs]
     payload = _payload_map(workspace, _global_config(pubkey))
     assert payload["mods/jj.sh"].content.endswith("echo my own jj\n")
@@ -1177,6 +1183,30 @@ def test_an_unresolvable_mod_names_every_place_it_looked(converted, pubkey,
                      f"{mods}/rustt.sh",
                      f"{modules}/rustt.nix"):
         assert expected in err
+
+
+def test_uv_and_cargo_binstall_are_packages_in_the_generation(isolated_mods,
+                                                              tmp_path):
+    # Both are nix packages: no `<name>.sh` answers to either name, and the
+    # flake imports the module of that name. `cargo-binstall` keeps its place
+    # in the base playbook and `uv` stays an opt-in a workspace names itself -
+    # both resolve to the generation.
+    flake = (devbox.NIX_DIR / "flake.nix").read_text()
+    for name in ("cargo-binstall", "uv"):
+        assert name in devbox.nix_module_names()
+        assert devbox.find_mod_script(name, None) is None
+        assert f"./modules/{name}.nix" in flake
+    marker_dir = tmp_path / "ws"
+    marker_dir.mkdir()
+    workspace = _workspace(marker_dir=marker_dir, mods=["uv"])
+    modules = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
+                                      workspace.marker.mods_dir).modules
+    assert "cargo-binstall" in modules
+    assert "uv" in modules
+    # cargo-binstall installs the crates it fetches into ~/.cargo/bin, and the
+    # generation is what puts that directory on PATH.
+    assert 'home.sessionPath = [ "$HOME/.cargo/bin" ];' in \
+        (devbox.NIX_MODULES_DIR / "cargo-binstall.nix").read_text()
 
 
 def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():

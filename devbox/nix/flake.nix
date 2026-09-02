@@ -119,7 +119,9 @@
           # The option surface, and the rendered workspace values.
           ./options.nix
           # Converted mods, alphabetically, one entry per line.
+          ./modules/cargo-binstall.nix
           ./modules/jj.nix
+          ./modules/uv.nix
         ];
       };
     in
