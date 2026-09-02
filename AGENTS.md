@@ -52,7 +52,15 @@ manifest line, the `requires` on a converted mod still validating, a module the
 playbook never names shipped with `enable = false`, a workspace's own `.sh`
 shadowing a converted built-in back into the bash half, the box playbook
 refusing to see a module at all, and the failure naming all four places it
-looked),
+looked), the **converted `cloudflared`** (an opt-in mod that is now only
+`modules/cloudflared.nix`: the flake lists it, a workspace naming it in its own
+`mods` resolves to the generation, the module names the creds file's path and no
+`[env]` value reaches any rendered `nix/` file, it sources that file rather than
+naming it in `EnvironmentFile=` — systemd's parser reads bare `KEY=value` and
+drops devbox's `export KEY=…` lines — and it uses home-manager's capitalised
+`Unit`/`Service`/`Install` sections; plus `RETIRED_MODS`, which turns a config
+still naming the folded-in `cloudflared-tunnel` into an error saying where it
+went),
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
 (`_refresh_ssh_aliases`: one stanza per file, the collapse rule, per-box
@@ -178,6 +186,13 @@ the generation), `:scriptnames` as the agent lists the store's vimrc and the
 account's own `~/.vimrc`, and `:colorscheme` there answers base16-chalk — that
 last one is what proves the store's plugins loaded before the account's vimrc
 ran, since configenv's file sets it while being sourced.
+
+A workspace with `mods = ["cloudflared"]` is the module to exercise by hand,
+since only a box runs the real binary: with a `CLOUDFLARE_TOKEN` in `[env]`,
+`systemctl --user status cloudflared` is active and `ps` shows no token; with the
+key removed the unit is `inactive (dead)` rather than restarting; with a stale
+one it runs out of restarts, settles in `failed`, and `devbox status` lists it.
+It should also survive `devbox box stop` + `up`, which is what lingering buys.
 
 `tests/conftest.py` just puts the repo root on `sys.path` so `import devbox`
 resolves the package (works with or without an editable install). Tests

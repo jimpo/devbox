@@ -302,7 +302,7 @@ which is what makes a change spanning them a single agent's job.
 |---|---|
 | `devbox create` | Ensure the workspace's box exists, then **attach**: create its unprivileged account, inject the `[env]` creds, run the workspace playbook, push `[[sync]]` files. Idempotent — re-running is a reconverge. Boots the box itself when the workspace owns it (i.e. no `box =` key) or when box-create flags are passed; otherwise says to run `devbox box create` first. `--adopt` claims an account devbox has no record of. |
 | `devbox ssh [-- args...]` | `ssh` in as **this workspace's** unprivileged account — where its checkout and tooling live. (The box's sudo shell is `devbox box ssh <box>`.) |
-| `devbox status` | cloud-init progress plus the tail of this workspace's `~/provision-<agent_user>.log`. |
+| `devbox status` | cloud-init progress, the tail of this workspace's `~/provision-<agent_user>.log`, and this account's failed systemd user units. |
 | `devbox ip` | Print the box's IPv4. |
 | `devbox sync --envvars` | (Re-)write the devbox-managed 0600 `[env]` files — scoped creds/vars (`GITHUB_TOKEN`, API keys) into the shell env of the account each one's `owner` names. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
 | `devbox sync --mods[=a,b,c]` | (Re-)run this workspace's **mods** over SSH — reconverge (add a plugin, re-apply a rust mod) without destroy+create. No list runs the whole workspace playbook; a comma-separated list runs just those (fast iteration). |
@@ -690,7 +690,13 @@ account keeps its apt zsh/vim, so `devbox box ssh` works whatever state a
 generation is in. Workspace-local `.nix` modules are not supported — a
 workspace that needs something of its own ships a bash mod, exactly as before.
 Nothing from `[env]` may appear in a nix expression: `/nix/store` is
-world-readable and shared by every attachment.
+world-readable and shared by every attachment. A converted mod that needs a
+credential names the **path** of the 0600 `~/.config/devbox/env` and reads it at
+run time — which is how `cloudflared`, a module that installs `pkgs.cloudflared`
+and declares a `systemd.user.service`, gets its `CLOUDFLARE_TOKEN`. Lingering
+(enabled per account by the driver) keeps such a service running between logins
+and across a reboot; `devbox status` lists the account's failed user units, so a
+tunnel that cannot authenticate is visible rather than silently down.
 
 **`dotfiles` is in both playbooks on purpose** — it declares
 `runas = ["admin", "agent"]`, and each scope runs only its own half. The box runs the
@@ -733,8 +739,7 @@ variable is the list of checkouts, which arrives as a `repos` file in the payloa
 Each mod also sources the `[env]` creds file of
 the account that owns them (see [Credentials](#credentials-env)) — its target
 user's, or the privileged user's for a `runas = ["root"]` mod — so a mod that needs
-a secret (`repo-bootstrap` cloning a private repo with `GITHUB_TOKEN`,
-`cloudflared-tunnel` running a tunnel with `CLOUDFLARE_TOKEN`) has it, and it
+a secret (`repo-bootstrap` cloning a private repo with `GITHUB_TOKEN`) has it, and it
 never lands in a script on disk, in a command line, or in a log.
 
 **A mod body runs without sudo.** The driver runs as the privileged user and

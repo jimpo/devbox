@@ -262,6 +262,18 @@ def find_mod_script(name: str, mods_dir: Optional[Path],
     return None
 
 
+# Mods that a conversion folded into another one, and so answer to no file
+# anywhere. A workspace naming a retired mod is told where it went instead of
+# being sent to look for a script that is never coming back. It is still a hard
+# error, and it is the last thing consulted: a `<name>.sh` in any mods directory
+# answers to the name first and wins, exactly as it does for any other name.
+RETIRED_MODS = {
+    "cloudflared-tunnel":
+        "`cloudflared`, which now installs the binary and runs the tunnel as a "
+        "systemd user service",
+}
+
+
 def resolve_mod(name: str, mods_dir: Optional[Path],
                 global_mods_dir: Optional[Path] = None,
                 builtin_mods_dir: Optional[Path] = None,
@@ -278,6 +290,10 @@ def resolve_mod(name: str, mods_dir: Optional[Path],
     path = find_mod_script(name, mods_dir, global_mods_dir, builtin_mods_dir)
     if path is not None:
         return path
+    if name in RETIRED_MODS:
+        die(f"mod '{name}' no longer exists on its own: it is part of "
+            f"{RETIRED_MODS[name]}. Drop '{name}' from the `mods` list in the "
+            f"config.")
     where = [f"{d}/{name}.sh" for d in (mods_dir, global_mods_dir, builtin_mods_dir)
              if d is not None]
     hint = f"Add {name}.sh to one of them"

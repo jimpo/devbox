@@ -516,9 +516,33 @@ def cmd_box_status(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -
     _tail_provision_log(provider, name, provision_log())
 
 
+def _report_failed_units(provider, name: str, workspace: WorkspaceConfig) -> None:
+    """This attachment's failed systemd user units, over its own agent alias.
+
+    A provisioning log only covers the run. The generation can leave long-lived
+    services behind in the agent's own user manager - the `cloudflared` tunnel
+    is one - and lingering keeps them running between logins, so a service that
+    cannot start stays broken with nothing in any log to say so. `--failed`
+    prints an empty listing when the account is healthy, so this costs a line
+    when there is nothing to report."""
+    ip = provider.address(name)
+    if not ip:
+        return
+    agent_alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name),
+                                          workspace)
+    print("--- failed user services")
+    subprocess.run([
+        "ssh", agent_alias,
+        # A box with no systemd has no user manager and so no unit to report.
+        "command -v systemctl >/dev/null 2>&1 && "
+        "systemctl --user --failed --no-pager || true",
+    ], check=False)
+
+
 def cmd_status(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
     name, _, provider = _resolve_target(args, workspace, gc)
     _tail_provision_log(provider, name, provision_log(workspace.agent_user))
+    _report_failed_units(provider, name, workspace)
 
 
 def _auth_failure_message(gc: GlobalConfig, err: Exception) -> Optional[str]:

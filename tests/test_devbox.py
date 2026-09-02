@@ -1308,6 +1308,104 @@ def test_dotfiles_writes_zshenv_only_in_the_account_home_manager_does_not_own():
     assert '[ "$(id -un)" = "${DEVBOX_ADMIN_USER:-}" ] &&' in mod
 
 
+# ---- cloudflared: a converted opt-in mod that ships a systemd user service ---
+def _cloudflared_module():
+    return (devbox.NIX_MODULES_DIR / "cloudflared.nix").read_text()
+
+
+def test_cloudflared_is_a_module_and_no_longer_a_script(isolated_mods, pubkey,
+                                                        tmp_path):
+    # Opt-in, so no playbook tuple names it: a workspace asks for it in its own
+    # `mods`, and that config resolves to the generation now that no
+    # cloudflared.sh answers to the name.
+    assert "cloudflared" in devbox.nix_module_names()
+    assert devbox.find_mod_script("cloudflared", None) is None
+    # Registered in the flake's module list, or the file would ship and evaluate
+    # nothing.
+    assert "./modules/cloudflared.nix" in (devbox.NIX_DIR / "flake.nix").read_text()
+
+    marker_dir = tmp_path / "ws"
+    marker_dir.mkdir()
+    workspace = _workspace(marker_dir=marker_dir, mods=["cloudflared"])
+    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
+                                       workspace.marker.mods_dir)
+    assert "cloudflared" in playbook.modules
+    payload = _payload_map(workspace, _global_config(pubkey))
+    assert "mods/cloudflared.sh" not in payload
+    assert "nix/modules/cloudflared.nix" in payload
+    assert "cloudflared.enable = true;" in payload["nix/workspace.nix"].content
+
+
+def test_cloudflared_keeps_the_token_out_of_the_nix_expression(isolated_mods,
+                                                               pubkey, tmp_path):
+    # /nix/store is world-readable and shared by every attachment, so the module
+    # may name the PATH of the 0600 creds file and nothing more. The rendered
+    # workspace.nix carries no creds either.
+    module = _cloudflared_module()
+    assert ".config/devbox/env" in module
+    marker_dir = tmp_path / "ws"
+    marker_dir.mkdir()
+    workspace = _workspace(marker_dir=marker_dir, mods=["cloudflared"],
+                           env={"CLOUDFLARE_TOKEN": devbox.EnvVar("cf_tok")})
+    payload = _payload_map(workspace, _global_config(pubkey))
+    for pf in payload.values():
+        if pf.path.startswith("nix/"):
+            assert "cf_tok" not in pf.content
+
+
+def test_cloudflared_sources_the_creds_file_rather_than_naming_it_as_an_env_file():
+    # systemd's EnvironmentFile= parser takes bare `KEY=value` only, and the
+    # file devbox writes is shell syntax (`export KEY=<quoted value>`), whose
+    # lines it drops as invalid variable names. The unit therefore sources the
+    # file in its own wrapper - which is also what maps the workspace's
+    # CLOUDFLARE_TOKEN onto the TUNNEL_TOKEN cloudflared reads.
+    module = _cloudflared_module()
+    code = [line for line in module.splitlines()
+            if not line.lstrip().startswith("#")]
+    assert not any("EnvironmentFile" in line for line in code)
+    assert any(". ${quotedEnvFile}" in line for line in code)
+    assert "TUNNEL_TOKEN" in module and "CLOUDFLARE_TOKEN" in module
+    # The token reaches cloudflared in the environment, never on a command line
+    # every other account on the box can read out of `ps`.
+    assert "--token" not in module
+
+
+def test_cloudflared_unit_uses_the_sections_home_manager_expects():
+    # home-manager's systemd.user.services.<name> is the unit file's own INI
+    # shape: capitalised Unit/Service/Install sections, not NixOS's
+    # serviceConfig. Getting this wrong is an evaluation error, which no test
+    # here can run.
+    module = _cloudflared_module()
+    assert "systemd.user.services.cloudflared" in module
+    for section in ("Unit = {", "Service = {", "Install.WantedBy"):
+        assert section in module
+    assert "serviceConfig" not in module
+    # A mod that is not asked for contributes nothing, and every module reads
+    # its own flag rather than declaring one.
+    assert "lib.mkIf config.devbox.mods.cloudflared.enable" in module
+    # An unconfigured workspace must not crash-loop: ExecCondition exiting
+    # non-zero skips the service and leaves the unit inactive, not failed.
+    assert "ExecCondition" in module
+
+
+def test_the_retired_cloudflared_tunnel_mod_says_where_it_went(isolated_mods,
+                                                               pubkey, tmp_path,
+                                                               capsys):
+    # Two mod names collapsed into one, so a config that still lists both is a
+    # hard error naming the survivor - not a silent no-op, and not the generic
+    # "looked in four places" for a script nobody is going to write.
+    marker_dir = tmp_path / "ws"
+    marker_dir.mkdir()
+    workspace = _workspace(marker_dir=marker_dir,
+                           mods=["cloudflared", "cloudflared-tunnel"])
+    with pytest.raises(SystemExit):
+        devbox.build_payload(workspace, _global_config(pubkey), "alice")
+    err = capsys.readouterr().err
+    assert "cloudflared-tunnel" in err
+    assert "no longer exists" in err
+    assert "`cloudflared`" in err
+
+
 # ---- resolve_env (global + workspace [env], workspace overrides per-key) --------
 def test_resolve_env_merges_global_and_workspace():
     gc = _global_config(devbox.Path("/nonexistent"),

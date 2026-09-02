@@ -123,6 +123,7 @@
           ./zshenv.nix
           # Converted mods, alphabetically, one entry per line.
           ./modules/cargo-binstall.nix
+          ./modules/cloudflared.nix
           ./modules/jj.nix
           ./modules/neovim.nix
           ./modules/uv.nix
