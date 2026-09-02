@@ -943,7 +943,7 @@ def _nix_context(agent="agentbot", jj_name="Alice Example",
 def test_render_workspace_nix_is_an_attribute_set_of_this_attachments_values():
     # The same job render_manifest does for the driver: the shipped flake is
     # static, and this one rendered file is what makes it this attachment's.
-    rendered = devbox.render_workspace_nix(_nix_context(), ["jj"])
+    rendered = devbox.render_workspace_nix(_nix_context(), {"jj": True})
     assert 'agentUser = "agentbot";' in rendered
     # The account's home, which is where every mod and every sync rule lands.
     assert 'homeDirectory = "/home/agentbot";' in rendered
@@ -957,7 +957,7 @@ def test_render_workspace_nix_escapes_strings():
     # Nix's own escapes, not shell's: a value with a quote, a backslash or an
     # antiquotation in it has to survive as itself instead of becoming syntax.
     rendered = devbox.render_workspace_nix(
-        _nix_context(jj_name=r'A "B" \ ${C}', jj_email="a\tb\nc"), [])
+        _nix_context(jj_name=r'A "B" \ ${C}', jj_email="a\tb\nc"), {})
     assert r'jjName = "A \"B\" \\ \${C}";' in rendered
     assert r'jjEmail = "a\tb\nc";' in rendered
 
@@ -972,21 +972,25 @@ def test_nix_string_and_attr_name_quote_only_what_nix_needs():
     assert devbox.nix_attr_name("a b") == '"a b"'
 
 
-def test_render_workspace_nix_turns_the_playbook_into_enable_options():
-    # Filenames do not translate to the module system; options do. Every mod in
-    # the playbook gets a flag, including ones no module implements yet.
+def test_render_workspace_nix_renders_a_flag_for_every_shipped_module():
+    # Filenames do not translate to the module system; options do. EVERY module
+    # the flake ships gets a flag, true or false, so a module can read its own
+    # `config.devbox.mods.<name>.enable` without the attribute being missing -
+    # which in nix is an evaluation error, not a false.
     rendered = devbox.render_workspace_nix(
-        _nix_context(), ["jj", "repo-bootstrap", "jj"])
+        _nix_context(), {"jj": True, "repo-bootstrap": False, "uv": True})
     assert "  mods = {\n" in rendered
-    assert "    jj.enable = true;\n" in rendered
-    assert "    repo-bootstrap.enable = true;\n" in rendered
-    # Deduplicated: a workspace may list a base mod again, and an attribute set
-    # cannot hold the same name twice.
-    assert rendered.count("jj.enable") == 1
+    # Alphabetical, since an attribute set is unordered and a rendered file
+    # should diff cleanly.
+    assert ("  mods = {\n"
+            "    jj.enable = true;\n"
+            "    repo-bootstrap.enable = false;\n"
+            "    uv.enable = true;\n"
+            "  };\n") in rendered
 
 
 def test_render_workspace_nix_empty_mods_is_still_an_attribute_set():
-    assert "mods = { };" in devbox.render_workspace_nix(_nix_context(), [])
+    assert "mods = { };" in devbox.render_workspace_nix(_nix_context(), {})
 
 
 def test_build_payload_ships_the_flake_next_to_the_mods(isolated_mods, pubkey):
@@ -1000,11 +1004,16 @@ def test_build_payload_ships_the_flake_next_to_the_mods(isolated_mods, pubkey):
     for path in devbox.NIX_DIR.rglob("*.nix"):
         rel = path.relative_to(devbox.NIX_DIR).as_posix()
         assert f"nix/{rel}" in payload
-    # ... and the one rendered file, carrying this attachment's playbook.
+    for name in devbox.nix_module_names():
+        assert f"nix/modules/{name}.nix" in payload
+    # ... and the one rendered file, carrying this attachment's values.
     workspace_nix = payload["nix/workspace.nix"].content
     assert 'agentUser = "agentbot";' in workspace_nix
+    # A bash mod is not a module: it runs from the manifest and gets no flag.
+    # (Every mod in the base playbook is still a script today.)
     for name in devbox.WORKSPACE_BASE_MODS:
-        assert f"{devbox.nix_attr_name(name)}.enable = true;" in workspace_nix
+        if name not in devbox.nix_module_names():
+            assert f"{devbox.nix_attr_name(name)}.enable" not in workspace_nix
 
 
 def test_build_box_payload_ships_no_flake(isolated_mods, pubkey):
@@ -1037,6 +1046,129 @@ def test_home_manager_is_an_agent_mod_that_needs_the_boxs_nix(isolated_mods):
     switch = [line for line in text.splitlines()
               if line.startswith("nix run ")][0]
     assert switch.index(" -- ") < switch.index("--no-write-lock-file")
+
+
+# ---- resolution: a playbook name is a bash script OR a nix module -----------
+@pytest.fixture
+def converted(tmp_path, monkeypatch):
+    """Convert mods the way a conversion ticket does: delete each one's
+    `<name>.sh` from the built-ins and put a `modules/<name>.nix` in its place,
+    leaving the playbook lists untouched."""
+    def convert(*names):
+        mods = tmp_path / "builtin-mods"
+        devbox.shutil.copytree(devbox.BUILTIN_MODS_DIR, mods)
+        modules = tmp_path / "modules"
+        modules.mkdir()
+        for name in names:
+            (mods / f"{name}.sh").unlink()
+            (modules / f"{name}.nix").write_text("{ }\n")
+        monkeypatch.setattr(devbox.provision, "BUILTIN_MODS_DIR", mods)
+        monkeypatch.setattr(devbox.provision, "NIX_MODULES_DIR", modules)
+        monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR",
+                            devbox.Path("/nonexistent-global-mods"))
+        return mods, modules
+    return convert
+
+
+def test_a_converted_base_mod_resolves_to_the_generation(converted, pubkey):
+    # The conversion ticket's end state for a mod in WORKSPACE_BASE_MODS: the
+    # name stays in the playbook and resolves to the module instead.
+    converted("jj")
+    playbook = devbox.resolve_playbook(
+        devbox.workspace_playbook(_workspace()), None)
+    assert playbook.modules == ["jj"]
+    # No ModSpec and no manifest line: the driver never hears about it.
+    assert "jj" not in [s.name for s in playbook.specs]
+    payload = _payload_map(_workspace(), _global_config(pubkey))
+    assert "mods/jj.sh" not in payload
+    assert "jj" not in [line.split("\t")[0]
+                        for line in payload["manifest"].content.splitlines()]
+    # The generation provides it, and the module that does ships and is on.
+    assert payload["nix/modules/jj.nix"].content == "{ }\n"
+    assert "jj.enable = true;" in payload["nix/workspace.nix"].content
+
+
+def test_a_converted_mod_still_satisfies_a_requires(converted):
+    # `repo-bootstrap` requires jj. A module is not a step in the run, so it
+    # satisfies the dependency wherever it sits - the generation carrying it is
+    # switched by `home-manager`, first in the base playbook.
+    converted("jj")
+    devbox.validate_playbooks(_workspace())
+
+
+def test_a_converted_opt_in_mod_keeps_a_workspaces_config_working(converted, pubkey,
+                                                                 tmp_path):
+    # `uv` ships a mods/uv.sh but is not in the base list, so a workspace names
+    # it in its own `mods`. After conversion that config is unchanged.
+    converted("uv")
+    marker_dir = tmp_path / "ws"
+    marker_dir.mkdir()
+    workspace = _workspace(marker_dir=marker_dir, mods=["uv"])
+    assert devbox.resolve_playbook(devbox.workspace_playbook(workspace),
+                                   workspace.marker.mods_dir).modules == ["uv"]
+    payload = _payload_map(workspace, _global_config(pubkey))
+    assert "mods/uv.sh" not in payload
+    assert "uv.enable = true;" in payload["nix/workspace.nix"].content
+
+
+def test_a_module_the_playbook_never_names_is_shipped_but_off(converted, pubkey,
+                                                              tmp_path):
+    # Every module gets a flag whether or not this workspace asked for it: a
+    # missing attribute is an evaluation error in nix, not a false.
+    converted("uv")
+    payload = _payload_map(_workspace(), _global_config(pubkey))
+    assert "nix/modules/uv.nix" in payload
+    assert "uv.enable = false;" in payload["nix/workspace.nix"].content
+
+
+def test_a_workspace_script_shadows_a_converted_mod(converted, pubkey, tmp_path):
+    # Bash precedence is unchanged and still wins. A workspace that ships its
+    # own jj.sh gets its own jj, and the module of that name stays inert -
+    # running both is the one outcome that is clearly wrong.
+    converted("jj")
+    marker_dir = tmp_path / "ws"
+    (marker_dir / ".devbox" / "mods").mkdir(parents=True)
+    (marker_dir / ".devbox" / "mods" / "jj.sh").write_text(
+        "#!/usr/bin/env bash\necho my own jj\n")
+    workspace = _workspace(marker_dir=marker_dir)
+    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
+                                       workspace.marker.mods_dir)
+    assert playbook.modules == []
+    assert "jj" in [s.name for s in playbook.specs]
+    payload = _payload_map(workspace, _global_config(pubkey))
+    assert payload["mods/jj.sh"].content.endswith("echo my own jj\n")
+    assert "jj.enable = false;" in payload["nix/workspace.nix"].content
+
+
+def test_the_box_playbook_never_resolves_a_module(converted, pubkey, capsys):
+    # The flake describes one agent's home; a box run has no agent, and a box
+    # mod is system work no generation could do. A converted box mod is
+    # therefore a missing mod, not a module.
+    converted("github-auth")
+    with pytest.raises(SystemExit):
+        devbox.build_box_payload("alice", _global_config(pubkey))
+    err = capsys.readouterr().err
+    assert "mod 'github-auth' not found" in err
+    # ... and the message does not offer the modules directory as a fix.
+    assert ".nix" not in err
+
+
+def test_an_unresolvable_mod_names_every_place_it_looked(converted, pubkey,
+                                                         tmp_path, capsys):
+    # A typo in a `mods` list still says all four places, so the fix is obvious
+    # whichever half the author meant.
+    mods, modules = converted()
+    marker_dir = tmp_path / "ws"
+    (marker_dir / ".devbox" / "mods").mkdir(parents=True)
+    workspace = _workspace(marker_dir=marker_dir, mods=["rustt"])
+    with pytest.raises(SystemExit):
+        devbox.build_payload(workspace, _global_config(pubkey), "alice")
+    err = capsys.readouterr().err
+    for expected in (f"{marker_dir / '.devbox' / 'mods'}/rustt.sh",
+                     "/nonexistent-global-mods/rustt.sh",
+                     f"{mods}/rustt.sh",
+                     f"{modules}/rustt.nix"):
+        assert expected in err
 
 
 def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():

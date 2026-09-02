@@ -35,22 +35,25 @@ in
     };
 
     mods = lib.mkOption {
-      # Free-form in the NAME, declared in the shape: devbox renders one entry
-      # per mod in the workspace's playbook, including the mods that have no
-      # module yet, so the flag has to exist for a name no file mentions. A
+      # Free-form in the NAME, declared in the shape: the names are the files in
+      # modules/, which devbox discovers rather than this file listing them. A
       # module reads its own flag; nothing declares one.
       type = lib.types.attrsOf (lib.types.submodule {
         options.enable = lib.mkOption {
           type = lib.types.bool;
           default = false;
-          description = "Whether this mod is in the workspace's playbook.";
+          description = "Whether the generation provides this mod.";
         };
       });
       default = { };
       description = ''
-        One entry per mod in this workspace's playbook, as
-        `<name>.enable`. Rendered from the workspace's effective `mods` list;
-        a mod that has no module here is simply an inert flag.
+        One entry per module in `modules/`, as `<name>.enable`, rendered by
+        devbox into workspace.nix. The flag means "this attachment's playbook
+        resolves <name> to the generation". It is false when the workspace
+        never asked for the mod, and false when a bash `<name>.sh` answers to
+        the name instead - a script always wins, and then it is the only thing
+        that runs. Every shipped module gets an entry either way, so a module
+        can read its own flag without the attribute being missing.
       '';
     };
   };

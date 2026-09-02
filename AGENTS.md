@@ -39,10 +39,18 @@ agent, and `home-manager`'s agent scope + its `requires = ["nix"]` across that
 same boundary), manifest
 rendering, `render_repos` + the `repos` payload file, env-file quoting,
 the home-manager flake (`render_workspace_nix`: the rendered attribute set, nix
-string escaping and bare-vs-quoted attribute names, the playbook becoming
-`<name>.enable` options, and `nix_payload_files` shipping every `.nix` file
+string escaping and bare-vs-quoted attribute names, a `<name>.enable` flag per
+shipped module, and `nix_payload_files` shipping every `.nix` file
 under `NIX_DIR` with an attachment but none with a box; plus the pin agreement
-between `flake.nix`'s `home-manager` input and the mod's `nix run`),
+between `flake.nix`'s `home-manager` input and the mod's `nix run`), the
+**two-halves resolution** (`resolve_playbook` against a fake conversion — a
+built-in `<name>.sh` deleted and a `modules/<name>.nix` in its place: a base mod
+and an opt-in one both resolving to the generation with no `ModSpec` and no
+manifest line, the `requires` on a converted mod still validating, a module the
+playbook never names shipped with `enable = false`, a workspace's own `.sh`
+shadowing a converted built-in back into the bash half, the box playbook
+refusing to see a module at all, and the failure naming all four places it
+looked),
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
 (`_refresh_ssh_aliases`: one stanza per file, the collapse rule, per-box
@@ -189,7 +197,15 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   the agent's home.
 - `provision.py` — modular provisioning: mod resolution (workspace > global >
   built-in, keyed on `marker.mods_dir`), the two playbooks
-  (`box_playbook`/`workspace_playbook`), mod metadata
+  (`box_playbook`/`workspace_playbook`), **the two halves a playbook name can
+  resolve to** (`resolve_playbook` → `Playbook(specs, modules)`: a
+  `<name>.sh` in any mods directory, or — only when no directory has one — the
+  flake's `modules/<name>.nix`, discovered by file presence so converting a mod
+  is a one-file change with no registry to keep in step; scripts win at every
+  level of the precedence, so a workspace's own `<name>.sh` gets it its own mod
+  and leaves the module inert, and a module name yields no `ModSpec` and no
+  manifest line — the driver never hears about it. The box playbook consults no
+  module: the flake describes one agent's home), mod metadata
   (`parse_mod_metadata`, which reads the fenced `# /// mod` TOML block with
   stdlib `tomllib`; `ModSpec`, `load_mod_specs`), `scoped_runas` + `render_manifest` (the scope
   filter, applied entirely host-side so the driver never learns about scopes),
@@ -222,9 +238,17 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   `options.nix` declares `devbox.workspace.*` and the free-form
   `devbox.mods.<name>.enable`, and is the only file that imports the rendered
   `workspace.nix` — which `render_workspace_nix` writes per attachment (agent
-  user, home, jj identity, and the playbook as enable options), the same job
+  user, home, jj identity, and one flag per shipped module), the same job
   `render_manifest` does for the driver, escaping strings for nix rather than
-  for the shell. Home-manager is **agent-only**: a box run ships none of this,
+  for the shell. **The flag means "the generation provides this mod"**: true
+  only when this attachment's playbook names it and no `<name>.sh` answers to
+  the name, false otherwise — so a shadowed mod runs its script and nothing
+  else. Every shipped module gets a flag either way, because a missing
+  attribute is an evaluation error in nix, not a false. Converting a mod is
+  therefore: write `modules/<name>.nix`, add the line to `flake.nix`'s list,
+  delete `mods/<name>.sh`, and leave the playbook tuples alone (the recipe is
+  spelled out in `flake.nix`'s conventions block, which is the contract the
+  conversion tickets read). Home-manager is **agent-only**: a box run ships none of this,
   and the privileged account keeps its apt zsh/vim so `devbox box ssh` stays
   the machine's debugging entry point. Workspace-local `.nix` modules are
   **not** supported — workspace > global > built-in shadowing does not

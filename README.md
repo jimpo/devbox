@@ -704,6 +704,13 @@ mods/*.sh                       # built-in, at the repo root
 
 A workspace's own mods live beside its config file, whichever spelling it uses.
 
+When **no** directory has a `<name>.sh`, the name resolves instead to the
+home-manager module of that name (`devbox/nix/modules/<name>.nix`), and the
+generation provides the mod rather than the driver running a script. That is all
+converting a mod takes — write the module, delete the script — and it is why a
+script always wins: a workspace that ships its own `jj.sh` gets its own jj,
+converted or not, and never both.
+
 **Static files, env for context.** Mods are static (lintable, shellcheck-able,
 diffable, and directly runnable — the metadata below lives in a fenced block of
 comments, so the shebang stays on line 1) and receive context via the **environment**

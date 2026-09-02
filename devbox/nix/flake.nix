@@ -29,9 +29,42 @@
 #
 # ---- MODULE CONVENTIONS (read this before adding a module) ------------------
 #
-# One file per converted mod: `modules/<mod-name>.nix`, named exactly as the
-# bash mod it replaces, and added to the `modules` list below - alphabetically,
-# one entry per line.
+# CONVERTING A MOD, end to end. Four steps, and the fourth is "nothing":
+#
+#   1. Write `modules/<mod-name>.nix`, named exactly as the bash mod it
+#      replaces (see the shape below).
+#   2. Add `./modules/<mod-name>.nix` to the `modules` list below -
+#      alphabetically, one entry per line.
+#   3. DELETE `mods/<mod-name>.sh`, in the same commit. A script wins over a
+#      module of the same name, so while it exists the bash mod is what runs
+#      and the new module is inert.
+#   4. Leave `WORKSPACE_BASE_MODS` (provision.py) ALONE. The name stays in the
+#      playbook: that tuple lists what an attachment gets, not which half
+#      provides it, and devbox resolves each name by file presence -
+#      `<name>.sh` in any mods directory, else `modules/<name>.nix`. Removing
+#      the name would turn the module off. The same goes for a mod a workspace
+#      names in its own `mods = [...]`: that config keeps working untouched.
+#
+# Two consequences worth knowing. A mod that `requires` a converted one still
+# validates - a module is not a step in the run, so it satisfies a dependency
+# wherever it sits. And a converted name is no longer in the driver's manifest,
+# so `devbox sync --mods=<name>` no longer knows it: the way to reconverge a
+# converted mod is `devbox sync --mods=home-manager`, which re-switches the
+# whole generation.
+#
+# `devbox.mods.<name>.enable` MEANS "the generation provides this mod". devbox
+# renders one flag per file in this directory (options.nix declares them
+# free-form), so:
+#
+#   * a mod the workspace's playbook names, with no `<name>.sh` anywhere -> true
+#   * a mod the workspace never asked for                                -> false
+#   * a mod some `<name>.sh` still answers to (a workspace shadowing a
+#     built-in with its own script, or step 3 not done yet)              -> false
+#
+# The flag is never true at the same time as a bash mod of that name running:
+# one name, one implementation. A module READS its own flag and never declares
+# it. A module that needs more than a boolean declares its own options in its
+# own namespace (`options.devbox.<name>.<option>`), outside `devbox.mods`.
 #
 # Shape:
 #
@@ -39,12 +72,6 @@
 #     lib.mkIf config.devbox.mods.<mod-name>.enable {
 #       home.packages = [ pkgs.<package> ];
 #     }
-#
-# `devbox.mods.<name>.enable` is declared generically in options.nix, so every
-# mod in the workspace's playbook already has a flag: a module READS its own
-# flag and never declares it. A module that needs more than a boolean declares
-# its own options in its own namespace (`options.devbox.<name>.<option>`),
-# outside the `devbox.mods` attribute set.
 #
 # The workspace's values are `config.devbox.workspace`: agentUser,
 # homeDirectory, jjName, jjEmail. Read them from there, never by importing
