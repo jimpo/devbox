@@ -651,8 +651,8 @@ thing (jj, dotfiles, Claude Code, a workspace's rust toolchain, …). There are 
 playbooks**, because a box and an attachment need different things:
 
 ```
-box playbook (fixed, built-in):     dotfiles-packages → tree-sitter-cli →
-                                    dotfiles → vim → github-auth → nix
+box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim →
+                                    github-auth → nix
                                     # runs once per box, as root / the admin
 
 workspace playbook (built-in base):   home-manager → jj → dotfiles → vim →

@@ -1022,7 +1022,8 @@ def test_build_payload_ships_the_flake_next_to_the_mods(isolated_mods, pubkey):
     # A bash mod is not a module: it runs from the manifest and gets no flag.
     for name in devbox.WORKSPACE_BASE_MODS:
         if name not in devbox.nix_module_names():
-            assert f"{devbox.nix_attr_name(name)}.enable" not in workspace_nix
+            assert f"\n    {devbox.nix_attr_name(name)}.enable = " \
+                not in workspace_nix
 
 
 def test_build_box_payload_ships_no_flake(isolated_mods, pubkey):
@@ -1055,6 +1056,29 @@ def test_home_manager_is_an_agent_mod_that_needs_the_boxs_nix(isolated_mods):
     switch = [line for line in text.splitlines()
               if line.startswith("nix run ")][0]
     assert switch.index(" -- ") < switch.index("--no-write-lock-file")
+
+
+def test_neovim_is_the_agents_and_carries_the_tree_sitter_cli(isolated_mods,
+                                                              pubkey):
+    # nvim comes from the generation, so it exists in an attachment's profile
+    # and nowhere else: the box playbook installs no editor but the apt `vim`,
+    # and the tree-sitter CLI the nvim config builds parsers with rides in the
+    # same module rather than in a root mod writing /usr/local.
+    assert "neovim" in devbox.WORKSPACE_BASE_MODS
+    assert "neovim" in devbox.nix_module_names()
+    assert devbox.find_mod_script("neovim", None) is None
+    assert "tree-sitter-cli" not in devbox.box_playbook()
+    assert "tree-sitter-cli" not in devbox.WORKSPACE_BASE_MODS
+    assert devbox.find_mod_script("tree-sitter-cli", None) is None
+    module = (devbox.NIX_MODULES_DIR / "neovim.nix").read_text()
+    assert "programs.neovim" in module
+    assert "pkgs.tree-sitter" in module
+    # `dotfiles` owns ~/.config/nvim, so the generation must not claim
+    # init.lua: it sideloads its own lua through a wrapper argument instead.
+    assert "sideloadInitLua = true;" in module
+    payload = _payload_map(_workspace(), _global_config(pubkey))
+    assert "mods/neovim.sh" not in payload
+    assert "neovim.enable = true;" in payload["nix/workspace.nix"].content
 
 
 # ---- resolution: a playbook name is a bash script OR a nix module -----------
@@ -1336,8 +1360,8 @@ def test_box_playbook_is_fixed():
 
 
 def test_the_two_playbooks_split_the_apt_half_from_the_per_user_half():
-    # dotfiles-packages and tree-sitter-cli are box-level mods (root, system-
-    # wide); everything else in the base installs into somebody's home.
+    # dotfiles-packages is a box-level mod (root, system-wide); everything else
+    # in the base installs into somebody's home.
     assert "dotfiles-packages" in devbox.BOX_BASE_MODS
     assert "dotfiles-packages" not in devbox.WORKSPACE_BASE_MODS
     for per_user in ("jj", "claude-code", "repo-bootstrap"):
@@ -1634,7 +1658,6 @@ def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_workspaces(isola
         devbox.workspace_playbook(_workspace()), None).specs
     assert devbox.render_manifest(box, devbox.SCOPE_BOX).splitlines() == [
         "dotfiles-packages\troot\t",   # the apt half: once, as root, per box
-        "tree-sitter-cli\troot\tunzip",
         "dotfiles\tadmin\t",
         "vim\tadmin\t",
         "github-auth\troot\t",
@@ -1643,7 +1666,6 @@ def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_workspaces(isola
     by_name = {s.name: s for s in workspace}
     assert devbox.scoped_runas(by_name["dotfiles"].runas, devbox.SCOPE_WORKSPACE) == ["agent"]
     assert "dotfiles-packages" in by_name["dotfiles"].requires
-    assert "tree-sitter-cli" in by_name["dotfiles"].requires
 
 
 def test_github_auth_is_a_root_box_mod_writing_etc_gitconfig(isolated_mods):

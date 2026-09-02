@@ -112,8 +112,9 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # The box playbook: what a machine needs once, regardless of who lives on it -
 # the apt half of the dotfiles setup, plus a usable shell and editor for the
 # privileged account, which is the box's debugging entry point
-# (`devbox ssh --admin`). `tree-sitter-cli` precedes `dotfiles` because the
-# latter's nvim config needs it to build parsers. `github-auth` is here rather
+# (`devbox ssh --admin`). That editor is the apt `vim` the init script
+# installs: `nvim` comes from an attachment's home-manager generation, so it
+# lives in that agent's profile and nowhere else. `github-auth` is here rather
 # than in the workspace playbook because it writes /etc/gitconfig, which every
 # account on the box then shares: the line it writes names a credential helper,
 # and the helper answers from the calling account's own GITHUB_TOKEN. Fixed and
@@ -122,8 +123,7 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # `nix` is box-scoped for the same reason: /nix and the nix-daemon are one
 # machine-wide store that every attached workspace shares, and only the
 # privileged account is a trusted user of it.
-BOX_BASE_MODS = ("dotfiles-packages", "tree-sitter-cli", "dotfiles", "vim",
-                 "github-auth", "nix")
+BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim", "github-auth", "nix")
 
 # The workspace playbook: what one attachment needs inside its own account.
 # Ordering constraints are encoded here: jj must precede repo-bootstrap (which

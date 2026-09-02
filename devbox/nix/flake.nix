@@ -124,6 +124,7 @@
           # Converted mods, alphabetically, one entry per line.
           ./modules/cargo-binstall.nix
           ./modules/jj.nix
+          ./modules/neovim.nix
           ./modules/uv.nix
         ];
       };
