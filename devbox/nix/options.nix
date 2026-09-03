@@ -59,10 +59,16 @@ in
   };
 
   config = {
-    # Unfree packages are allowed. nixpkgs' vim/neovim plugin updater stamps
-    # `meta.license = unfree` on every plugin whose licence it could not detect
-    # - base16-vim and vim-go among them - so an editor's plugin set does not
-    # evaluate without this.
+    # Unfree packages are allowed, and two modules need it. `claude-code` is a
+    # genuinely unfree binary release. nixpkgs' vim/neovim plugin updater also
+    # stamps `meta.license = unfree` on every plugin whose licence it could not
+    # detect - base16-vim and vim-go among them - so an editor's plugin set does
+    # not evaluate without this either.
+    #
+    # It takes effect despite flake.nix handing `homeManagerConfiguration` a
+    # `pkgs`: that only sets `nixpkgs.config` to a `mkDefault`, and
+    # home-manager's nixpkgs module re-imports nixpkgs with whatever this
+    # resolves to.
     nixpkgs.config.allowUnfree = true;
 
     devbox.workspace = {

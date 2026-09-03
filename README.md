@@ -179,8 +179,8 @@ machine:
   matters to you; devbox doesn't ship one.
 - **Shared CPU, RAM and disk.** N agents running `cargo build` contend, and one
   can ENOSPC the rest. Box sizing is now an N-workspace decision.
-- **Duplication, deliberately.** Each account gets its own oh-my-zsh, jj binary
-  and Claude Code install — a few minutes and a few hundred MB per
+- **Duplication, deliberately.** Each account gets its own oh-my-zsh, dotfiles
+  and checkouts — a few minutes and a few hundred MB per
   attach, accepted in exchange for accounts that don't share state. (What the
   generation provides is the exception: /nix/store is one machine-wide store, so
   two accounts on the same plugin set share the paths.)
@@ -709,6 +709,23 @@ implementations. An agent's is `nix/modules/vim.nix`, which takes the plugin set
 generation, so its is `vim-plug`, a box mod that fetches vim-plug and runs
 `:PlugInstall` against the ~/.vimrc `dotfiles` wrote. They cannot share the name
 `vim`: a script of that name would shadow the module everywhere.
+
+**Claude Code shows the other shape**: one name whose imperative half lives
+*inside* the module. `nix/modules/claude-code.nix` puts `pkgs.claude-code` — the
+same native binary the `claude.ai` installer fetches, at the version the nixpkgs
+pin records, with its auto-updater forced off because a store path is read-only
+— into the profile, and does the rest in a `home.activation` entry. That half
+has to stay imperative: Claude Code writes its own `~/.claude/settings.json` and
+`~/.claude.json`, and a file home-manager owns is a read-only symlink into the
+store, so declaring either one would break Claude's writes and then the *next*
+activation. The mod therefore *merges* the one setting devbox needs
+(`permissions.defaultMode`) into whatever the file already holds. The two opt-in
+MCP mods, `claude-github-mcp` and `claude-linear-mcp`, are the same shape and
+stay two separate names: each registers its server with `claude mcp add`, and
+the `Authorization` header they pass is the literal, unexpanded
+`${GITHUB_TOKEN}` / `${LINEAR_API_KEY}` that Claude resolves from the
+environment at call time — the value comes from the 0600
+`~/.config/devbox/env`, never from the world-readable store.
 
 **Resolution** — each mod name resolves to a `<name>.sh` script by precedence
 **workspace > global > built-in**, so a workspace can shadow a built-in by name:

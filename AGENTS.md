@@ -60,7 +60,15 @@ naming it in `EnvironmentFile=` — systemd's parser reads bare `KEY=value` and
 drops devbox's `export KEY=…` lines — and it uses home-manager's capitalised
 `Unit`/`Service`/`Install` sections; plus `RETIRED_MODS`, which turns a config
 still naming the folded-in `cloudflared-tunnel` into an error saying where it
-went),
+went), the **converted `claude-code` and the two MCP mods** (the base mod
+resolving to `modules/claude-code.nix` with no script and no apt `jq` left in
+any built-in's `packages`, its `home.activation` entry merging
+`permissions.defaultMode` rather than claiming `~/.claude/settings.json` with a
+`home.file`, and the MCP pair staying **two** opt-in names — each shipped, each
+with its own flag, neither retired — whose `Authorization` header carries the
+literal `''${GITHUB_TOKEN}`/`''${LINEAR_API_KEY}`: nix's escape for an
+antiquotation, asserted present in the module and unexpanded in the payload file
+the box receives, with the `[env]` value itself nowhere in `nix/`),
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
 (`_refresh_ssh_aliases`: one stanza per file, the collapse rule, per-box
@@ -126,7 +134,7 @@ It does not and cannot exercise `box create`/`up`/`stop`/`destroy`/`host`/
 `create`/`detach`/`list --attached`/`jj fetch` end-to-end against real infra
 (`jj fetch`'s actual `jj git fetch` needs a
 booted, provisioned box), the actual behavior of the built-in mods on a real
-box (dotfiles, Claude Code, repo bootstrap, the multi-user nix
+box (dotfiles, repo bootstrap, the multi-user nix
 install and its daemon — though
 `repo-bootstrap`'s loop over the `repos` file is plain bash and can be run by
 hand against fake `jj`/`git`), **anything nix evaluates** (this host has no
@@ -186,6 +194,21 @@ the generation), `:scriptnames` as the agent lists the store's vimrc and the
 account's own `~/.vimrc`, and `:colorscheme` there answers base16-chalk — that
 last one is what proves the store's plugins loaded before the account's vimrc
 ran, since configenv's file sets it while being sourced.
+
+For Claude Code, on that same box: `command -v claude` as the agent answers
+`~/.nix-profile/bin/claude` (not `~/.local/bin/claude`, which an account
+attached by an older devbox still holds), `claude --version` matches the
+`manifest.json` version at the nixpkgs pin, and `claude doctor` reports no
+auto-updater — the package's wrapper `--set`s `DISABLE_AUTOUPDATER=1`, so a
+store binary cannot try to replace itself. `jq -r .permissions.defaultMode
+~/.claude/settings.json` is `bypassPermissions`, and that file is a REAL file,
+not a store symlink: `/config` in a live session still writes it, and a second
+`devbox sync --mods=home-manager` neither fails nor reverts what Claude wrote.
+Add a `mods = ["claude-github-mcp", "claude-linear-mcp"]` workspace with the two
+tokens in `[env]`: `claude mcp list` shows both connected, and
+`jq '.mcpServers' ~/.claude.json` holds the literal `${GITHUB_TOKEN}` /
+`${LINEAR_API_KEY}` — the header text, never the value, which is the whole point
+of the nix escape.
 
 A workspace with `mods = ["cloudflared"]` is the module to exercise by hand,
 since only a box runs the real binary: with a `CLOUDFLARE_TOKEN` in `[env]`,

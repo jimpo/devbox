@@ -1134,9 +1134,9 @@ def test_a_converted_mod_still_satisfies_a_requires(converted):
 
 def test_a_converted_opt_in_mod_keeps_a_workspaces_config_working(converted, pubkey,
                                                                  tmp_path):
-    # `claude-linear-mcp` ships a mods/claude-linear-mcp.sh but is not in the
-    # base list, so a workspace names it in its own `mods`. After conversion
-    # that config is unchanged.
+    # `claude-linear-mcp` is not in either base list, so a workspace names it in
+    # its own `mods`. A conversion leaves that config untouched: the name
+    # resolves to the generation instead of to a script.
     converted("claude-linear-mcp")
     marker_dir = tmp_path / "ws"
     marker_dir.mkdir()
@@ -1404,6 +1404,128 @@ def test_the_retired_cloudflared_tunnel_mod_says_where_it_went(isolated_mods,
     assert "cloudflared-tunnel" in err
     assert "no longer exists" in err
     assert "`cloudflared`" in err
+
+
+# ---- claude-code and the MCP mods: declarative package, imperative config ----
+def _module_source(name):
+    return (devbox.NIX_MODULES_DIR / f"{name}.nix").read_text()
+
+
+def _module_code(name):
+    """A module's expressions, without the prose comments that discuss them -
+    so an assertion about what the nix says is not answered by a comment."""
+    return "\n".join(line for line in _module_source(name).splitlines()
+                     if not line.lstrip().startswith("#"))
+
+
+def test_claude_code_is_the_generations_and_installs_no_apt_package(isolated_mods,
+                                                                    pubkey):
+    # A base mod, so the name stays in WORKSPACE_BASE_MODS and resolves to the
+    # module: nothing curls the installer, and the `packages = ["jq"]` the merge
+    # needs is gone with it - the last built-in that asked apt for jq.
+    assert "claude-code" in devbox.WORKSPACE_BASE_MODS
+    assert "claude-code" in devbox.nix_module_names()
+    assert devbox.find_mod_script("claude-code", None) is None
+    assert "./modules/claude-code.nix" in (devbox.NIX_DIR / "flake.nix").read_text()
+    module = _module_code("claude-code")
+    assert "pkgs.claude-code" in module
+    assert "install.sh" not in module and "curl" not in module
+    for path in devbox.BUILTIN_MODS_DIR.glob("*.sh"):
+        assert "jq" not in devbox.parse_mod_metadata(
+            path.read_text(), path).get("packages", [])
+    payload = _payload_map(_workspace(), _global_config(pubkey))
+    assert "mods/claude-code.sh" not in payload
+    assert "nix/modules/claude-code.nix" in payload
+    assert "claude-code.enable = true;" in payload["nix/workspace.nix"].content
+
+
+def test_claude_code_merges_its_setting_instead_of_owning_the_file():
+    # Claude Code writes ~/.claude/settings.json itself, and home-manager owns a
+    # file by symlinking it read-only into the store - so the one setting devbox
+    # needs is merged into whatever the file already holds, by an activation
+    # step. `home.file` for that path would either break Claude's writes or have
+    # it replace the symlink, which the next activation refuses.
+    module = _module_code("claude-code")
+    assert "home.file" not in module
+    assert "programs.claude-code" not in module
+    assert 'lib.hm.dag.entryAfter [ "writeBoundary" ]' in module
+    assert "home.activation.devboxClaudeCode" in module
+    assert '.permissions.defaultMode = "bypassPermissions"' in module
+    assert ".claude/settings.json" in module
+    # One name, one implementation: the imperative half rides inside the module
+    # rather than under a second mod name.
+    assert "lib.mkIf config.devbox.mods.claude-code.enable" in module
+
+
+@pytest.mark.parametrize("name,server,url", [
+    ("claude-github-mcp", "github", "https://api.githubcopilot.com/mcp/"),
+    ("claude-linear-mcp", "linear", "https://mcp.linear.app/mcp"),
+])
+def test_the_mcp_mods_stay_two_opt_in_modules(isolated_mods, pubkey, tmp_path,
+                                              name, server, url):
+    # Two names, two modules, two flags - so a config that names one of them and
+    # not the other keeps working exactly as it did, and neither is retired.
+    assert name in devbox.nix_module_names()
+    assert devbox.find_mod_script(name, None) is None
+    assert name not in devbox.WORKSPACE_BASE_MODS
+    assert name not in devbox.box_playbook()
+    assert name not in devbox.provision.RETIRED_MODS
+    assert f"./modules/{name}.nix" in (devbox.NIX_DIR / "flake.nix").read_text()
+
+    marker_dir = tmp_path / "ws"
+    marker_dir.mkdir()
+    workspace = _workspace(marker_dir=marker_dir, mods=[name])
+    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
+                                       workspace.marker.mods_dir)
+    assert name in playbook.modules
+    payload = _payload_map(workspace, _global_config(pubkey))
+    assert f"mods/{name}.sh" not in payload
+    assert f"{name}.enable = true;" in payload["nix/workspace.nix"].content
+    # The other one ships too, and off: a missing attribute is an evaluation
+    # error in nix, not a false.
+    other = ("claude-linear-mcp" if name == "claude-github-mcp"
+             else "claude-github-mcp")
+    assert f"nix/modules/{other}.nix" in payload
+    assert f"{other}.enable = false;" in payload["nix/workspace.nix"].content
+
+    module = _module_code(name)
+    assert url in module
+    assert f"mcp add --scope user --transport http {server}" in module
+    # Registering an MCP server is `claude mcp add` writing ~/.claude.json, a
+    # file Claude Code rewrites constantly - so it is an activation step, not a
+    # home.file the store would own.
+    assert "home.file" not in module
+    assert 'lib.hm.dag.entryAfter [ "writeBoundary" ]' in module
+    assert f"lib.mkIf config.devbox.mods.{name}.enable" in module
+
+
+@pytest.mark.parametrize("name,var", [
+    ("claude-github-mcp", "GITHUB_TOKEN"),
+    ("claude-linear-mcp", "LINEAR_API_KEY"),
+])
+def test_the_mcp_header_reaches_the_box_unexpanded(isolated_mods, pubkey,
+                                                   tmp_path, name, var):
+    # The header is a LITERAL `${VAR}` that Claude Code resolves from the
+    # environment at call time. `''${` is nix's escape for it inside an indented
+    # string; a bare `${` would open an antiquotation, and the file would fail
+    # to evaluate rather than ship the two words. The shipped payload file is
+    # the module verbatim, so the escape has to be in the source.
+    module = _module_code(name)
+    assert f"Authorization: Bearer ''${{{var}}}" in module
+    assert re.search(r"(?<!'')\$\{" + var + r"\}", module) is None
+
+    marker_dir = tmp_path / "ws"
+    marker_dir.mkdir()
+    workspace = _workspace(marker_dir=marker_dir, mods=[name],
+                           env={var: devbox.EnvVar("s3cret")})
+    payload = _payload_map(workspace, _global_config(pubkey))
+    assert payload[f"nix/modules/{name}.nix"].content == _module_source(name)
+    assert f"''${{{var}}}" in payload[f"nix/modules/{name}.nix"].content
+    # /nix/store is world-readable and shared by every attachment, so the VALUE
+    # is nowhere in the flake - only the name of the variable holding it.
+    for pf in payload.values():
+        if pf.path.startswith("nix/"):
+            assert "s3cret" not in pf.content
 
 
 # ---- resolve_env (global + workspace [env], workspace overrides per-key) --------
