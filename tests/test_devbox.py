@@ -1476,6 +1476,34 @@ def test_uv_and_cargo_binstall_are_packages_in_the_generation(isolated_mods,
         (devbox.BUILTIN_MODS_DIR / "cargo-binstall.nix").read_text()
 
 
+def test_codex_is_an_opt_in_module_and_ships_switched_off(isolated_mods,
+                                                          tmp_path):
+    # The OpenAI Codex CLI is a package module, and a workspace's own to ask
+    # for: Claude Code is the base playbook's agent CLI, so `codex` is named in
+    # `mods` or it is not in the generation at all. Every shipped module still
+    # gets a flag either way - a missing attribute is an evaluation error in
+    # nix, not a false.
+    assert "codex" in devbox.nix_module_names()
+    assert devbox.find_mod_script("codex", None) is None
+    assert "codex" not in devbox.WORKSPACE_BASE_MODS
+    marker_dir = tmp_path / "ws"
+    marker_dir.mkdir()
+    plain = _workspace(marker_dir=marker_dir)
+    asked = _workspace(marker_dir=marker_dir, mods=["codex"])
+    assert "codex" not in devbox.resolve_playbook(
+        devbox.workspace_playbook(plain), plain.marker.mods_dir).modules
+    assert "codex" in devbox.resolve_playbook(
+        devbox.workspace_playbook(asked), asked.marker.mods_dir).modules
+    assert "codex.enable = false;" in devbox.render_workspace_nix(
+        _nix_context(), {"codex": False})
+    # ~/.codex holds codex's own auth.json, history and sessions, and its
+    # config.toml is the account's file - a module that claimed any of them
+    # would make it a read-only store symlink.
+    module = (devbox.BUILTIN_MODS_DIR / "codex.nix").read_text()
+    assert "home.packages = [ pkgs.codex ];" in module
+    assert "home.file" not in module
+
+
 def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():
     # The CLI that runs the switch and the flake it switches to are one
     # version, so a bump cannot half-land.

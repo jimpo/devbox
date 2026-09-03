@@ -74,7 +74,11 @@ any built-in's `packages`, its `home.activation` entry merging
 with its own flag, neither retired — whose `Authorization` header carries the
 literal `''${GITHUB_TOKEN}`/`''${LINEAR_API_KEY}`: nix's escape for an
 antiquotation, asserted present in the module and unexpanded in the payload file
-the box receives, with the `[env]` value itself nowhere in `nix/`), the
+the box receives, with the `[env]` value itself nowhere in `nix/`), **`codex`**
+(the OpenAI Codex CLI as an opt-in package module: shipped and discovered like
+any other, absent from `WORKSPACE_BASE_MODS`, resolving to the generation only
+for a workspace that names it, flagged `false` for one that does not, and
+claiming no `home.file` — `~/.codex` is codex's own), the
 **converted `github-auth`** (`modules/github-auth.nix`, agent-scoped now
 rather than a root box mod: it claims `~/.config/git/config` — never
 `/etc/gitconfig` — with a `home.file`, `dotfiles`/configenv's setup.sh never
@@ -270,6 +274,13 @@ tokens in `[env]`: `claude mcp list` shows both connected, and
 `jq '.mcpServers' ~/.claude.json` holds the literal `${GITHUB_TOKEN}` /
 `${LINEAR_API_KEY}` — the header text, never the value, which is the whole point
 of the nix escape.
+
+For `codex`, add it to a workspace's `mods`: as that agent, `command -v codex`
+answers `~/.nix-profile/bin/codex`, `codex --version` matches the package
+version at the nixpkgs pin, and `codex exec 'say hi'` runs — with an
+`OPENAI_API_KEY` in `[env]` it needs no login, and `ls ~/.codex` shows only
+what codex itself wrote (no store symlink), which is what says a second
+`devbox sync --mods=home-manager` cannot disturb its config or its auth.
 
 A workspace with `mods = ["cloudflared"]` is the module to exercise by hand,
 since only a box runs the real binary: with a `CLOUDFLARE_TOKEN` in `[env]`,

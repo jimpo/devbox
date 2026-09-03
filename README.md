@@ -796,6 +796,16 @@ the `Authorization` header they pass is the literal, unexpanded
 environment at call time — the value comes from the 0600
 `~/.config/devbox/env`, never from the world-readable store.
 
+**`codex`, the OpenAI Codex CLI, is the plain shape of the same idea** and an
+opt-in: `mods = ["codex"]` puts `pkgs.codex` in the generation, and that is the
+whole module. Nothing declares `~/.codex` — codex writes its own `auth.json`,
+history and sessions there, and `config.toml` is the account's file, so
+approvals and its bubblewrap sandbox stay codex's defaults (edit that file on
+the box, or pass `--dangerously-bypass-approvals-and-sandbox`). An
+`OPENAI_API_KEY` in `[env]` reaches it the way every credential does, through
+the 0600 `~/.config/devbox/env` that `~/.zshenv` sources; `codex login` is the
+other route, and writes into the account's home.
+
 **Resolution** — each mod name resolves to a `<name>.sh` script by precedence
 **workspace > global > built-in**, so a workspace can shadow a built-in by name:
 
