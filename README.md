@@ -653,9 +653,8 @@ thing (jj, dotfiles, Claude Code, a workspace's rust toolchain, …). There are 
 playbooks**, because a box and an attachment need different things:
 
 ```
-box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim-plug →
-                                    nix
-                                    # runs once per box, as root / the admin
+box playbook (fixed, built-in):     dotfiles-packages → nix
+                                    # runs once per box, as root
 
 workspace playbook (built-in base):   home-manager → github-auth → jj →
                                     dotfiles → vim → neovim → claude-code →
@@ -665,18 +664,17 @@ workspace mods (config.toml):         + rust + wasm-tools + …
 ```
 
 Ordering encodes the constraints (jj before repo-bootstrap, which clones with
-it; `dotfiles-packages`, the apt half, before `dotfiles`, the per-user half).
-The 95% case is "just add rust": `mods = ["rust"]`.
+it; `dotfiles-packages`, the apt half, before `dotfiles`, the per-user half —
+across the playbook boundary, since a box mod always ran earlier). The 95%
+case is "just add rust": `mods = ["rust"]`.
 
 **A box takes no config, so its playbook is fixed** — `dotfiles-packages` (apt,
-as root) and `nix` (the multi-user
-nix store and its daemon, which every attached workspace shares) are the
-genuinely box-level mods in the base; everything else, `github-auth` included,
-installs into somebody's
-home. A workspace that needs more *system* state ships a
-`runas = ["root"]` mod of its own, which runs on the shared box when it attaches;
-devbox prints a warning naming it, since that writes state every other workspace
-sees.
+as root) and `nix` (the multi-user nix store and its daemon, which every
+attached workspace shares) are the only genuinely box-level mods; everything
+else, `github-auth` included, installs into somebody's home. A workspace that
+needs more *system* state ships a `runas = ["root"]` mod of its own, which
+runs on the shared box when it attaches; devbox prints a warning naming it,
+since that writes state every other workspace sees.
 
 **`home-manager` is the declarative half of an attachment's home.** It runs
 first in the workspace playbook and switches the agent account to the
@@ -685,8 +683,10 @@ home-manager flake that rides in the payload beside `mods/` (`nix/flake.nix`,
 renders per attachment). A mod is either a bash script or a module in that
 flake, never both, and a converted mod keys on its own
 `devbox.mods.<name>.enable` flag. It is **agent-only**: the box's privileged
-account keeps its apt zsh/vim, so `devbox box ssh` works whatever state a
-generation is in. Workspace-local `.nix` modules are not supported — a
+account keeps stock apt bash and unconfigured vim — no generation, no
+dotfiles either — so `devbox box ssh` works whatever state a workspace's (or
+its own) nix and per-account config might be in. Workspace-local `.nix`
+modules are not supported — a
 workspace that needs something of its own ships a bash mod, exactly as before.
 Nothing from `[env]` may appear in a nix expression: `/nix/store` is
 world-readable and shared by every attachment. A converted mod that needs a
@@ -697,17 +697,19 @@ and declares a `systemd.user.service`, gets its `CLOUDFLARE_TOKEN`. Lingering
 and across a reboot; `devbox status` lists the account's failed user units, so a
 tunnel that cannot authenticate is visible rather than silently down.
 
-**`dotfiles` is in both playbooks on purpose** — it declares
-`runas = ["admin", "agent"]`, and each scope runs only its own half. The box runs the
-admin half once (so `devbox box ssh`, the debugging shell, is usable) and each
-attachment runs the agent half in its own account, without redoing the admin's.
+**`dotfiles` is agent-only.** It declares `runas = ["agent"]` and lives only in
+the workspace playbook — the privileged account gets none of it. `devbox box
+ssh`, the debugging shell, deliberately stays on stock apt bash and
+unconfigured vim instead: the whole point of that account is to work
+regardless of what state a workspace's (or its own) nix generation or
+per-account config might be in, so it carries neither.
 
-**vim is split by name instead**, because its two halves are different
-implementations. An agent's is `nix/modules/vim.nix`, which takes the plugin set
-(base16-vim, vim-go, rust.vim) from the store; the privileged account has no
-generation, so its is `vim-plug`, a box mod that fetches vim-plug and runs
-`:PlugInstall` against the ~/.vimrc `dotfiles` wrote. They cannot share the name
-`vim`: a script of that name would shadow the module everywhere.
+**vim is split by name instead**, because its two halves are different things
+— one implementation and one absence. An agent's is `nix/modules/vim.nix`,
+which takes the plugin set (base16-vim, vim-go, rust.vim) from the store; the
+privileged account has no generation and no dotfiles, so it keeps whatever
+apt's `vim` ships with, unconfigured. They still cannot share the name `vim`:
+a script of that name would shadow the module for every agent.
 
 **`github-auth` is a home-manager module too**, `nix/modules/github-auth.nix`:
 it points git's credential helper at `gh auth git-credential` from
@@ -874,7 +876,7 @@ needs it. The box playbook is indexed first, so a workspace mod may depend on a 
 mod — the machine exists before any attachment does. It is **not** a resolver —
 it never reorders or auto-inserts; it just validates order (so a future reorder
 can't silently break things). Built-in examples: `repo-bootstrap`
-`requires = ["jj", "github-auth"]`, `vim-plug` `requires = ["dotfiles"]`.
+`requires = ["jj", "github-auth"]`, `dotfiles` `requires = ["dotfiles-packages"]`.
 
 ### Example: a rust workspace
 
@@ -1007,10 +1009,11 @@ holds no secret — it names a helper, and the helper answers with whatever
 Agent-scoped rather than box-wide: `dotfiles`/configenv's `setup.sh` overwrites
 each account's own `~/.gitconfig`, which would erase a helper written there,
 but it never touches the XDG path, so the module needs no ordering constraint
-against it and no privilege at all. The privileged account has no generation,
-so it gets none of this — a manual `git clone` of a private repo from `devbox
-box ssh` needs a token supplied by hand. With no token the helper prints
-nothing and exits 1, git falls through, and public clones are unaffected.
+against it and no privilege at all. The privileged account has neither a
+generation nor `dotfiles`, so it gets none of this — a manual `git clone` of a
+private repo from `devbox box ssh` needs a token supplied by hand. With no
+token the helper prints nothing and exits 1, git falls through, and public
+clones are unaffected.
 
 The module is part of the workspace playbook, so it lands at `devbox create`
 and `devbox sync --mods`, same as any other agent-scoped mod.

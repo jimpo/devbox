@@ -110,27 +110,26 @@ NIX_WORKSPACE_FILE = "workspace.nix"
 GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 
 # The box playbook: what a machine needs once, regardless of who lives on it -
-# the apt half of the dotfiles setup, plus a usable shell and editor for the
-# privileged account, which is the box's debugging entry point
-# (`devbox ssh --admin`). That editor is the apt `vim` the init script
-# installs: `nvim` comes from an attachment's home-manager generation, so it
-# lives in that agent's profile and nowhere else. Fixed and
-# built-in: there is no box config file, so a box grows beyond this only when an
-# attached workspace contributes a `runas = ["root"]` mod.
-# `nix` is box-scoped for the same reason: /nix and the nix-daemon are one
-# machine-wide store that every attached workspace shares, and only the
-# privileged account is a trusted user of it.
-# `vim-plug` is the box's half of vim: the privileged account has no
-# generation, so its plugins are fetched imperatively, from the ~/.vimrc
-# `dotfiles` writes. An agent's vim is the flake's module of that name, which is
-# why the two halves are named apart - one name resolves to one implementation.
-BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim-plug", "nix")
+# the apt half of the dotfiles setup (`dotfiles-packages`, required by the
+# agent's own `dotfiles` mod) and the nix daemon. The privileged account gets
+# no configuration beyond that and no generation of its own: it is the box's
+# debugging entry point (`devbox ssh --admin`) and deliberately stays
+# independent of anything that could itself need fixing - stock apt bash,
+# unconfigured apt vim, no oh-my-zsh, no vim-plug, no git credential helper.
+# `nvim` and every agent's configured vim/git come from that attachment's
+# home-manager generation instead, so they live in that agent's profile and
+# nowhere else.
+# `nix` is box-scoped because /nix and the nix-daemon are one machine-wide
+# store that every attached workspace shares, and only the privileged account
+# is a trusted user of it.
+# Fixed and built-in: there is no box config file, so a box grows beyond this
+# only when an attached workspace contributes a `runas = ["root"]` mod.
+BOX_BASE_MODS = ("dotfiles-packages", "nix")
 
 # The workspace playbook: what one attachment needs inside its own account.
 # Ordering constraints are encoded here: jj must precede repo-bootstrap (which
-# clones with it). `dotfiles` appears in BOTH playbooks on purpose - it declares
-# `runas = ["admin", "agent"]`, and each scope runs only its own half. A
-# workspace's `mods` are appended after this.
+# clones with it). `dotfiles` is agent-only now - the privileged account gets
+# none of it (see BOX_BASE_MODS). A workspace's `mods` are appended after this.
 # `home-manager` runs first: it is the declarative half of the account, and a
 # bash mod after it can use what the generation put on the PATH. `vim` and
 # `github-auth` are names that half provides: there is no mods/vim.sh or

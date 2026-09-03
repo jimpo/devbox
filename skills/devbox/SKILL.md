@@ -175,10 +175,10 @@ src = ".claude/skills"
 
 ### Mods (provisioning)
 
-There are two built-in playbooks: the **box** one (`dotfiles-packages → dotfiles
-→ vim`), which runs once per box as root/the privileged user, and the **workspace**
-one (`jj → github-auth → dotfiles → vim → neovim → claude-code →
-cargo-binstall → repo-bootstrap`), which runs once per attachment in that
+There are two built-in playbooks: the **box** one (`dotfiles-packages → nix`),
+which runs once per box as root, and the **workspace** one (`home-manager →
+github-auth → jj → dotfiles → vim → neovim → claude-code → cargo-binstall →
+repo-bootstrap`), which runs once per attachment in that
 workspace's account. Add a
 workspace mod only for extra tooling (`Cargo.toml` → a rust mod, `package.json` →
 a node mod):
@@ -218,9 +218,10 @@ the rare step that genuinely needs privilege. `runas` defaults to `["agent"]` an
 also accepts `admin`; a mod naming more than one target runs once per target.
 
 `runas` also decides **scope**: a mod that names `agent` runs only its agent
-half in a workspace playbook (and everything else in the box playbook — that is how
-`dotfiles` sets up the privileged account once per box and each account
-separately). A mod that names no agent target is pure system work and runs whole
+half in a workspace playbook (and everything else in the box playbook — useful
+for a mod that sets up the privileged account once per box while each
+workspace's account gets its own agent half, as `dotfiles` used to before it
+became agent-only). A mod that names no agent target is pure system work and runs whole
 in whichever playbook lists it — so a workspace's `runas = ["root"]` mod (docker, a
 driver) lands on the shared box when it attaches. Prefer `$HOME` installs:
 anything system-wide is shared with every other workspace on that box, and devbox

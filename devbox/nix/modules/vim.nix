@@ -21,7 +21,8 @@
 # directories to 'runtimepath' and the store copies are what load.
 #
 # The box's privileged account is not covered by any of this: it has no
-# generation, and `mods/vim-plug.sh` is its half of vim.
+# generation, no dotfiles and no vim-plug of its own any more - it keeps
+# whatever apt's `vim` ships with, unconfigured.
 { config, lib, pkgs, ... }:
 lib.mkIf config.devbox.mods.vim.enable {
   programs.vim = {

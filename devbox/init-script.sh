@@ -66,7 +66,9 @@ BASH_ENV_STUB='/etc/devbox/bash_env'
 BASH_ENV_LINE="BASH_ENV=$BASH_ENV_STUB"
 
 DEVBOX_PACKAGES=(
-  zsh              # the login shell $DEVBOX_USER is switched to below
+  zsh              # the agent account's login shell (the driver sets it when
+                   # creating one); the privileged account stays on bash -
+                   # see step 5 below
   vim
   python3          # used by the `jimpo` oh-my-zsh theme's prompt_pwd
   curl
@@ -197,10 +199,10 @@ retry apt-get -o DPkg::Lock::Timeout=600 update
 retry apt-get -o DPkg::Lock::Timeout=600 install -y "${DEVBOX_PACKAGES[@]}"
 
 # ---- 5. login shell ---------------------------------------------------------
-# Now that zsh exists (step 1 deliberately created the account with bash).
-if [ -x /usr/bin/zsh ]; then
-  log "setting $DEVBOX_USER's login shell to /usr/bin/zsh"
-  usermod --shell /usr/bin/zsh "$DEVBOX_USER"
-fi
+# The privileged account stays on the /bin/bash step 1 created it with,
+# deliberately: it is the box's debugging entry point (`devbox box ssh`), and
+# has no per-account setup (no dotfiles, no oh-my-zsh) to switch a shell for.
+# `zsh` is still installed - it is the login shell the driver sets for every
+# agent account it creates.
 
 log "first-boot init complete"

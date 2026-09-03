@@ -697,7 +697,9 @@ def test_render_init_script_creates_the_user_with_key_and_sudo(pubkey):
     assert '"$DEVBOX_HOME/.ssh/authorized_keys"' in rendered
     assert "NOPASSWD:ALL" in rendered
     assert "passwd --lock" in rendered
-    assert "usermod --shell /usr/bin/zsh" in rendered
+    # Stays on the /bin/bash it's created with - see the box-account tests in
+    # the provisioning section for why it's never switched to zsh.
+    assert "usermod --shell" not in rendered
 
 
 def test_render_init_script_creates_the_user_before_installing_packages(pubkey):
@@ -1300,12 +1302,13 @@ def test_the_agents_zshenv_is_the_generations_and_holds_no_creds():
     assert "programs.zsh" not in code
 
 
-def test_dotfiles_writes_zshenv_only_in_the_account_home_manager_does_not_own():
-    # The mod runs in both accounts. The privileged one keeps its apt zsh and
-    # gets the block; the agent's ~/.zshenv is a symlink into the store, and
-    # appending to it would break the account's next activation.
+def test_dotfiles_never_touches_zshenv():
+    # Agent-only now, and an agent's ~/.zshenv is a symlink into the store
+    # (nix/zshenv.nix); appending to it would break the account's next
+    # activation, so the mod must never write it.
     mod = (devbox.BUILTIN_MODS_DIR / "dotfiles.sh").read_text()
-    assert '[ "$(id -un)" = "${DEVBOX_ADMIN_USER:-}" ] &&' in mod
+    code = [line for line in mod.splitlines() if not line.strip().startswith("#")]
+    assert not any(".zshenv" in line for line in code)
 
 
 # ---- cloudflared: a converted opt-in mod that ships a systemd user service ---
@@ -1867,45 +1870,38 @@ def test_shipped_mods_never_call_sudo(isolated_mods):
             assert "sudo " not in stripped, f"{spec.name}: {stripped}"
 
 
-def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_workspaces(isolated_mods):
-    # The one mod that lives in both playbooks, and the reason scoping exists:
-    # the privileged user gets the dotfiles once per box (so `devbox box ssh`,
-    # the debugging shell, is usable), and each attachment gets them in its own
-    # account - without redoing the admin's on every attach.
+def test_dotfiles_is_agent_only_and_the_box_playbook_stays_apt_only(isolated_mods):
+    # The privileged account gets no configenv dotfiles any more - it stays on
+    # stock apt bash/vim, independent of any per-account setup that could
+    # itself need fixing. dotfiles is workspace-scoped only.
     box = devbox.resolve_playbook(devbox.box_playbook(), None,
                                   devbox.SCOPE_BOX).specs
     workspace = devbox.resolve_playbook(
         devbox.workspace_playbook(_workspace()), None).specs
     assert devbox.render_manifest(box, devbox.SCOPE_BOX).splitlines() == [
         "dotfiles-packages\troot\t",   # the apt half: once, as root, per box
-        "dotfiles\tadmin\t",
-        "vim-plug\tadmin\t",
         "nix\troot\txz-utils",
     ]
+    assert "dotfiles" not in devbox.BOX_BASE_MODS
     by_name = {s.name: s for s in workspace}
+    assert by_name["dotfiles"].runas == ["agent"]
     assert devbox.scoped_runas(by_name["dotfiles"].runas, devbox.SCOPE_WORKSPACE) == ["agent"]
     assert "dotfiles-packages" in by_name["dotfiles"].requires
 
 
-def test_vim_is_a_module_for_the_agent_and_a_script_for_the_admin(isolated_mods):
-    # The one mod whose two halves are different implementations. An agent's vim
-    # is the flake's module, so no `vim.sh` may exist anywhere - a script of that
-    # name wins at every level of the precedence, and the generation would ship
-    # the module switched off. The privileged account has no generation, so its
-    # half stays a bash mod, under a name of its own and after `dotfiles`, which
-    # writes the ~/.vimrc it installs the plugins for.
+def test_vim_is_a_module_for_the_agent_only(isolated_mods):
+    # An agent's vim is the flake's module, so no `vim.sh` may exist anywhere -
+    # a script of that name wins at every level of the precedence, and the
+    # generation would ship the module switched off. The privileged account
+    # has no generation and no vim-plug either: it keeps stock, unconfigured
+    # apt vim, so there is no box-side half of this mod at all any more.
     assert "vim" in devbox.WORKSPACE_BASE_MODS
     assert "vim" in devbox.nix_module_names()
     assert devbox.find_mod_script("vim", None) is None
     assert "vim" in devbox.resolve_playbook(
         devbox.workspace_playbook(_workspace()), None).modules
-    box = devbox.box_playbook()
-    assert "vim-plug" in box
-    assert "vim-plug" not in devbox.WORKSPACE_BASE_MODS
-    assert box.index("dotfiles") < box.index("vim-plug")
-    spec = {s.name: s for s in devbox.load_mod_specs(box, None)}["vim-plug"]
-    assert spec.runas == ["admin"]
-    assert spec.requires == ["dotfiles"]
+    assert "vim-plug" not in devbox.box_playbook()
+    assert not (devbox.BUILTIN_MODS_DIR / "vim-plug.sh").exists()
 
 
 def test_the_vim_module_declares_the_plugin_set_and_reads_its_own_flag():

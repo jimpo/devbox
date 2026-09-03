@@ -30,13 +30,14 @@ modular-provisioning logic (mod resolution
 precedence — now keyed on the marker's own mods directory — the `# /// mod`
 metadata block — `requires`/`runas`/`packages`, plus
 its rejection of unknown keys, bad values, duplicate and mislabeled fences — the
-two playbooks and `scoped_runas`'s narrowing of each mod's targets (including
-`nix`'s box
+two playbooks and `scoped_runas`'s narrowing of each mod's targets (`dotfiles`
+now agent-only, so the box playbook is apt-only — just `dotfiles-packages` and
+`nix` — and `nix`'s box
 scope + the `trusted-users` line that names the privileged account and never an
 agent, and `home-manager`'s agent scope + its `requires = ["nix"]` across that
 same boundary, and the vim split — `vim` resolving to the flake's module with no
-`vim.sh` anywhere, and the admin's `vim-plug` script box-scoped after
-`dotfiles`), manifest
+`vim.sh` anywhere, and no admin-side implementation left at all: the
+privileged account keeps stock, unconfigured apt vim), manifest
 rendering, `render_repos` + the `repos` payload file, env-file quoting,
 the home-manager flake (`render_workspace_nix`: the rendered attribute set, nix
 string escaping and bare-vs-quoted attribute names, a `<name>.enable` flag per
@@ -72,7 +73,13 @@ rather than a root box mod: it claims `~/.config/git/config` — never
 `/etc/gitconfig` — with a `home.file`, `dotfiles`/configenv's setup.sh never
 touching that path being what removes the ordering constraint the box-mod
 version needed, and `repo-bootstrap` still requiring it, now satisfied as a
-module rather than across the box/workspace boundary),
+module rather than across the box/workspace boundary), the **admin
+de-customization** (the box playbook shrunk to `dotfiles-packages` + `nix`:
+`dotfiles` and `vim-plug` dropped from it, `dotfiles.sh` narrowed to
+`runas = ["agent"]` with its admin-only `~/.zshenv` append deleted, and the
+privileged account's login shell left on `init-script.sh`'s `/bin/bash`
+instead of being switched to zsh — `vim-plug.sh` and `github-auth.sh`
+deleted outright),
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
 (`_refresh_ssh_aliases`: one stanza per file, the collapse rule, per-box
@@ -176,8 +183,9 @@ Code's Bash tool uses — find nix and list `~/.nix-profile/bin` ahead of
 reconverge ("No change so reusing latest profile generation"); that both
 workspaces have their own generation (`home-manager generations` as each agent,
 and `ls -l ~/.nix-profile` pointing into that account's own profile); and that
-the box's privileged account has none — it is still on apt zsh/vim, which is
-what keeps `devbox box ssh` working whatever a generation does. `nix flake
+the box's privileged account has none — it is still on stock apt bash and
+unconfigured vim, which is what keeps `devbox box ssh` working whatever a
+generation does. `nix flake
 check "path:<payload>/nix"`, and
 `nix build "path:<payload>/nix#homeConfigurations.agent-x86_64-linux.activationPackage" --no-link`
 for the configuration itself, are the evaluation checks pytest cannot run —
@@ -193,11 +201,12 @@ because home-manager owns `~/.config/jj/config.toml`; and the same setting in
 route on the box.
 
 For the vim split, on that same box: `vim` opens with no error in BOTH accounts
-(the admin's plugins from `vim-plug` under `~/.vim/plugged`, the agent's from
-the generation), `:scriptnames` as the agent lists the store's vimrc and the
-account's own `~/.vimrc`, and `:colorscheme` there answers base16-chalk — that
-last one is what proves the store's plugins loaded before the account's vimrc
-ran, since configenv's file sets it while being sourced.
+- the agent's from the generation, `:scriptnames` there listing the store's
+vimrc and the account's own `~/.vimrc`, and `:colorscheme` answering
+base16-chalk, which is what proves the store's plugins loaded before the
+account's vimrc ran, since configenv's file sets it while being sourced; the
+privileged account's is stock apt vim with no `~/.vimrc`, no plugins and no
+colorscheme to check, which is the point.
 
 For `github-auth`, on that same box: as the agent, `git config
 credential.https://github.com.helper` (or `cat ~/.config/git/config`) names
@@ -334,8 +343,9 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   delete `mods/<name>.sh`, and leave the playbook tuples alone (the recipe is
   spelled out in `flake.nix`'s conventions block, which is the contract the
   conversion tickets read). Home-manager is **agent-only**: a box run ships none of this,
-  and the privileged account keeps its apt zsh/vim so `devbox box ssh` stays
-  the machine's debugging entry point. Workspace-local `.nix` modules are
+  and the privileged account keeps stock apt bash and unconfigured vim - no
+  dotfiles either - so `devbox box ssh` stays the machine's debugging entry
+  point regardless of any per-account state. Workspace-local `.nix` modules are
   **not** supported — workspace > global > built-in shadowing does not
   translate to the module system, and the escape hatch stays a bash mod, which
   works exactly as it always has. **No cred ever enters a nix expression**:
