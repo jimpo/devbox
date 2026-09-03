@@ -2,9 +2,18 @@
 #
 # One flake per attachment. It ships in the provisioning payload next to
 # `mods/`, and `mods/home-manager.sh` switches the agent account to it on the
-# box. `workspace.nix` beside this file is rendered per attachment by devbox
-# (provision.render_workspace_nix); everything else is static and shipped
-# verbatim.
+# box.
+#
+# WHAT SITS BESIDE THIS FILE DEPENDS ON WHERE YOU ARE LOOKING. In devbox's own
+# repo this directory is a SKELETON - flake.nix, options.nix, zshenv.nix - and
+# it cannot be evaluated: options.nix imports a `workspace.nix` that does not
+# exist yet, and there is no `modules/` at all. Both appear only in an
+# assembled payload, where devbox renders `workspace.nix` per attachment
+# (provision.render_workspace_nix) and writes one `modules/<name>.nix` per
+# module it resolved, out of the same mods directories the bash mods come from
+# (provision.nix_payload_files). `devbox nix check` assembles one on the host
+# and runs nix against it; that is the only way to evaluate a module without a
+# box.
 #
 # HOME-MANAGER IS AGENT-ONLY. The box's privileged account keeps its apt zsh
 # and vim, because that account is the machine's debugging entry point
@@ -29,32 +38,36 @@
 #
 # ---- MODULE CONVENTIONS (read this before adding a module) ------------------
 #
-# CONVERTING A MOD, end to end. Three steps, and the third is "nothing":
+# CONVERTING A MOD, end to end. Three steps, and the third is "nothing". All
+# of it happens in ONE directory - `devbox/mods/` for a built-in, a workspace's
+# own mods directory for its own, `~/.config/devbox/mods/` for a global one -
+# because that is where both halves of a mod live:
 #
-#   1. Write `modules/<mod-name>.nix`, named exactly as the bash mod it
-#      replaces (see the shape below).
-#   2. DELETE `mods/<mod-name>.sh`, in the same commit. A script wins over a
-#      module of the same name, so while it exists the bash mod is what runs
-#      and the new module is inert.
+#   1. Write `<mod-name>.nix` beside the script, named exactly as it (see the
+#      shape below).
+#   2. DELETE `<mod-name>.sh`, in the same commit. A script wins over a module
+#      of the same name, so while it exists the bash mod is what runs and the
+#      new module is inert.
 #   3. Leave `WORKSPACE_BASE_MODS` (provision.py) ALONE. The name stays in the
 #      playbook: that tuple lists what an attachment gets, not which half
 #      provides it, and devbox resolves each name by file presence -
-#      `<name>.sh` in any mods directory, else `<name>.nix` in any
-#      nix-modules directory. Removing the name would turn the module off.
-#      The same goes for a mod a workspace names in its own `mods = [...]`:
-#      that config keeps working untouched.
+#      `<name>.sh` in a mods directory, else `<name>.nix` in the same
+#      directories. Removing the name would turn the module off. The same goes
+#      for a mod a workspace names in its own `mods = [...]`: that config keeps
+#      working untouched.
+#
+# Then run `devbox nix check` before you commit it. Nothing else on a host
+# evaluates a module.
 #
 # THIS FILE NEVER LISTS MODULES BY NAME. `modules` below is every `.nix` file
-# `readDir` finds directly under `./modules` - devbox writes one payload
-# `nix/modules/<name>.nix` per name it resolves (built-in, global, or a
-# workspace's own - see provision.find_nix_module), whatever the source, and
-# this flake just imports whatever landed there. That is what makes a
-# workspace's or a user's global `<mods dir>/<name>.nix` work with zero
-# changes here: it never has to be devbox's own repo, and it never has to be
-# in a directory shaped like this one. `provision.py`'s
-# `NIX_MODULES_DIR` is the payload's `modules/` before it travels, so a
-# built-in conversion is still "write the file, delete the script" - there is
-# just no line to add to a list any more.
+# `readDir` finds directly under `./modules`, which exists only in an assembled
+# payload - devbox writes one file there per name it resolves (built-in,
+# global, or a workspace's own - see provision.find_nix_module), whatever
+# directory it came from, and this flake imports whatever landed. That is what
+# lets a mod's two halves live side by side in one directory at every level,
+# and what makes a workspace's or a user's global `<mods dir>/<name>.nix` work
+# with zero changes here: a module never has to be in devbox's own repo, and
+# never has to sit in a directory shaped like a flake.
 #
 # Two consequences worth knowing. A mod that `requires` a converted one still
 # validates - a module is not a step in the run, so it satisfies a dependency
@@ -101,17 +114,13 @@
 #
 # WORKSPACE-LOCAL AND GLOBAL .nix MODULES ARE SUPPORTED, same
 # workspace > global > built-in precedence as a bash mod, and out of the same
-# directory: a workspace's own `<mods dir>/<name>.nix` (beside its `<name>.sh`
-# scripts, either marker spelling - see config.Marker) or a user's global
-# `~/.config/devbox/mods/<name>.nix` resolves exactly like devbox's own
-# built-in one, or shadows it if both exist. Only the built-ins live in a
-# `modules/` of their own, and only because it is THIS directory - the flake
-# devbox ships, which `nix flake check` can evaluate from the source tree. The
-# outer two levels have no flake of their own to sit in and so gain nothing
-# from a separate directory. A module needing sibling files of its own (its
-# own lib, say) isn't supported yet - every shipped module today is one
-# self-contained file, and only `readDir`-discovered `.nix` files travel in
-# the payload.
+# three directories (provision.mods_dirs): a workspace's own
+# `<mods dir>/<name>.nix` (either marker spelling - see config.Marker), a
+# user's global `~/.config/devbox/mods/<name>.nix`, and devbox's own
+# `devbox/mods/<name>.nix`. Each resolves like the others and shadows the
+# levels below it. A module needing sibling files of its own (its own lib,
+# say) isn't supported yet - every shipped module today is one self-contained
+# file, and only `readDir`-discovered `.nix` files travel in the payload.
 {
   description = "devbox agent home environment";
 

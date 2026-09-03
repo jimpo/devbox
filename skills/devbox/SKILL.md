@@ -231,10 +231,12 @@ Resolution is **workspace > global (`~/.config/devbox/mods`) > built-in** by nam
 A nix module (a converted mod, or one that never was a script - see below)
 resolves by the same precedence out of the **same** directories, as a
 `<name>.nix` beside the `<name>.sh` scripts: `<workspace mods dir>/`, then
-`~/.config/devbox/mods/`, then devbox's own built-in `devbox/nix/modules/` -
-the one level that keeps modules apart, because that directory is inside the
-flake devbox ships. A `<name>.sh` anywhere still wins over any module of that
-name.
+`~/.config/devbox/mods/`, then devbox's own built-in `devbox/mods/`. One
+directory per level, holding both halves; a `<name>.sh` anywhere still wins
+over any module of that name. `devbox nix check` evaluates the modules on the
+host - it assembles a payload flake, since `devbox/nix/` is a skeleton that
+cannot be evaluated as it sits - and is the only way to check one without a
+box; run it on any `.nix` change.
 Every mod must be idempotent (it runs on `create` *and* every `devbox sync
 --mods`): overwrite unconditionally or guard on "already done". A mod is the
 *only* workspace-level extension point: devbox's first-boot layer is one fixed

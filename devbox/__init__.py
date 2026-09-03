@@ -24,16 +24,18 @@ from .providers import awsauth, base, ec2, libvirt, lightsail  # noqa: F401
 from .cli import main  # noqa: F401
 from .initscript import (INIT_SCRIPT_PATH, render_init_script,  # noqa: F401
                          substitute_tokens)
-from .provision import (BOX_BASE_MODS, BUILTIN_MODS_DIR, DEFAULT_RUNAS,  # noqa: F401
+from .provision import (BOX_BASE_MODS, BUILTIN_MODS_DIR, CHECK_CONTEXT,  # noqa: F401
+                        DEFAULT_RUNAS,
                         DRIVER_PATH, GLOBAL_MODS_DIR, MOD_METADATA_KEYS,
-                        MOD_METADATA_TYPE, NIX_DIR, NIX_MODULES_DIR,
+                        MOD_METADATA_TYPE, NIX_DIR,
                         NIX_PAYLOAD_DIR, NIX_WORKSPACE_FILE, RUNAS_TARGETS,
                         SCOPE_BOX, SCOPE_WORKSPACE, WORKSPACE_BASE_MODS,
                         ModSpec, Playbook, PayloadFile, box_playbook,
                         build_box_payload, build_payload, build_tarball,
                         env_for_owner, find_mod_script, find_nix_module,
                         load_mod_specs,
-                        nix_attr_name, nix_module_names, nix_payload_files,
+                        mods_dirs, nix_attr_name, nix_check_files,
+                        nix_module_names, nix_payload_files,
                         nix_string, parse_mod_metadata, provision_log,
                         render_env_file, render_manifest, render_repos,
                         render_workspace_nix, resolve_env, resolve_jj_identity,
@@ -50,7 +52,8 @@ from .config import (ANCHOR_HOME, ANCHOR_REPO, ANCHOR_WORKSPACE,  # noqa: F401
                      Ec2BoxConfig, Ec2Config, EnvVar, GlobalConfig,
                      LightsailBoxConfig, Marker, PREFIXED_PROVIDERS, PROVIDERS,
                      RepoSpec, SyncEntry, WorkspaceConfig,
-                     compose_instance_name, find_workspace, known_hosts_path,
+                     compose_instance_name, find_workspace, find_workspace_opt,
+                     known_hosts_path,
                      parse_instance_name, resolve_box_spec, resolve_instance,
                      resolve_workspace)
 from .sync import RsyncJob, plan_sync, run_envvars, run_sync  # noqa: F401

@@ -1073,7 +1073,7 @@ def test_neovim_is_the_agents_and_carries_the_tree_sitter_cli(isolated_mods,
     assert "tree-sitter-cli" not in devbox.box_playbook()
     assert "tree-sitter-cli" not in devbox.WORKSPACE_BASE_MODS
     assert devbox.find_mod_script("tree-sitter-cli", None) is None
-    module = (devbox.NIX_MODULES_DIR / "neovim.nix").read_text()
+    module = (devbox.BUILTIN_MODS_DIR / "neovim.nix").read_text()
     assert "programs.neovim" in module
     assert "pkgs.tree-sitter" in module
     # `dotfiles` owns ~/.config/nvim, so the generation must not claim
@@ -1087,25 +1087,20 @@ def test_neovim_is_the_agents_and_carries_the_tree_sitter_cli(isolated_mods,
 # ---- resolution: a playbook name is a bash script OR a nix module -----------
 @pytest.fixture
 def converted(tmp_path, monkeypatch):
-    """Convert mods the way a conversion ticket does: delete each one's
-    `<name>.sh` from the built-ins and put a `modules/<name>.nix` in its place,
-    leaving the playbook lists untouched."""
+    """Convert mods the way a conversion ticket does: in a copy of the built-in
+    mods directory, delete each one's `<name>.sh` and write a `<name>.nix`
+    beside where it was, leaving the playbook lists untouched. One directory,
+    because that is where both halves of a built-in live."""
     def convert(*names):
         mods = tmp_path / "builtin-mods"
         devbox.shutil.copytree(devbox.BUILTIN_MODS_DIR, mods)
-        modules = tmp_path / "modules"
-        # A copy of the shipped modules, so the mods already converted in this
-        # tree keep resolving to the generation while the fake conversion is
-        # laid on top of them.
-        devbox.shutil.copytree(devbox.NIX_MODULES_DIR, modules)
         for name in names:
             (mods / f"{name}.sh").unlink(missing_ok=True)
-            (modules / f"{name}.nix").write_text("{ }\n")
+            (mods / f"{name}.nix").write_text("{ }\n")
         monkeypatch.setattr(devbox.provision, "BUILTIN_MODS_DIR", mods)
-        monkeypatch.setattr(devbox.provision, "NIX_MODULES_DIR", modules)
         monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR",
                             devbox.Path("/nonexistent-global-mods"))
-        return mods, modules
+        return mods
     return convert
 
 
@@ -1196,23 +1191,20 @@ def test_the_box_playbook_never_resolves_a_module(converted, pubkey, capsys):
 
 def test_an_unresolvable_mod_names_every_place_it_looked(converted, pubkey,
                                                          tmp_path, capsys):
-    # A typo in a `mods` list still says all six places (three bash, three
-    # nix), so the fix is obvious whichever half the author meant. The
-    # workspace's and the user's global level name ONE directory each, which
-    # holds both halves; only the built-in level names two.
-    mods, modules = converted()
+    # A typo in a `mods` list names three DIRECTORIES and both suffixes, rather
+    # than six paths: one directory per level holds both halves, so there is no
+    # separate set of places the nix half could have been.
+    mods = converted()
     marker_dir = tmp_path / "ws"
     (marker_dir / ".devbox" / "mods").mkdir(parents=True)
     workspace = _workspace(marker_dir=marker_dir, mods=["rustt"])
     with pytest.raises(SystemExit):
         devbox.build_payload(workspace, _global_config(pubkey), "alice")
     err = capsys.readouterr().err
-    for expected in (f"{marker_dir / '.devbox' / 'mods'}/rustt.sh",
-                     "/nonexistent-global-mods/rustt.sh",
-                     f"{mods}/rustt.sh",
-                     f"{marker_dir / '.devbox' / 'mods'}/rustt.nix",
-                     "/nonexistent-global-mods/rustt.nix",
-                     f"{modules}/rustt.nix"):
+    assert "rustt.sh or rustt.nix" in err
+    for expected in (str(marker_dir / ".devbox" / "mods"),
+                     "/nonexistent-global-mods",
+                     str(mods)):
         assert expected in err
 
 
@@ -1307,6 +1299,143 @@ def test_a_global_nix_module_resolves_and_is_shadowed_by_a_workspace_one(
     assert payload["nix/modules/sccache.nix"].content.endswith("# workspace sccache\n")
 
 
+# ---- one directory per level: the built-ins moved into the package ----------
+def test_the_builtin_mods_live_inside_the_package(tmp_path):
+    # Both halves of a built-in mod sit in devbox/mods/, INSIDE the package -
+    # which is what puts them in a wheel (pyproject's `packages = ["devbox"]`
+    # carries them, so there is no per-file build entry to keep in step).
+    package_dir = devbox.Path(devbox.provision.__file__).parent
+    assert devbox.BUILTIN_MODS_DIR.parent == package_dir
+    suffixes = {p.suffix for p in devbox.BUILTIN_MODS_DIR.iterdir()}
+    assert suffixes == {".sh", ".nix"}
+    # ... and no name has both halves: one mod, one implementation.
+    scripts = {p.stem for p in devbox.BUILTIN_MODS_DIR.glob("*.sh")}
+    modules = {p.stem for p in devbox.BUILTIN_MODS_DIR.glob("*.nix")}
+    assert scripts & modules == set()
+
+
+def test_the_shipped_flake_is_a_skeleton_with_no_modules_directory():
+    # NIX_DIR is a template, not a working flake: `modules/` and `workspace.nix`
+    # exist only in an assembled payload, which is why `devbox nix check` has to
+    # assemble one before nix can evaluate anything.
+    assert sorted(p.name for p in devbox.NIX_DIR.iterdir()) == [
+        "flake.nix", "options.nix", "zshenv.nix"]
+    assert not (devbox.NIX_DIR / "modules").exists()
+    assert not (devbox.NIX_DIR / devbox.NIX_WORKSPACE_FILE).exists()
+    # options.nix imports the file only a payload has, which is what makes the
+    # skeleton un-evaluable on its own.
+    assert "./workspace.nix" in (devbox.NIX_DIR / "options.nix").read_text()
+
+
+# ---- devbox nix check (assemble a payload flake, evaluate it on the host) ---
+def test_nix_check_files_enable_every_discovered_module(isolated_mods):
+    payload = {pf.path: pf for pf in devbox.nix_check_files()}
+    names = devbox.nix_module_names()
+    assert names, "the built-ins ship modules"
+    workspace_nix = payload["nix/workspace.nix"].content
+    for name in names:
+        assert f"nix/modules/{name}.nix" in payload
+        assert f"{devbox.nix_attr_name(name)}.enable = true;" in workspace_nix
+    # A false flag would leave that module's body inside an unforced `mkIf`, so
+    # a check that mirrored a real playbook would evaluate almost nothing.
+    assert "= false;" not in workspace_nix
+
+
+def test_nix_check_files_include_a_workspaces_own_module(isolated_mods, tmp_path):
+    # Run inside a workspace, the check widens to that workspace's own modules -
+    # the only way to evaluate one before it reaches a box.
+    mods_dir = tmp_path / "ws" / ".devbox" / "mods"
+    _write_nix_module(mods_dir, "rust", "{ }\n# workspace rust\n")
+    payload = {pf.path: pf for pf in devbox.nix_check_files(mods_dir)}
+    assert payload["nix/modules/rust.nix"].content.endswith("# workspace rust\n")
+    assert "rust.enable = true;" in payload["nix/workspace.nix"].content
+
+
+def test_nix_check_files_carry_no_credentials(isolated_mods):
+    # The check renders a placeholder attachment, so there is no `[env]` to
+    # leak - but the flake it assembles is the real one, and /nix/store is
+    # world-readable wherever it is evaluated.
+    workspace_nix = {pf.path: pf for pf in
+                     devbox.nix_check_files()}["nix/workspace.nix"].content
+    assert devbox.CHECK_CONTEXT["DEVBOX_AGENT_USER"] in workspace_nix
+    assert "example.invalid" in workspace_nix
+
+
+def _nix_check_args(build=False, out_dir=None):
+    return argparse.Namespace(build=build, out_dir=out_dir, workspace_dir=None)
+
+
+def test_cmd_nix_check_evaluates_the_assembled_flake(monkeypatch, tmp_path,
+                                                     isolated_mods, capsys):
+    # The assemble -> invoke contract: nix is pointed at the temp directory the
+    # payload was written into, never at devbox/nix, which cannot be evaluated.
+    runs = []
+    monkeypatch.setattr(devbox.cli.shutil, "which", lambda p: f"/usr/bin/{p}")
+    monkeypatch.setattr(devbox.cli.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(devbox.cli, "find_workspace_opt", lambda start: None)
+    monkeypatch.setattr(devbox.cli.subprocess, "run",
+                        lambda cmd, **kw: runs.append(cmd) or _cp(cmd))
+    out_dir = tmp_path / "assembled"
+    devbox.cli.cmd_nix_check(_nix_check_args(out_dir=str(out_dir)), None, None)
+
+    flake = f"path:{out_dir / 'nix'}"
+    assert [c[3] for c in runs] == ["flake", "eval"]
+    assert runs[0][-1] == flake
+    assert runs[1][-1] == (
+        f"{flake}#homeConfigurations.agent-x86_64-linux.activationPackage.drvPath")
+    # The flake it evaluated is a real one: skeleton + modules + workspace.nix.
+    assert (out_dir / "nix" / "flake.nix").is_file()
+    assert (out_dir / "nix" / "workspace.nix").is_file()
+    assert (out_dir / "nix" / "modules" / "vim.nix").is_file()
+    assert "nix check passed" in capsys.readouterr().out
+
+
+def test_cmd_nix_check_builds_only_when_asked(monkeypatch, tmp_path,
+                                              isolated_mods):
+    # Evaluating forces the derivation, which is what catches a module error;
+    # realising the closure is minutes of downloads and stays opt-in.
+    runs = []
+    monkeypatch.setattr(devbox.cli.shutil, "which", lambda p: f"/usr/bin/{p}")
+    monkeypatch.setattr(devbox.cli.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(devbox.cli, "find_workspace_opt", lambda start: None)
+    monkeypatch.setattr(devbox.cli.subprocess, "run",
+                        lambda cmd, **kw: runs.append(cmd) or _cp(cmd))
+    devbox.cli.cmd_nix_check(_nix_check_args(), None, None)
+    assert "build" not in [c[3] for c in runs]
+    runs.clear()
+    devbox.cli.cmd_nix_check(_nix_check_args(build=True), None, None)
+    assert [c[3] for c in runs] == ["flake", "eval", "build"]
+
+
+def test_cmd_nix_check_fails_on_a_failing_step(monkeypatch, tmp_path,
+                                               isolated_mods, capsys):
+    monkeypatch.setattr(devbox.cli.shutil, "which", lambda p: f"/usr/bin/{p}")
+    monkeypatch.setattr(devbox.cli.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(devbox.cli, "find_workspace_opt", lambda start: None)
+    monkeypatch.setattr(devbox.cli.subprocess, "run",
+                        lambda cmd, **kw: _cp(cmd, code=1))
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_nix_check(_nix_check_args(), None, None)
+    assert "flake check failed" in capsys.readouterr().err
+
+
+def test_cmd_nix_check_says_so_when_nix_is_missing(monkeypatch, capsys):
+    # The check runs on the HOST, so a missing nix is a host problem and has to
+    # say so - the same shape as cmd_herdr's missing binary.
+    monkeypatch.setattr(devbox.cli.shutil, "which", lambda p: None)
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_nix_check(_nix_check_args(), None, None)
+    assert "nix is not on PATH" in capsys.readouterr().err
+
+
+def test_find_workspace_opt_is_none_outside_a_workspace(tmp_path):
+    # What lets `devbox nix check` run in devbox's own repo, which is not a
+    # workspace: no marker is not an error, just a narrower module set.
+    assert devbox.find_workspace_opt(tmp_path) is None
+    _write_marker(tmp_path, 'box = "dev"\n')
+    assert devbox.find_workspace_opt(tmp_path) == devbox.find_workspace(tmp_path)
+
+
 def test_uv_and_cargo_binstall_are_packages_in_the_generation(isolated_mods,
                                                               tmp_path):
     # Both are nix packages: no `<name>.sh` answers to either name, and the
@@ -1316,7 +1445,7 @@ def test_uv_and_cargo_binstall_are_packages_in_the_generation(isolated_mods,
     for name in ("cargo-binstall", "uv"):
         assert name in devbox.nix_module_names()
         assert devbox.find_mod_script(name, None) is None
-        assert (devbox.NIX_MODULES_DIR / f"{name}.nix").is_file()
+        assert (devbox.BUILTIN_MODS_DIR / f"{name}.nix").is_file()
     marker_dir = tmp_path / "ws"
     marker_dir.mkdir()
     workspace = _workspace(marker_dir=marker_dir, mods=["uv"])
@@ -1327,7 +1456,7 @@ def test_uv_and_cargo_binstall_are_packages_in_the_generation(isolated_mods,
     # cargo-binstall installs the crates it fetches into ~/.cargo/bin, and the
     # generation is what puts that directory on PATH.
     assert 'home.sessionPath = [ "$HOME/.cargo/bin" ];' in \
-        (devbox.NIX_MODULES_DIR / "cargo-binstall.nix").read_text()
+        (devbox.BUILTIN_MODS_DIR / "cargo-binstall.nix").read_text()
 
 
 def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():
@@ -1374,7 +1503,7 @@ def test_the_jj_module_reads_its_flag_and_the_workspaces_identity():
     # The two halves of the module contract: it is inert unless the generation
     # provides it, and the author identity comes from the rendered workspace
     # values rather than from anything a module could read off the box.
-    text = (devbox.NIX_MODULES_DIR / "jj.nix").read_text()
+    text = (devbox.BUILTIN_MODS_DIR / "jj.nix").read_text()
     assert "config.devbox.mods.jj.enable" in text
     assert "config.devbox.workspace.jjName" in text
     assert "config.devbox.workspace.jjEmail" in text
@@ -1414,7 +1543,7 @@ def test_dotfiles_never_touches_zshenv():
 
 # ---- cloudflared: a converted opt-in mod that ships a systemd user service ---
 def _cloudflared_module():
-    return (devbox.NIX_MODULES_DIR / "cloudflared.nix").read_text()
+    return (devbox.BUILTIN_MODS_DIR / "cloudflared.nix").read_text()
 
 
 def test_cloudflared_is_a_module_and_no_longer_a_script(isolated_mods, pubkey,
@@ -1427,7 +1556,7 @@ def test_cloudflared_is_a_module_and_no_longer_a_script(isolated_mods, pubkey,
     # The flake discovers every file under modules/ (see
     # test_the_flake_discovers_modules_by_file_presence_not_a_list); this just
     # confirms the file itself ships there.
-    assert (devbox.NIX_MODULES_DIR / "cloudflared.nix").is_file()
+    assert (devbox.BUILTIN_MODS_DIR / "cloudflared.nix").is_file()
 
     marker_dir = tmp_path / "ws"
     marker_dir.mkdir()
@@ -1513,7 +1642,7 @@ def test_the_retired_cloudflared_tunnel_mod_says_where_it_went(isolated_mods,
 
 # ---- claude-code and the MCP mods: declarative package, imperative config ----
 def _module_source(name):
-    return (devbox.NIX_MODULES_DIR / f"{name}.nix").read_text()
+    return (devbox.BUILTIN_MODS_DIR / f"{name}.nix").read_text()
 
 
 def _module_code(name):
@@ -1574,7 +1703,7 @@ def test_the_mcp_mods_stay_two_opt_in_modules(isolated_mods, pubkey, tmp_path,
     assert name not in devbox.WORKSPACE_BASE_MODS
     assert name not in devbox.box_playbook()
     assert name not in devbox.provision.RETIRED_MODS
-    assert (devbox.NIX_MODULES_DIR / f"{name}.nix").is_file()
+    assert (devbox.BUILTIN_MODS_DIR / f"{name}.nix").is_file()
 
     marker_dir = tmp_path / "ws"
     marker_dir.mkdir()
@@ -1732,13 +1861,11 @@ def test_resolve_mod_precedence_workspace_over_global_over_builtin(tmp_path):
 
 def test_find_nix_module_precedence_workspace_over_global_over_builtin(tmp_path):
     # The nix-module mirror of the bash-mod precedence test above (JIM-209):
-    # a workspace's own mods directory, then the user's global one, then
-    # devbox's own built-in NIX_MODULES_DIR. The first two are the SAME
-    # directories the test above resolves scripts out of - one directory per
-    # level, both halves in it.
+    # the same three directories, in the same order, differing only in the
+    # suffix looked for - one directory per level, both halves in it.
     proj = tmp_path / "ws" / "mods"
     glob = tmp_path / "global-mods"
-    built = tmp_path / "builtin-nix"
+    built = tmp_path / "builtin-mods"
     for d in (proj, glob, built):
         d.mkdir(parents=True)
     (proj / "vim.nix").write_text("proj")
@@ -2042,7 +2169,7 @@ def test_the_vim_module_declares_the_plugin_set_and_reads_its_own_flag():
     # The plugins are stated in the module because nix cannot read them out of
     # the ~/.vimrc that names them, and `vimPlugins` normalizes an upstream name
     # (`rust.vim` is `rust-vim`), so the three attribute names are pinned here.
-    text = (devbox.NIX_MODULES_DIR / "vim.nix").read_text()
+    text = (devbox.BUILTIN_MODS_DIR / "vim.nix").read_text()
     assert "config.devbox.mods.vim.enable" in text
     for plugin in ("base16-vim", "rust-vim", "vim-go"):
         assert plugin in text
@@ -2064,7 +2191,7 @@ def test_github_auth_is_a_home_manager_module_now(isolated_mods):
     assert devbox.find_mod_script("github-auth", None) is None
     assert "github-auth" in devbox.resolve_playbook(
         devbox.workspace_playbook(_workspace()), None).modules
-    text = (devbox.NIX_MODULES_DIR / "github-auth.nix").read_text()
+    text = (devbox.BUILTIN_MODS_DIR / "github-auth.nix").read_text()
     assert "config.devbox.mods.github-auth.enable" in text
     assert ".config/git/config" in text
     assert "auth git-credential" in text

@@ -5,9 +5,14 @@
 ```bash
 uv sync                          # create .venv with dev deps (pytest)
 uv run pytest                    # run the test suite
+uv run devbox nix check          # evaluate the home-manager modules (needs `nix`
+                                  # on PATH; --build also realises the closure)
 uv tool install --editable .     # point the live `devbox` command at this checkout
                                   # (editable install - no reinstall needed after further edits)
 ```
+
+`pytest` never evaluates nix. Any change under `devbox/nix/` or to a
+`devbox/mods/*.nix` needs `devbox nix check` too - see Testing scope.
 
 ## Testing scope
 
@@ -41,11 +46,13 @@ privileged account keeps stock, unconfigured apt vim), manifest
 rendering, `render_repos` + the `repos` payload file, env-file quoting,
 the home-manager flake (`render_workspace_nix`: the rendered attribute set, nix
 string escaping and bare-vs-quoted attribute names, a `<name>.enable` flag per
-shipped module, and `nix_payload_files` shipping every `.nix` file
-under `NIX_DIR` with an attachment but none with a box; plus the pin agreement
+shipped module, and `nix_payload_files` assembling the `NIX_DIR` skeleton and
+one `modules/<name>.nix` per resolved module with an attachment but nothing
+with a box; that `NIX_DIR` itself holds only the three skeleton files, no
+`modules/` and no `workspace.nix`; plus the pin agreement
 between `flake.nix`'s `home-manager` input and the mod's `nix run`), the
 **two-halves resolution** (`resolve_playbook` against a fake conversion — a
-built-in `<name>.sh` deleted and a `modules/<name>.nix` in its place: a base mod
+built-in `<name>.sh` deleted and a `<name>.nix` beside where it was: a base mod
 and an opt-in one both resolving to the generation with no `ModSpec` and no
 manifest line, the `requires` on a converted mod still validating, a module the
 playbook never names shipped with `enable = false`, a workspace's own `.sh`
@@ -82,16 +89,27 @@ instead of being switched to zsh — `vim-plug.sh` and `github-auth.sh`
 deleted outright), **workspace-local and global nix modules** (JIM-209:
 `find_nix_module`/`nix_module_names` against fake workspace/global/built-in
 directories — the same workspace > global > built-in precedence
-`find_mod_script`/`resolve_mod` give bash mods, out of the same two outer
-directories — a `<name>.nix` lives in the same `mods/` its `<name>.sh` scripts
-do, and only devbox's own built-in modules sit apart, inside the flake; a name
-only the workspace's own `mods_dir` has resolving with no built-in counterpart
-at all, one shadowing a built-in of the same name, a workspace's own
-`<name>.sh` still winning over its own `<name>.nix` beside it, a global one
-shadowed in turn by a workspace's own, and the six-places-looked failure
-message naming the `.nix` half of each of the three directories — plus the
+`find_mod_script`/`resolve_mod` give bash mods, out of the SAME three
+directories (`mods_dirs`) — a `<name>.nix` lives in the same `mods/` its
+`<name>.sh` scripts do at every level, devbox's own `devbox/mods/` included; a
+name only the workspace's own `mods_dir` has resolving with no built-in
+counterpart at all, one shadowing a built-in of the same name, a workspace's
+own `<name>.sh` still winning over its own `<name>.nix` beside it, a global one
+shadowed in turn by a workspace's own, and the failure message naming three
+directories and both suffixes rather than six paths — plus the
 flake itself `readDir`ing `./modules` rather than importing a fixed list,
-asserted by its absence of any hardcoded `./modules/<name>.nix` line),
+asserted by its absence of any hardcoded `./modules/<name>.nix` line; and the
+packaging invariant that keeps the built-ins shippable, `BUILTIN_MODS_DIR`
+being a child of the package directory, holding both suffixes and no name in
+both), **`devbox nix check`** (`nix_check_files` turning every discovered
+module's flag on — a false flag leaves that module's body inside an unforced
+`mkIf`, so a check mirroring a real playbook would evaluate almost nothing —
+and widening to a workspace's own modules when there is a workspace;
+`cmd_nix_check` against a fake `subprocess`: the nix argv pointed at the
+assembled temp directory rather than at `devbox/nix`, `--build` staying opt-in,
+a failing step exiting, and the missing-`nix` message; plus `find_workspace_opt`
+returning None rather than dying, which is what lets the check run in devbox's
+own repo, which is not a workspace),
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
 (`_refresh_ssh_aliases`: one stanza per file, the collapse rule, per-box
@@ -160,10 +178,20 @@ booted, provisioned box), the actual behavior of the built-in mods on a real
 box (dotfiles, repo bootstrap, the multi-user nix
 install and its daemon — though
 `repo-bootstrap`'s loop over the `repos` file is plain bash and can be run by
-hand against fake `jj`/`git`), **anything nix evaluates** (this host has no
-`nix`, so `nix flake check`, the `home-manager switch` itself, and whether a
-module builds are on-box manual steps outside pytest — pytest covers the
-rendering and the payload, never the evaluation), the parts of the driver
+hand against fake `jj`/`git`), **anything nix evaluates** — pytest covers the
+rendering and the payload, never the evaluation, but `devbox nix check` does
+and it needs no box: it assembles a payload flake in a temp dir and runs `nix
+flake check` plus an evaluation of `homeConfigurations.agent-<system>.
+activationPackage` against it, with EVERY module enabled (a false
+`devbox.mods.<name>.enable` leaves that module's body inside an unforced
+`mkIf`, so a check mirroring a real playbook would evaluate almost nothing).
+**Run it on any change to a `.nix` file, before committing.** `--build` also
+realises the closure, which is minutes of downloads and catches what
+evaluation cannot. `--out-dir DIR` keeps the assembled flake to poke at. It
+needs `nix` on the host's PATH; failing that, the same check runs on a box
+(`devbox ssh`), where the `nix` mod has installed one. The `home-manager
+switch` itself, and how a module behaves once activated, stay on-box manual
+steps. Also outside pytest: the parts of the driver
 that a fake `sudo` can only simulate (real `useradd` flags, sudoers, apt, whether
 an agent genuinely lacks privilege), or a
 live EC2/Lightsail launch — those need a real libvirt daemon + booted VM, or
@@ -197,13 +225,10 @@ workspaces have their own generation (`home-manager generations` as each agent,
 and `ls -l ~/.nix-profile` pointing into that account's own profile); and that
 the box's privileged account has none — it is still on stock apt bash and
 unconfigured vim, which is what keeps `devbox box ssh` working whatever a
-generation does. `nix flake
-check "path:<payload>/nix"`, and
-`nix build "path:<payload>/nix#homeConfigurations.agent-x86_64-linux.activationPackage" --no-link`
-for the configuration itself, are the evaluation checks pytest cannot run —
-manual, on a box, against a payload directory (keep one by running the driver
-by hand, or point them at a copy of `devbox/nix/` with a `workspace.nix`
-beside it).
+generation does. The evaluation checks pytest cannot run are `devbox nix
+check`'s job, and it runs on the host, before any of this — it assembles the
+payload flake itself rather than needing one kept from a real run, which is
+what makes it a pre-commit step rather than a post-deploy one.
 
 For the `jj` module, on the same box: `ssh <agent-alias> 'jj --version'` finds
 jujutsu from `~/.nix-profile/bin`; `jj config get user.name` in a checkout
@@ -305,9 +330,10 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   built-in, keyed on `marker.mods_dir`), the two playbooks
   (`box_playbook`/`workspace_playbook`), **the two halves a playbook name can
   resolve to** (`resolve_playbook` → `Playbook(specs, modules)`: a
-  `<name>.sh` in any mods directory, or — only when no directory has one — the
-  flake's `modules/<name>.nix`, discovered by file presence so converting a mod
-  is a one-file change with no registry to keep in step; scripts win at every
+  `<name>.sh` in any mods directory, or — only when no directory has one — a
+  `<name>.nix` in those same directories, discovered by file presence so
+  converting a mod is a one-file change with no registry to keep in step and no
+  second directory to reach into; scripts win at every
   level of the precedence, so a workspace's own `<name>.sh` gets it its own mod
   and leaves the module inert, and a module name yields no `ModSpec` and no
   manifest line — the driver never hears about it. The box playbook consults no
@@ -318,7 +344,8 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   `_box_context`/`_workspace_context` (DEVBOX_* accounts/pubkey/jj context)
   + `resolve_env`/`env_for_owner` (the effective `[env]` map, and one
   account's slice of it), and payload assembly (driver + resolved `mods/*.sh` +
-  `context.env` + manifest + `repos`). Ships `provision-driver.sh` + `mods/*.sh`.
+  `context.env` + manifest + `repos`). Ships `provision-driver.sh` and the
+  built-in mods, `devbox/mods/*.sh` and `devbox/mods/*.nix` in one directory.
   Delivered over SSH (tar → extract → run driver) by `box create`, `create` and
   `devbox sync --mods`. The box base includes `nix`, which installs the
   multi-user (daemon) nix store with the upstream installer pinned by version —
@@ -332,10 +359,12 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   Creds are NOT in the payload — each mod sources the `~/.config/devbox/env` of
   the account that owns them (written by `run_envvars`), which is what keeps the
   payload safe to make agent-readable.
-- `nix/` — the home-manager flake, the **declarative half** of an agent's home,
-  shipped in an attachment's payload beside `mods/` (`nix_payload_files` walks
-  every `.nix` file under `NIX_DIR`, so adding a module is one new file and no
-  registration) and switched by the `home-manager` mod. A mod is a bash script
+- `nix/` — the home-manager flake SKELETON, the **declarative half** of an
+  agent's home. `nix_payload_files` assembles it into a real flake in an
+  attachment's payload beside `mods/` — the three skeleton files, the rendered
+  `workspace.nix`, and one `modules/<name>.nix` per resolved module out of the
+  mods directories — and the `home-manager` mod switches to it. Adding a module
+  is one new file and no registration. A mod is a bash script
   or a module here, never both. `flake.nix` pins nixpkgs and home-manager to
   exact revs and carries the module conventions in one comment block; there is
   deliberately **no `flake.lock`** — the pins make the lock nix writes on the
@@ -351,8 +380,8 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   the name, false otherwise — so a shadowed mod runs its script and nothing
   else. Every shipped module gets a flag either way, because a missing
   attribute is an evaluation error in nix, not a false. Converting a mod is
-  therefore: write `modules/<name>.nix`, delete `mods/<name>.sh`, and leave the
-  playbook tuples alone (the recipe is spelled out in `flake.nix`'s
+  therefore: write `<name>.nix` beside the script, delete `<name>.sh`, and
+  leave the playbook tuples alone (the recipe is spelled out in `flake.nix`'s
   conventions block, which is the contract the conversion tickets read) —
   `flake.nix` itself needs no line added: it `readDir`s `./modules` at
   evaluation time rather than importing a fixed list, so a new file is
@@ -360,22 +389,27 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   none of this, and the privileged account keeps stock apt bash and
   unconfigured vim - no dotfiles either - so `devbox box ssh` stays the
   machine's debugging entry point regardless of any per-account state.
+  **`NIX_DIR` is a SKELETON, not a working flake**: `flake.nix`, `options.nix`
+  and `zshenv.nix`, nothing else. It cannot be evaluated where it sits —
+  `options.nix` imports the `workspace.nix` only a rendered payload has, and
+  there is no `modules/` in the source tree at all. Both appear in an assembled
+  payload, and assembling one is the ONLY way to evaluate a module
+  (`devbox nix check`, `cli.cmd_nix_check`).
   **Workspace-local and global nix modules ARE supported** (JIM-209): a nix
   module resolves by the same workspace > global > built-in precedence a bash
-  mod does, **out of the same directory** — `<workspace mods dir>/<name>.nix`
-  (either marker shape — see `config.Marker.mods_dir`) >
-  `~/.config/devbox/mods/<name>.nix` > devbox's own built-in
-  `NIX_MODULES_DIR` (see `find_nix_module`) — so a mod that has nothing to do
+  mod does, **out of the same three directories** (`provision.mods_dirs`) —
+  `<workspace mods dir>/<name>.nix` (either marker shape — see
+  `config.Marker.mods_dir`) > `~/.config/devbox/mods/<name>.nix` > devbox's own
+  `BUILTIN_MODS_DIR` (see `find_nix_module`) — so a mod that has nothing to do
   with devbox itself never has to live in devbox's own repo to become a
   module; the bash escape hatch (a workspace's own `<name>.sh`) still works
   exactly as it always has, and still wins over any module of the same name,
   which one directory per level makes visible: the two files sit next to each
-  other. Only the built-in level keeps its modules apart from its scripts, and
-  only because `NIX_MODULES_DIR` is inside the flake devbox ships, the one
-  place `nix flake check` can evaluate them from the source tree; the outer
-  two have no flake of their own, and a module travels to the payload's own
+  other. `find_mod_script` and `find_nix_module` walk that one tuple and differ
+  only in the suffix. A module travels to the payload's own
   `nix/modules/<name>.nix` whatever directory it came from, so that assembled
-  layout is all nix ever sees. A module needing sibling files of its own isn't
+  layout is all nix ever sees — which is what frees every source directory to
+  hold both halves. A module needing sibling files of its own isn't
   supported yet — every shipped module is one self-contained file. **No cred
   ever enters a nix expression**:
   /nix/store is world-readable and shared by every attachment. `zshenv.nix` is
@@ -474,9 +508,13 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   workspaces are about to reuse, at a moment whoever detached happened to pick.
 - `__init__.py` — re-exports a flat `devbox.X` API for convenience/tests.
 
-`pyproject.toml` (hatchling) declares the `devbox.cli:main` entry point,
-force-includes the package data files (`devbox/init-script.sh`,
-`devbox/provision-driver.sh`, and the whole `devbox/nix/` flake directory — one
-entry, so a new module needs no build change) into the wheel, and declares the
-one runtime dep, `boto3` (the ec2 +
-aws/Lightsail providers).
+`pyproject.toml` (hatchling) declares the `devbox.cli:main` entry point and the
+one runtime dep, `boto3` (the ec2 + aws/Lightsail providers). It force-includes
+nothing: every data file devbox resolves through `Path(__file__).parent` lives
+inside the package — `devbox/init-script.sh`, `devbox/provision-driver.sh`,
+`devbox/mods/` (both halves) and the `devbox/nix/` skeleton — so
+`packages = ["devbox"]` carries them all and a new mod, script or module, is
+one file and no build change. Keep it that way: a data file outside `devbox/`
+resolves under an editable install and is silently absent from a wheel, which
+is the shape of the bug that left `mods/*.sh` unshipped while it sat at the
+repo root.

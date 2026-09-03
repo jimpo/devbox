@@ -1,2 +1,0 @@
-# One .nix file per converted mod, named exactly as the bash mod it replaces.
-# See the MODULE CONVENTIONS block at the top of ../flake.nix.

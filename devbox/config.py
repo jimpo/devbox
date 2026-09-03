@@ -515,22 +515,33 @@ def _marker_at(cur: Path) -> Optional[Marker]:
     return None
 
 
-def find_workspace(start: Path) -> Marker:
-    """Walk upward from `start` (like git looking for .git) for either marker
-    spelling. The nearest level with one wins, so a workspace nested inside
-    another resolves to itself."""
+def find_workspace_opt(start: Path) -> Optional[Marker]:
+    """`find_workspace`, but None instead of a hard error when there is no
+    marker anywhere above `start`. For the commands a workspace only refines -
+    `devbox nix check` widens its module set to the one it finds, and checks
+    the global and built-in modules when there is none."""
     cur = start.resolve()
     while True:
         marker = _marker_at(cur)
         if marker is not None:
             return marker
         if cur.parent == cur:
-            die(f"no {WORKSPACE_MARKER_FILE} or "
-                f"{REPO_MARKER_DIR}/{REPO_MARKER_CONFIG} found in {start} or any "
-                f"parent directory (pass -C/--workspace-dir, or mark a workspace: "
-                f"{REPO_MARKER_DIR}/{REPO_MARKER_CONFIG} inside a repo, "
-                f"{WORKSPACE_MARKER_FILE} in a directory that holds repos)")
+            return None
         cur = cur.parent
+
+
+def find_workspace(start: Path) -> Marker:
+    """Walk upward from `start` (like git looking for .git) for either marker
+    spelling. The nearest level with one wins, so a workspace nested inside
+    another resolves to itself."""
+    marker = find_workspace_opt(start)
+    if marker is None:
+        die(f"no {WORKSPACE_MARKER_FILE} or "
+            f"{REPO_MARKER_DIR}/{REPO_MARKER_CONFIG} found in {start} or any "
+            f"parent directory (pass -C/--workspace-dir, or mark a workspace: "
+            f"{REPO_MARKER_DIR}/{REPO_MARKER_CONFIG} inside a repo, "
+            f"{WORKSPACE_MARKER_FILE} in a directory that holds repos)")
+    return marker
 
 
 def _resolve_repos(data: dict, marker: Marker) -> list:

@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,10 +50,11 @@ from typing import Optional
 from .initscript import render_init_script
 from .config import (BoxSpec, DEFAULT_PROVIDER, GlobalConfig, PROVIDERS,
                      WorkspaceConfig, SSH_DIR, SSH_USER_CONFIG, find_workspace,
-                     known_hosts_path, parse_instance_name, resolve_box_spec,
-                     resolve_instance, resolve_workspace)
-from .provision import (build_box_payload, build_payload, build_tarball,
-                        provision_log, resolve_env)
+                     find_workspace_opt, known_hosts_path, parse_instance_name,
+                     resolve_box_spec, resolve_instance, resolve_workspace)
+from .provision import (NIX_PAYLOAD_DIR, build_box_payload, build_payload,
+                        build_tarball, nix_check_files, provision_log,
+                        resolve_env)
 from .sync import run_envvars, run_sync
 from .providers import (AWS_PROVIDERS, AwsAuthError, InstanceSpec, all_providers,
                         auth_error_message, get_provider, is_auth_error)
@@ -959,6 +962,88 @@ def cmd_detach(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceC
     print(f"Detached '{workspace.workspace}' from '{name}'.{kept}")
 
 
+# The systems flake.nix builds `homeConfigurations.agent-<system>` for, keyed by
+# what platform.machine() reports. A check evaluates the host's own: nix can
+# evaluate either, but only one of them without a cross-compiling setup.
+_NIX_SYSTEMS = {"x86_64": "x86_64-linux", "amd64": "x86_64-linux",
+                "aarch64": "aarch64-linux", "arm64": "aarch64-linux"}
+
+
+def _write_payload(files: list, out_dir: Path) -> None:
+    """Lay a payload file list out as a real directory tree."""
+    for pf in files:
+        path = out_dir / pf.path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(pf.content)
+        path.chmod(pf.mode)
+
+
+def cmd_nix_check(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
+    """Assemble a payload flake on this host and evaluate it with nix.
+
+    This is the ONLY way to check a module without a box, and it is why the
+    check has to assemble: `devbox/nix/` is a skeleton, not a working flake -
+    its options.nix imports the `workspace.nix` that only a rendered payload
+    has - and a module's source may sit in any of the three mods directories.
+    Run inside a workspace, that workspace's own modules are checked too; run
+    anywhere else, the global and built-in ones are.
+
+    Evaluating, not building, is the default: forcing the activation package's
+    derivation catches every module error the nix module system can catch, and
+    costs a fraction of realising a closure that holds an editor, a browser
+    toolchain and Claude Code. `--build` does the rest."""
+    if not shutil.which("nix"):
+        die("nix is not on PATH, and `devbox nix check` runs it on this host. "
+            "Install nix, or run the check on a box (`devbox ssh`), where the "
+            "`nix` mod has installed it.")
+    system = _NIX_SYSTEMS.get(platform.machine())
+    if system is None:
+        die(f"no home-manager configuration for this host's architecture "
+            f"({platform.machine()}); the flake builds "
+            f"{', '.join(sorted(set(_NIX_SYSTEMS.values())))}.")
+
+    marker = find_workspace_opt(args.workspace_dir or Path.cwd())
+    mods_dir = marker.mods_dir if marker is not None else None
+    files = nix_check_files(mods_dir)
+    modules = sorted(pf.path.rsplit("/", 1)[-1].removesuffix(".nix")
+                     for pf in files if "/modules/" in pf.path)
+
+    with tempfile.TemporaryDirectory(prefix="devbox-nix-check.") as tmp:
+        out_dir = Path(args.out_dir) if args.out_dir else Path(tmp)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _write_payload(files, out_dir)
+        flake = f"path:{out_dir / NIX_PAYLOAD_DIR}"
+        where = "this workspace, the global config and the built-ins" \
+            if mods_dir is not None else "the global config and the built-ins"
+        print(f"Checking {len(modules)} modules from {where}, all enabled:")
+        print(f"  {', '.join(modules)}")
+        if args.out_dir:
+            print(f"Assembled flake: {out_dir / NIX_PAYLOAD_DIR}")
+
+        # Every module is a home-manager module, which `nix flake check` does
+        # not know how to check - homeConfigurations is not one of the outputs
+        # it recognises. It still catches a malformed flake, so it runs first
+        # and cheaply; forcing the activation package is what actually
+        # evaluates the modules. `--raw` prints a store path this command has
+        # no use for, so only the build step's output is shown.
+        attr = f"{flake}#homeConfigurations.agent-{system}.activationPackage"
+        steps = [(["flake", "check", flake], "flake check", True),
+                 (["eval", "--raw", f"{attr}.drvPath"],
+                  f"evaluate agent-{system}", False)]
+        if args.build:
+            steps.append((["build", "--no-link", "--print-out-paths", attr],
+                          f"build agent-{system}", True))
+        for argv, label, show in steps:
+            cmd = ["nix", "--extra-experimental-features", "nix-command flakes",
+                   *argv]
+            print(f"\n$ {' '.join(shlex.quote(c) for c in cmd)}", flush=True)
+            r = subprocess.run(cmd, stdout=None if show else subprocess.DEVNULL)
+            if r.returncode != 0:
+                die(f"{label} failed (exit {r.returncode}).")
+            print(f"ok: {label}", flush=True)
+    print("\nnix check passed.")
+
+
 def _add_box_create_flags(parser: argparse.ArgumentParser) -> None:
     """The shape of a box, as flags. There is no box config file: resources are
     fixed at create and readable from the provider afterwards, so a persisted
@@ -1072,6 +1157,17 @@ def main() -> None:
     sy.add_argument("--adopt", action="store_true",
                     help="claim an existing account that devbox has no record of")
     sy.set_defaults(func=cmd_sync)
+    # `nix check` runs on the HOST, not the box: it is the only way to evaluate
+    # a module without attaching. It needs no workspace (the global + built-in
+    # modules are checkable from anywhere) and picks one up if there is one.
+    nx = sub.add_parser("nix", help="the home-manager half, checked on this host")
+    nx_sub = nx.add_subparsers(dest="nix_cmd", required=True)
+    nc = nx_sub.add_parser("check", help="assemble the payload flake and evaluate it with nix")
+    nc.add_argument("--build", action="store_true",
+                    help="also realise the activation package, not just evaluate it")
+    nc.add_argument("--out-dir", default=None, metavar="DIR",
+                    help="keep the assembled flake here instead of a temp dir")
+    nc.set_defaults(func=cmd_nix_check, needs_workspace=False)
     sub.add_parser("host", help="refresh the SSH alias used for jj-fetch, print the alias name").set_defaults(func=cmd_host)
     hd = sub.add_parser("herdr", help="launch a herdr session on the box, as this workspace's agent user")
     hd.add_argument("herdr_args", nargs=argparse.REMAINDER, help="extra args passed to herdr (e.g. --session NAME)")

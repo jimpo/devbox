@@ -15,13 +15,12 @@ devbox = "devbox.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["devbox"]
 
-# Non-Python data files shipped inside the package (resolved at runtime via
-# Path(__file__).parent).
-[tool.hatch.build.targets.wheel.force-include]
-"devbox/init-script.sh" = "devbox/init-script.sh"
-"devbox/provision-driver.sh" = "devbox/provision-driver.sh"
-# The home-manager flake (devbox/nix/) needs no entry: `packages` above already
-# carries every file under the package, so adding a module is one new file.
+# Every non-Python data file devbox resolves at runtime via Path(__file__).parent
+# lives INSIDE the package, so `packages` above carries it and this build needs
+# no per-file entry: `devbox/init-script.sh`, `devbox/provision-driver.sh`, the
+# built-in mods (`devbox/mods/*.sh` and `devbox/mods/*.nix`) and the
+# home-manager flake skeleton (`devbox/nix/`). Adding a mod or a module is one
+# new file and no build change.
 
 [dependency-groups]
 dev = [
