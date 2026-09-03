@@ -49,8 +49,9 @@
 # `nix/modules/<name>.nix` per name it resolves (built-in, global, or a
 # workspace's own - see provision.find_nix_module), whatever the source, and
 # this flake just imports whatever landed there. That is what makes a
-# workspace's or a user's global `nix/modules/<name>.nix` work with zero
-# changes here: it never has to be devbox's own repo. `provision.py`'s
+# workspace's or a user's global `<mods dir>/<name>.nix` work with zero
+# changes here: it never has to be devbox's own repo, and it never has to be
+# in a directory shaped like this one. `provision.py`'s
 # `NIX_MODULES_DIR` is the payload's `modules/` before it travels, so a
 # built-in conversion is still "write the file, delete the script" - there is
 # just no line to add to a list any more.
@@ -99,14 +100,18 @@
 # --envvars` writes, and a mod that needs one reads it at run time.
 #
 # WORKSPACE-LOCAL AND GLOBAL .nix MODULES ARE SUPPORTED, same
-# workspace > global > built-in precedence as a bash mod: a workspace's own
-# `nix/modules/<name>.nix` (beside its `mods/`, same shape at either marker
-# spelling - see config.Marker.nix_modules_dir) or a user's global
-# `~/.config/devbox/nix/modules/<name>.nix` resolves exactly like devbox's own
-# built-in one, or shadows it if both exist. A module needing sibling files of
-# its own (its own lib, say) isn't supported yet - every shipped module today
-# is one self-contained file, and only `readDir`-discovered `.nix` files
-# travel in the payload.
+# workspace > global > built-in precedence as a bash mod, and out of the same
+# directory: a workspace's own `<mods dir>/<name>.nix` (beside its `<name>.sh`
+# scripts, either marker spelling - see config.Marker) or a user's global
+# `~/.config/devbox/mods/<name>.nix` resolves exactly like devbox's own
+# built-in one, or shadows it if both exist. Only the built-ins live in a
+# `modules/` of their own, and only because it is THIS directory - the flake
+# devbox ships, which `nix flake check` can evaluate from the source tree. The
+# outer two levels have no flake of their own to sit in and so gain nothing
+# from a separate directory. A module needing sibling files of its own (its
+# own lib, say) isn't supported yet - every shipped module today is one
+# self-contained file, and only `readDir`-discovered `.nix` files travel in
+# the payload.
 {
   description = "devbox agent home environment";
 

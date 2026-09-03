@@ -229,10 +229,12 @@ prints a warning naming the mod.
 
 Resolution is **workspace > global (`~/.config/devbox/mods`) > built-in** by name.
 A nix module (a converted mod, or one that never was a script - see below)
-resolves by the same precedence, from a `nix/modules/<name>.nix` beside each
-level's `mods/`: `<workspace mods dir>/nix/modules/`, then
-`~/.config/devbox/nix/modules/`, then devbox's own built-in one. A `<name>.sh`
-anywhere still wins over any module of that name.
+resolves by the same precedence out of the **same** directories, as a
+`<name>.nix` beside the `<name>.sh` scripts: `<workspace mods dir>/`, then
+`~/.config/devbox/mods/`, then devbox's own built-in `devbox/nix/modules/` -
+the one level that keeps modules apart, because that directory is inside the
+flake devbox ships. A `<name>.sh` anywhere still wins over any module of that
+name.
 Every mod must be idempotent (it runs on `create` *and* every `devbox sync
 --mods`): overwrite unconditionally or guard on "already done". A mod is the
 *only* workspace-level extension point: devbox's first-boot layer is one fixed

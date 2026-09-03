@@ -687,16 +687,24 @@ account keeps stock apt bash and unconfigured vim — no generation, no
 dotfiles either — so `devbox box ssh` works whatever state a workspace's (or
 its own) nix and per-account config might be in.
 
-**A nix module resolves by the same precedence a bash mod does** — workspace
-`nix/modules/<name>.nix` (beside its `mods/`, either marker shape) > global
-`~/.config/devbox/nix/modules/<name>.nix` > devbox's own built-in one — so a
-mod that has nothing to do with devbox itself (a workspace's own rust
-toolchain, say) doesn't have to live in devbox's repo, or even be a bash
-script, to become a module: drop the file where it belongs and name it in
-`mods` (or leave it un-named for the "shipped but off" case, same as any
-built-in). The flake discovers every `.nix` file devbox resolves and ships
-into the payload's `nix/modules/`, by file presence, not a list it has to be
-added to. Nothing from `[env]` may appear in a nix expression: `/nix/store` is
+**A nix module resolves by the same precedence a bash mod does, out of the
+same directory** — workspace `<mods dir>/<name>.nix` (either marker shape) >
+global `~/.config/devbox/mods/<name>.nix` > devbox's own built-in
+`devbox/nix/modules/<name>.nix`. One mods directory per level holds both
+halves, so `<name>.sh` and `<name>.nix` sit next to each other and "a script
+wins" is a rule about one listing. (Only devbox's own built-ins sit apart,
+because their directory is inside the flake devbox ships — the one place `nix
+flake check` can evaluate them straight from the source tree. A workspace's
+module has no flake of its own to sit in, so it gains nothing from a separate
+directory.) That means a mod that has nothing to do with devbox itself (a
+workspace's own rust toolchain, say) doesn't have to live in devbox's repo, or
+even be a bash script, to become a module: drop the file in `mods/` and name it
+in `mods = [...]` (or leave it un-named for the "shipped but off" case, same as
+any built-in). Wherever it came from, devbox copies it into the payload's own
+`nix/modules/`, and the flake discovers every `.nix` file there by file
+presence rather than from a list it has to be added to — that one assembled
+layout is all nix ever sees, which is what frees the outer two levels to shape
+their directories as they like. Nothing from `[env]` may appear in a nix expression: `/nix/store` is
 world-readable and shared by every attachment. A converted mod that needs a
 credential names the **path** of the 0600 `~/.config/devbox/env` and reads it at
 run time — which is how `cloudflared`, a module that installs `pkgs.cloudflared`
@@ -761,11 +769,12 @@ mods/*.sh                       # built-in, at the repo root
 A workspace's own mods live beside its config file, whichever spelling it uses.
 
 When **no** directory has a `<name>.sh`, the name resolves instead to the
-home-manager module of that name (`devbox/nix/modules/<name>.nix`), and the
-generation provides the mod rather than the driver running a script. That is all
-converting a mod takes — write the module, delete the script — and it is why a
-script always wins: a workspace that ships its own `jj.sh` gets its own jj,
-converted or not, and never both.
+home-manager module of that name — a `<name>.nix` in those same directories,
+by the same precedence, except for devbox's own built-ins, which are in
+`devbox/nix/modules/` — and the generation provides the mod rather than the
+driver running a script. That is all converting a mod takes — write the
+module, delete the script — and it is why a script always wins: a workspace
+that ships its own `jj.sh` gets its own jj, converted or not, and never both.
 
 **Static files, env for context.** Mods are static (lintable, shellcheck-able,
 diffable, and directly runnable — the metadata below lives in a fenced block of

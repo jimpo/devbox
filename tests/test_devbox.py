@@ -158,10 +158,8 @@ def test_find_workspace_repo_marker_shape(tmp_path):
     marker = devbox.find_workspace(tmp_path)
     assert marker.root_is_repo is True
     assert marker.config_path == tmp_path.resolve() / ".devbox" / "config.toml"
+    # One directory holds both halves: `<name>.sh` and `<name>.nix`.
     assert marker.mods_dir == tmp_path.resolve() / ".devbox" / "mods"
-    # nix modules sit beside mods/, same as at the built-in/global levels - not
-    # nested inside it.
-    assert marker.nix_modules_dir == tmp_path.resolve() / ".devbox" / "nix" / "modules"
 
 
 def test_find_workspace_visible_marker_shape(tmp_path):
@@ -172,7 +170,6 @@ def test_find_workspace_visible_marker_shape(tmp_path):
     assert marker.root_is_repo is False
     assert marker.config_path == tmp_path.resolve() / "devbox.toml"
     assert marker.mods_dir == tmp_path.resolve() / "mods"
-    assert marker.nix_modules_dir == tmp_path.resolve() / "nix" / "modules"
 
 
 def test_find_workspace_finds_the_visible_marker_walking_up(tmp_path):
@@ -606,11 +603,9 @@ def _marker(root=None, root_is_repo=True):
         return devbox.Marker(root=root,
                              config_path=root / devbox.REPO_MARKER_DIR / devbox.REPO_MARKER_CONFIG,
                              mods_dir=root / devbox.REPO_MARKER_DIR / devbox.MODS_SUBDIR,
-                             nix_modules_dir=root / devbox.REPO_MARKER_DIR / devbox.NIX_MODULES_SUBDIR,
                              root_is_repo=True)
     return devbox.Marker(root=root, config_path=root / devbox.WORKSPACE_MARKER_FILE,
-                         mods_dir=root / devbox.MODS_SUBDIR,
-                         nix_modules_dir=root / devbox.NIX_MODULES_SUBDIR, root_is_repo=False)
+                         mods_dir=root / devbox.MODS_SUBDIR, root_is_repo=False)
 
 
 def _repo(name="r", mode="push", dir=None, url=None, host=None, root=None):
@@ -832,10 +827,8 @@ def test_render_init_script_prefix_up_to_the_guard_is_posix_sh(pubkey, tmp_path)
 @pytest.fixture
 def isolated_mods(monkeypatch):
     # Resolve mods against the real built-ins + driver, but keep a developer's
-    # own ~/.config/devbox/mods (and its nix-module sibling) out of the test.
+    # own ~/.config/devbox/mods - which holds both halves - out of the test.
     monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR", devbox.Path("/nonexistent-global-mods"))
-    monkeypatch.setattr(devbox.provision, "GLOBAL_NIX_MODULES_DIR",
-                        devbox.Path("/nonexistent-global-nix-modules"))
 
 
 def _payload_map(workspace, gc, admin_user="alice"):
@@ -1112,8 +1105,6 @@ def converted(tmp_path, monkeypatch):
         monkeypatch.setattr(devbox.provision, "NIX_MODULES_DIR", modules)
         monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR",
                             devbox.Path("/nonexistent-global-mods"))
-        monkeypatch.setattr(devbox.provision, "GLOBAL_NIX_MODULES_DIR",
-                            devbox.Path("/nonexistent-global-nix-modules"))
         return mods, modules
     return convert
 
@@ -1206,7 +1197,9 @@ def test_the_box_playbook_never_resolves_a_module(converted, pubkey, capsys):
 def test_an_unresolvable_mod_names_every_place_it_looked(converted, pubkey,
                                                          tmp_path, capsys):
     # A typo in a `mods` list still says all six places (three bash, three
-    # nix), so the fix is obvious whichever half the author meant.
+    # nix), so the fix is obvious whichever half the author meant. The
+    # workspace's and the user's global level name ONE directory each, which
+    # holds both halves; only the built-in level names two.
     mods, modules = converted()
     marker_dir = tmp_path / "ws"
     (marker_dir / ".devbox" / "mods").mkdir(parents=True)
@@ -1217,8 +1210,8 @@ def test_an_unresolvable_mod_names_every_place_it_looked(converted, pubkey,
     for expected in (f"{marker_dir / '.devbox' / 'mods'}/rustt.sh",
                      "/nonexistent-global-mods/rustt.sh",
                      f"{mods}/rustt.sh",
-                     f"{marker_dir / '.devbox' / 'nix' / 'modules'}/rustt.nix",
-                     "/nonexistent-global-nix-modules/rustt.nix",
+                     f"{marker_dir / '.devbox' / 'mods'}/rustt.nix",
+                     "/nonexistent-global-mods/rustt.nix",
                      f"{modules}/rustt.nix"):
         assert expected in err
 
@@ -1233,22 +1226,25 @@ def test_a_workspace_own_nix_module_resolves_with_no_built_in_counterpart(
         isolated_mods, pubkey, tmp_path):
     # The motivating case: a mod that has nothing to do with devbox itself (a
     # workspace's own rust toolchain, say) and so has no reason to live in
-    # devbox's own repo at all - not even as a "converted" built-in.
+    # devbox's own repo at all - not even as a "converted" built-in. It goes in
+    # the workspace's mods directory, the same one its `<name>.sh` scripts are
+    # in.
     marker_dir = tmp_path / "ws"
-    _write_nix_module(marker_dir / ".devbox" / "nix" / "modules", "rust",
+    _write_nix_module(marker_dir / ".devbox" / "mods", "rust",
                       "{ config, lib, pkgs, ... }:\nlib.mkIf "
                       "config.devbox.mods.rust.enable { home.packages = "
                       "[ pkgs.cargo ]; }\n")
     workspace = _workspace(marker_dir=marker_dir, mods=["rust"])
     playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
-                                       workspace.marker.mods_dir,
-                                       nix_modules_dir=workspace.marker.nix_modules_dir)
+                                       workspace.marker.mods_dir)
     assert "rust" in playbook.modules
     assert "rust" not in [s.name for s in playbook.specs]
 
     payload = {pf.path: pf for pf in
               devbox.build_payload(workspace, _global_config(pubkey), "alice")}
     assert "mods/rust.sh" not in payload
+    # It travels to the payload's own `nix/modules/`, whatever directory it
+    # came from - that assembled layout is the only one the flake ever sees.
     assert "pkgs.cargo" in payload["nix/modules/rust.nix"].content
     assert "rust.enable = true;" in payload["nix/workspace.nix"].content
 
@@ -1258,34 +1254,53 @@ def test_a_workspace_own_nix_module_shadows_the_built_in_one(isolated_mods,
     # Same precedence bash mods get: a workspace's own file of a built-in's
     # name wins, exactly like test_a_workspace_script_shadows_a_converted_mod.
     marker_dir = tmp_path / "ws"
-    _write_nix_module(marker_dir / ".devbox" / "nix" / "modules", "vim",
+    _write_nix_module(marker_dir / ".devbox" / "mods", "vim",
                       "{ }\n# my own vim\n")
     workspace = _workspace(marker_dir=marker_dir)
-    module_path = devbox.find_nix_module("vim", workspace.marker.nix_modules_dir)
+    module_path = devbox.find_nix_module("vim", workspace.marker.mods_dir)
     assert module_path.read_text().endswith("# my own vim\n")
     payload = {pf.path: pf for pf in
               devbox.build_payload(workspace, _global_config(pubkey), "alice")}
     assert payload["nix/modules/vim.nix"].content.endswith("# my own vim\n")
 
 
+def test_a_workspace_script_still_wins_over_its_own_module_of_that_name(
+        isolated_mods, pubkey, tmp_path):
+    # Both halves in one directory, which is the point of putting them there:
+    # `<name>.sh` and `<name>.nix` sit next to each other, and the script wins.
+    marker_dir = tmp_path / "ws"
+    mods_dir = marker_dir / ".devbox" / "mods"
+    _write_nix_module(mods_dir, "vim", "{ }\n# my own vim module\n")
+    (mods_dir / "vim.sh").write_text("#!/usr/bin/env bash\n: my own vim script\n")
+    workspace = _workspace(marker_dir=marker_dir)
+    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
+                                       workspace.marker.mods_dir)
+    assert "vim" in [s.name for s in playbook.specs]
+    assert "vim" not in playbook.modules
+    payload = {pf.path: pf for pf in
+              devbox.build_payload(workspace, _global_config(pubkey), "alice")}
+    assert "my own vim script" in payload["mods/vim.sh"].content
+    # The module still ships (every discovered name does), but it is inert.
+    assert "vim.enable = false;" in payload["nix/workspace.nix"].content
+
+
 def test_a_global_nix_module_resolves_and_is_shadowed_by_a_workspace_one(
         monkeypatch, isolated_mods, pubkey, tmp_path):
-    # ~/.config/devbox/nix/modules/, the nix-side sibling of GLOBAL_MODS_DIR:
-    # shared across a user's workspaces, and itself shadowed by a workspace's
-    # own file of the same name.
-    global_nix = tmp_path / "global-config" / "nix" / "modules"
-    _write_nix_module(global_nix, "sccache", "{ }\n# global sccache\n")
-    monkeypatch.setattr(devbox.provision, "GLOBAL_NIX_MODULES_DIR", global_nix)
+    # ~/.config/devbox/mods/ holds both halves too: shared across a user's
+    # workspaces, and itself shadowed by a workspace's own file of that name.
+    global_mods = tmp_path / "global-config" / "mods"
+    _write_nix_module(global_mods, "sccache", "{ }\n# global sccache\n")
+    monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR", global_mods)
 
     marker_dir = tmp_path / "ws"
     workspace = _workspace(marker_dir=marker_dir, mods=["sccache"])
-    assert "sccache" in devbox.nix_module_names(workspace.marker.nix_modules_dir)
+    assert "sccache" in devbox.nix_module_names(workspace.marker.mods_dir)
     payload = {pf.path: pf for pf in
               devbox.build_payload(workspace, _global_config(pubkey), "alice")}
     assert payload["nix/modules/sccache.nix"].content.endswith("# global sccache\n")
 
     # A second workspace shadows the same name with its own file.
-    _write_nix_module(marker_dir / ".devbox" / "nix" / "modules", "sccache",
+    _write_nix_module(marker_dir / ".devbox" / "mods", "sccache",
                       "{ }\n# workspace sccache\n")
     payload = {pf.path: pf for pf in
               devbox.build_payload(workspace, _global_config(pubkey), "alice")}
@@ -1717,10 +1732,12 @@ def test_resolve_mod_precedence_workspace_over_global_over_builtin(tmp_path):
 
 def test_find_nix_module_precedence_workspace_over_global_over_builtin(tmp_path):
     # The nix-module mirror of the bash-mod precedence test above (JIM-209):
-    # a workspace's own nix_modules_dir, then the global one, then devbox's own
-    # built-in NIX_MODULES_DIR.
-    proj = tmp_path / "ws" / "nix" / "modules"
-    glob = tmp_path / "global-nix"
+    # a workspace's own mods directory, then the user's global one, then
+    # devbox's own built-in NIX_MODULES_DIR. The first two are the SAME
+    # directories the test above resolves scripts out of - one directory per
+    # level, both halves in it.
+    proj = tmp_path / "ws" / "mods"
+    glob = tmp_path / "global-mods"
     built = tmp_path / "builtin-nix"
     for d in (proj, glob, built):
         d.mkdir(parents=True)
@@ -1737,7 +1754,7 @@ def test_find_nix_module_precedence_workspace_over_global_over_builtin(tmp_path)
     assert devbox.find_nix_module("nope", proj, glob, built) is None
 
     assert devbox.nix_module_names(proj, glob, built) == ["basic", "shared", "vim"]
-    # No workspace nix_modules_dir at all (a box-scope caller passes None): the
+    # No workspace mods directory at all (a box-scope caller passes None): the
     # global/built-in union still resolves - "vim" survives via those two, but
     # a name only `proj` had would not.
     assert devbox.nix_module_names(None, glob, built) == ["basic", "shared", "vim"]

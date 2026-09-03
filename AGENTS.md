@@ -82,13 +82,16 @@ instead of being switched to zsh — `vim-plug.sh` and `github-auth.sh`
 deleted outright), **workspace-local and global nix modules** (JIM-209:
 `find_nix_module`/`nix_module_names` against fake workspace/global/built-in
 directories — the same workspace > global > built-in precedence
-`find_mod_script`/`resolve_mod` give bash mods, a name only the workspace's
-own `nix_modules_dir` has resolving with no built-in counterpart at all, one
-shadowing a built-in of the same name, a global one shadowed in turn by a
-workspace's own, and the six-places-looked failure message now naming three
-nix directories alongside the three bash ones — plus the flake itself
-`readDir`ing `./modules` rather than importing a fixed list, asserted by its
-absence of any hardcoded `./modules/<name>.nix` line),
+`find_mod_script`/`resolve_mod` give bash mods, out of the same two outer
+directories — a `<name>.nix` lives in the same `mods/` its `<name>.sh` scripts
+do, and only devbox's own built-in modules sit apart, inside the flake; a name
+only the workspace's own `mods_dir` has resolving with no built-in counterpart
+at all, one shadowing a built-in of the same name, a workspace's own
+`<name>.sh` still winning over its own `<name>.nix` beside it, a global one
+shadowed in turn by a workspace's own, and the six-places-looked failure
+message naming the `.nix` half of each of the three directories — plus the
+flake itself `readDir`ing `./modules` rather than importing a fixed list,
+asserted by its absence of any hardcoded `./modules/<name>.nix` line),
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
 (`_refresh_ssh_aliases`: one stanza per file, the collapse rule, per-box
@@ -359,16 +362,22 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   machine's debugging entry point regardless of any per-account state.
   **Workspace-local and global nix modules ARE supported** (JIM-209): a nix
   module resolves by the same workspace > global > built-in precedence a bash
-  mod does — `<workspace>/nix/modules/<name>.nix` (beside its `mods/`, either
-  marker shape — see `config.Marker.nix_modules_dir`) >
-  `~/.config/devbox/nix/modules/<name>.nix` > devbox's own built-in
+  mod does, **out of the same directory** — `<workspace mods dir>/<name>.nix`
+  (either marker shape — see `config.Marker.mods_dir`) >
+  `~/.config/devbox/mods/<name>.nix` > devbox's own built-in
   `NIX_MODULES_DIR` (see `find_nix_module`) — so a mod that has nothing to do
   with devbox itself never has to live in devbox's own repo to become a
   module; the bash escape hatch (a workspace's own `<name>.sh`) still works
-  exactly as it always has, and still wins over any module of the same name.
-  A module needing sibling files of its own isn't supported yet — every
-  shipped module is one self-contained file. **No cred ever enters a nix
-  expression**:
+  exactly as it always has, and still wins over any module of the same name,
+  which one directory per level makes visible: the two files sit next to each
+  other. Only the built-in level keeps its modules apart from its scripts, and
+  only because `NIX_MODULES_DIR` is inside the flake devbox ships, the one
+  place `nix flake check` can evaluate them from the source tree; the outer
+  two have no flake of their own, and a module travels to the payload's own
+  `nix/modules/<name>.nix` whatever directory it came from, so that assembled
+  layout is all nix ever sees. A module needing sibling files of its own isn't
+  supported yet — every shipped module is one self-contained file. **No cred
+  ever enters a nix expression**:
   /nix/store is world-readable and shared by every attachment. `zshenv.nix` is
   the one module that is not a mod — always in the generation, gated on no
   flag: it owns the agent's `~/.zshenv` (the file every zsh reads, `ssh <box>
