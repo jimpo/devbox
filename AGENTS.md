@@ -180,8 +180,8 @@ install and its daemon — though
 `repo-bootstrap`'s loop over the `repos` file is plain bash and can be run by
 hand against fake `jj`/`git`), **anything nix evaluates** — pytest covers the
 rendering and the payload, never the evaluation, but `devbox nix check` does
-and it needs no box: it assembles a payload flake in a temp dir and runs `nix
-flake check` plus an evaluation of `homeConfigurations.agent-<system>.
+and it needs no box: it assembles a payload flake in a temp dir and forces
+`homeConfigurations.agent-<system>.
 activationPackage` against it, with EVERY module enabled (a false
 `devbox.mods.<name>.enable` leaves that module's body inside an unforced
 `mkIf`, so a check mirroring a real playbook would evaluate almost nothing).

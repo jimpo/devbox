@@ -324,9 +324,8 @@ which is what makes a change spanning them a single agent's job.
 The only way to evaluate a home-manager module without a box. It assembles a
 payload flake in a temp directory — the `devbox/nix/` skeleton, a placeholder
 `workspace.nix`, and one `modules/<name>.nix` per module it resolves — then
-runs `nix flake check` on it and forces
-`homeConfigurations.agent-<system>.activationPackage`. Run it after any change
-to a `.nix` file, before committing.
+forces `homeConfigurations.agent-<system>.activationPackage` with `nix eval`.
+Run it after any change to a `.nix` file, before committing.
 
 Two details worth knowing:
 
@@ -736,6 +735,10 @@ payload's own `nix/modules/`, and the flake discovers every `.nix` file there
 by file presence rather than from a list it has to be added to — that one
 assembled layout is all nix ever sees, which is what frees every source
 directory to hold both halves.
+The corollary: **every `.nix` file in a mods directory is a mod's module.**
+There is no other kind — each one ships and the flake imports it, so a `.nix`
+that isn't a home-manager module breaks the whole activation. Keep a helper
+expression somewhere that isn't `mods/`.
 `devbox/nix/` in devbox's own repo is therefore a **skeleton**, not a working
 flake: `flake.nix`, `options.nix`, `zshenv.nix`, and no `modules/` at all. It
 cannot be evaluated where it sits, because `options.nix` imports the

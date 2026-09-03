@@ -275,7 +275,12 @@ def nix_module_names(mods_dir: Optional[Path] = None,
     global > built-in) is find_nix_module's job, not this one - a name can
     appear here because only the built-in ships it, even though a workspace's
     own file of the same name is what will actually be used. `mods_dir` is None
-    for a box-scope run, which has no workspace and no flake at all."""
+    for a box-scope run, which has no workspace and no flake at all.
+
+    EVERY `.nix` file in a mods directory is a mod's module. There is no other
+    kind: one lands in the payload and the flake imports it, so a `.nix` that
+    is not a home-manager module fails the whole activation. A helper a mod
+    needs belongs somewhere else."""
     names = set()
     for base in mods_dirs(mods_dir, global_mods_dir, builtin_mods_dir):
         if base is not None and base.is_dir():

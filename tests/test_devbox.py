@@ -1378,16 +1378,33 @@ def test_cmd_nix_check_evaluates_the_assembled_flake(monkeypatch, tmp_path,
     out_dir = tmp_path / "assembled"
     devbox.cli.cmd_nix_check(_nix_check_args(out_dir=str(out_dir)), None, None)
 
-    flake = f"path:{out_dir / 'nix'}"
-    assert [c[3] for c in runs] == ["flake", "eval"]
-    assert runs[0][-1] == flake
-    assert runs[1][-1] == (
+    flake = f"path:{out_dir.resolve() / 'nix'}"
+    assert [c[3] for c in runs] == ["eval"]
+    assert runs[0][-1] == (
         f"{flake}#homeConfigurations.agent-x86_64-linux.activationPackage.drvPath")
     # The flake it evaluated is a real one: skeleton + modules + workspace.nix.
     assert (out_dir / "nix" / "flake.nix").is_file()
     assert (out_dir / "nix" / "workspace.nix").is_file()
     assert (out_dir / "nix" / "modules" / "vim.nix").is_file()
     assert "nix check passed" in capsys.readouterr().out
+
+
+def test_cmd_nix_check_clears_a_reused_out_dir(monkeypatch, tmp_path,
+                                               isolated_mods):
+    # The flake readDirs `modules/`, so a module deleted since the last run must
+    # not survive in a reused --out-dir: it has no flag in the fresh
+    # workspace.nix, and nix would fail on it rather than on anything real.
+    monkeypatch.setattr(devbox.cli.shutil, "which", lambda p: f"/usr/bin/{p}")
+    monkeypatch.setattr(devbox.cli.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(devbox.cli, "find_workspace_opt", lambda start: None)
+    monkeypatch.setattr(devbox.cli.subprocess, "run", lambda cmd, **kw: _cp(cmd))
+    out_dir = tmp_path / "assembled"
+    stale = out_dir / "nix" / "modules" / "gone.nix"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("{ }\n")
+    devbox.cli.cmd_nix_check(_nix_check_args(out_dir=str(out_dir)), None, None)
+    assert not stale.exists()
+    assert (out_dir / "nix" / "modules" / "vim.nix").is_file()
 
 
 def test_cmd_nix_check_builds_only_when_asked(monkeypatch, tmp_path,
@@ -1401,10 +1418,10 @@ def test_cmd_nix_check_builds_only_when_asked(monkeypatch, tmp_path,
     monkeypatch.setattr(devbox.cli.subprocess, "run",
                         lambda cmd, **kw: runs.append(cmd) or _cp(cmd))
     devbox.cli.cmd_nix_check(_nix_check_args(), None, None)
-    assert "build" not in [c[3] for c in runs]
+    assert [c[3] for c in runs] == ["eval"]
     runs.clear()
     devbox.cli.cmd_nix_check(_nix_check_args(build=True), None, None)
-    assert [c[3] for c in runs] == ["flake", "eval", "build"]
+    assert [c[3] for c in runs] == ["eval", "build"]
 
 
 def test_cmd_nix_check_fails_on_a_failing_step(monkeypatch, tmp_path,
@@ -1416,7 +1433,7 @@ def test_cmd_nix_check_fails_on_a_failing_step(monkeypatch, tmp_path,
                         lambda cmd, **kw: _cp(cmd, code=1))
     with pytest.raises(SystemExit):
         devbox.cli.cmd_nix_check(_nix_check_args(), None, None)
-    assert "flake check failed" in capsys.readouterr().err
+    assert "evaluate agent-x86_64-linux failed" in capsys.readouterr().err
 
 
 def test_cmd_nix_check_says_so_when_nix_is_missing(monkeypatch, capsys):
