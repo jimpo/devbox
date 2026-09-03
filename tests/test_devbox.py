@@ -1526,6 +1526,25 @@ def test_the_jj_module_reads_its_flag_and_the_workspaces_identity():
     assert "config.devbox.workspace.jjEmail" in text
 
 
+def test_the_jj_module_stays_off_the_config_toml_dotfiles_owns():
+    # `dotfiles` copies configenv's jj/config.toml into the account on every
+    # run, so the generation may not claim that path: home-manager would back
+    # the copy up each switch and abort on the second, once
+    # config.toml.devbox-backup exists. The identity rides in conf.d, which jj
+    # reads after config.toml and nothing else writes.
+    #
+    # `programs.jujutsu` is what would take the file - it writes config.toml
+    # whenever its `settings` is non-empty, and its `ediff` default makes that
+    # happen by itself once some other module enables emacs.
+    text = (devbox.BUILTIN_MODS_DIR / "jj.nix").read_text()
+    code = "\n".join(line for line in text.splitlines()
+                     if not line.strip().startswith("#"))
+    assert "programs.jujutsu" not in code
+    assert "config.toml" not in code
+    assert "home.packages = [ pkgs.jujutsu ];" in code
+    assert '".config/jj/conf.d/00-devbox.toml"' in code
+
+
 def test_the_agents_zshenv_is_the_generations_and_holds_no_creds():
     # ~/.zshenv is the file EVERY zsh reads, including `ssh <box> '<cmd>'`, so
     # it is where the [env] creds and ~/.local/bin have to reach an agent.

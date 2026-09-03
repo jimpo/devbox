@@ -231,11 +231,15 @@ payload flake itself rather than needing one kept from a real run, which is
 what makes it a pre-commit step rather than a post-deploy one.
 
 For the `jj` module, on the same box: `ssh <agent-alias> 'jj --version'` finds
-jujutsu from `~/.nix-profile/bin`; `jj config get user.name` in a checkout
-returns the workspace's identity; `jj config set --user ui.pager cat` fails,
-because home-manager owns `~/.config/jj/config.toml`; and the same setting in
-`~/.config/jj/conf.d/local.toml` takes effect, which is the by-hand override
-route on the box.
+jujutsu from `~/.nix-profile/bin`; `~/.config/jj/config.toml` is configenv's
+own copy, a REAL file `dotfiles` wrote, and `~/.config/jj/conf.d/00-devbox.toml`
+is the generation's store symlink beside it; `jj config get user.name` in a
+checkout returns the workspace's identity, which is conf.d's value winning over
+config.toml's; and a setting in `~/.config/jj/conf.d/local.toml` takes effect
+over both, which is the by-hand override route on the box. The one that matters
+is the reconverge: run `devbox sync --mods` **twice** and both runs report a
+switch — the two halves write different files, so neither backs the other's up
+and no `config.toml.devbox-backup` is ever created.
 
 For the vim split, on that same box: `vim` opens with no error in BOTH accounts
 - the agent's from the generation, `:scriptnames` there listing the store's

@@ -106,6 +106,18 @@
 # that is global rather than per-mod (`nixpkgs.config.allowUnfree`, say) goes
 # in options.nix's `config` block, so there is one place to look for it.
 #
+# EXCEPT WHERE A BASH MOD ALREADY OWNS THE FILE. `dotfiles` runs configenv's
+# setup.sh in the same account, which writes ~/.zshrc, ~/.vimrc, ~/.tmux.conf,
+# ~/.gitconfig and ~/.config/{jj,nvim} with `cp -f`. A module must not claim
+# any of those paths: home-manager backs up a file it wants to own but did not
+# write, so the two halves taking one file from each other turns into a switch
+# that aborts on its own stale `<file>.devbox-backup`. Reach for whatever keeps
+# the module off the path - a `programs.<name>` option that writes elsewhere
+# (`neovim.sideloadInitLua`), a config directory the program reads in addition
+# (`jj.nix`'s conf.d), or plain `home.packages` with no `programs.<name>` at
+# all. `github-auth.nix` is the same rule read forwards: it claims
+# ~/.config/git/config precisely because configenv writes ~/.gitconfig.
+#
 # NO SECRETS, EVER. /nix/store is world-readable, on a box every attached
 # workspace shares, so nothing from a workspace's `[env]` may appear in a nix
 # expression - not as a value and not as a file an expression reads.
