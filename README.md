@@ -654,26 +654,25 @@ playbooks**, because a box and an attachment need different things:
 
 ```
 box playbook (fixed, built-in):     dotfiles-packages → dotfiles → vim-plug →
-                                    github-auth → nix
+                                    nix
                                     # runs once per box, as root / the admin
 
-workspace playbook (built-in base):   home-manager → jj → dotfiles → vim →
-                                    neovim → claude-code → cargo-binstall →
-                                    repo-bootstrap
+workspace playbook (built-in base):   home-manager → github-auth → jj →
+                                    dotfiles → vim → neovim → claude-code →
+                                    cargo-binstall → repo-bootstrap
 workspace mods (config.toml):         + rust + wasm-tools + …
                                     # runs once per attachment, in its account
 ```
 
 Ordering encodes the constraints (jj before repo-bootstrap, which clones with
 it; `dotfiles-packages`, the apt half, before `dotfiles`, the per-user half).
-`github-auth`, the other half of a private `jj git clone`, sits in the box
-playbook, which runs first. The 95% case is "just add rust":
-`mods = ["rust"]`.
+The 95% case is "just add rust": `mods = ["rust"]`.
 
 **A box takes no config, so its playbook is fixed** — `dotfiles-packages` (apt,
-as root), `github-auth` (one `/etc/gitconfig` line) and `nix` (the multi-user
+as root) and `nix` (the multi-user
 nix store and its daemon, which every attached workspace shares) are the
-genuinely box-level mods in the base; everything else installs into somebody's
+genuinely box-level mods in the base; everything else, `github-auth` included,
+installs into somebody's
 home. A workspace that needs more *system* state ships a
 `runas = ["root"]` mod of its own, which runs on the shared box when it attaches;
 devbox prints a warning naming it, since that writes state every other workspace
@@ -709,6 +708,18 @@ implementations. An agent's is `nix/modules/vim.nix`, which takes the plugin set
 generation, so its is `vim-plug`, a box mod that fetches vim-plug and runs
 `:PlugInstall` against the ~/.vimrc `dotfiles` wrote. They cannot share the name
 `vim`: a script of that name would shadow the module everywhere.
+
+**`github-auth` is a home-manager module too**, `nix/modules/github-auth.nix`:
+it points git's credential helper at `gh auth git-credential` from
+`~/.config/git/config` (git's XDG global config) instead of the box-wide
+`/etc/gitconfig` a root mod used to write. `dotfiles`/configenv's `setup.sh`
+overwrites each account's own `~/.gitconfig`, which would erase a helper
+written there, but it never touches the XDG path — so the module needs no
+ordering constraint against `dotfiles` and no privilege at all.
+`repo-bootstrap` still `requires = ["jj", "github-auth"]` for a private `jj
+git clone`; a module satisfies that wherever it sits, since it isn't a step in
+the run — the generation carrying it is switched by `home-manager`, first in
+the base playbook.
 
 **Claude Code shows the other shape**: one name whose imperative half lives
 *inside* the module. `nix/modules/claude-code.nix` puts `pkgs.claude-code` — the
@@ -984,21 +995,25 @@ with unrelated workspaces. Prefer a workspace's own `[env]` for anything scoped.
 
 **GitHub auth** is just `GITHUB_TOKEN` in `[env]`: `gh` reads it natively (no
 `gh auth login`, so nothing lands in `~/.config/gh/hosts.yml`), and the
-`github-auth` mod points git's credential helper at `gh auth git-credential` so
-`git`/`jj git` HTTPS use it — private clones and pushes work. The clone URL stays
-plain HTTPS; gh is the helper behind it, not the transport.
+`github-auth` home-manager module points git's credential helper at `gh auth
+git-credential` so `git`/`jj git` HTTPS use it — private clones and pushes
+work. The clone URL stays plain HTTPS; gh is the helper behind it, not the
+transport.
 
-That helper line lives in **`/etc/gitconfig`**, written once per box as root. It
+That helper line lives in **`~/.config/git/config`**, git's XDG global config,
+written per account by the generation rather than once per box as root. It
 holds no secret — it names a helper, and the helper answers with whatever
-`GITHUB_TOKEN` the *calling* account has in its own `~/.config/devbox/env`, so
-one system-wide line is right for every account on the box, the privileged one
-included. It is also out of reach of `dotfiles`, which copies its own gitconfig
-over `~/.gitconfig`. With no token the helper prints nothing and exits 1, git
-falls through, and public clones are unaffected.
+`GITHUB_TOKEN` the *calling* account has in its own `~/.config/devbox/env`.
+Agent-scoped rather than box-wide: `dotfiles`/configenv's `setup.sh` overwrites
+each account's own `~/.gitconfig`, which would erase a helper written there,
+but it never touches the XDG path, so the module needs no ordering constraint
+against it and no privilege at all. The privileged account has no generation,
+so it gets none of this — a manual `git clone` of a private repo from `devbox
+box ssh` needs a token supplied by hand. With no token the helper prints
+nothing and exits 1, git falls through, and public clones are unaffected.
 
-The box playbook runs at `devbox box create` and `devbox box sync --mods`, not
-at `devbox create` — so an existing box picks this up on its next `devbox box
-sync --mods`.
+The module is part of the workspace playbook, so it lands at `devbox create`
+and `devbox sync --mods`, same as any other agent-scoped mod.
 
 **Delivery & idempotency:** `devbox sync --envvars` ships the map over SSH (piped,
 never echoed to a log), rewriting both managed files in full each run — so

@@ -127,6 +127,7 @@
           ./modules/claude-github-mcp.nix
           ./modules/claude-linear-mcp.nix
           ./modules/cloudflared.nix
+          ./modules/github-auth.nix
           ./modules/jj.nix
           ./modules/neovim.nix
           ./modules/uv.nix

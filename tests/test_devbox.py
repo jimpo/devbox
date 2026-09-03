@@ -1182,11 +1182,11 @@ def test_the_box_playbook_never_resolves_a_module(converted, pubkey, capsys):
     # The flake describes one agent's home; a box run has no agent, and a box
     # mod is system work no generation could do. A converted box mod is
     # therefore a missing mod, not a module.
-    converted("github-auth")
+    converted("nix")
     with pytest.raises(SystemExit):
         devbox.build_box_payload("alice", _global_config(pubkey))
     err = capsys.readouterr().err
-    assert "mod 'github-auth' not found" in err
+    assert "mod 'nix' not found" in err
     # ... and the message does not offer the modules directory as a fix.
     assert ".nix" not in err
 
@@ -1880,7 +1880,6 @@ def test_dotfiles_admin_half_is_the_boxs_and_its_agent_half_the_workspaces(isola
         "dotfiles-packages\troot\t",   # the apt half: once, as root, per box
         "dotfiles\tadmin\t",
         "vim-plug\tadmin\t",
-        "github-auth\troot\t",
         "nix\troot\txz-utils",
     ]
     by_name = {s.name: s for s in workspace}
@@ -1923,27 +1922,24 @@ def test_the_vim_module_declares_the_plugin_set_and_reads_its_own_flag():
     assert "source ~/.vimrc" in text
 
 
-def test_github_auth_is_a_root_box_mod_writing_etc_gitconfig(isolated_mods):
-    # The GitHub credential helper is box-wide state, so it belongs to the box
-    # playbook: one root-written /etc/gitconfig line, correct for every account
-    # because the helper answers from the CALLING account's own GITHUB_TOKEN.
-    #
-    # That location is also the regression guard. `dotfiles` copies configenv's
-    # own gitconfig over ~/.gitconfig, so a helper written into a home directory
-    # is erased before repo-bootstrap ever clones, and every private clone
-    # fails. Nothing reaches /etc, so the mod carries no ordering constraint.
-    assert "github-auth" in devbox.box_playbook()
-    assert "github-auth" not in devbox.WORKSPACE_BASE_MODS
-    spec = {s.name: s
-            for s in devbox.load_mod_specs(devbox.box_playbook(), None)}["github-auth"]
-    assert spec.runas == ["root"]
-    code = [line for line in spec.path.read_text().splitlines()
-            if not line.strip().startswith("#")]   # prose may discuss ~/.gitconfig
-    assert any("/etc/gitconfig" in line for line in code)
-    assert not any("$HOME" in line or "~/" in line for line in code)
-    # `gh auth setup-git` is the specific way back into a home directory: it
-    # writes the helper into ~/.gitconfig, naming no path this test could see.
-    assert not any("setup-git" in line for line in code)
+def test_github_auth_is_a_home_manager_module_now(isolated_mods):
+    # Moved off /etc/gitconfig (box-wide, root) onto ~/.config/git/config (per
+    # account, agent-scoped): `dotfiles`/configenv's setup.sh only ever
+    # overwrites ~/.gitconfig, never the XDG global config, so this file needs
+    # no privileged workaround to survive a reconverge.
+    assert "github-auth" not in devbox.BOX_BASE_MODS
+    assert "github-auth" not in devbox.box_playbook()
+    assert "github-auth" in devbox.WORKSPACE_BASE_MODS
+    assert "github-auth" in devbox.nix_module_names()
+    assert devbox.find_mod_script("github-auth", None) is None
+    assert "github-auth" in devbox.resolve_playbook(
+        devbox.workspace_playbook(_workspace()), None).modules
+    text = (devbox.NIX_MODULES_DIR / "github-auth.nix").read_text()
+    assert "config.devbox.mods.github-auth.enable" in text
+    assert ".config/git/config" in text
+    assert "auth git-credential" in text
+    code = [line for line in text.splitlines() if not line.strip().startswith("#")]
+    assert not any("/etc/gitconfig" in line for line in code)
 
 
 def test_nix_is_a_root_box_mod_that_trusts_only_the_privileged_account(isolated_mods):
@@ -1967,16 +1963,19 @@ def test_nix_is_a_root_box_mod_that_trusts_only_the_privileged_account(isolated_
     assert "experimental-features = nix-command flakes" in text
 
 
-def test_repo_bootstrap_gets_github_auth_from_the_box_playbook(isolated_mods):
-    # A private `jj git clone` still depends on github-auth; the dependency now
-    # crosses playbooks. The box playbook runs first, so it is satisfied - and
-    # `requires` keeps saying so rather than the fact going undocumented.
+def test_repo_bootstrap_still_requires_github_auth_now_a_module(isolated_mods):
+    # A private `jj git clone` still depends on github-auth. It is a module now,
+    # not a step in the run, so it satisfies the dependency wherever it sits -
+    # the generation carrying it is switched by `home-manager`, first in the
+    # base playbook - and `requires` keeps saying so rather than the fact going
+    # undocumented.
     workspace = _workspace(mode="clone", dir="r", url="https://x/y")
-    specs = {s.name: s for s in devbox.resolve_playbook(
-        devbox.workspace_playbook(workspace), None).specs}
+    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace), None)
+    specs = {s.name: s for s in playbook.specs}
     assert "github-auth" in specs["repo-bootstrap"].requires
     assert "github-auth" not in specs
-    devbox.validate_playbooks(workspace)   # must not die on the absent dependency
+    assert "github-auth" in playbook.modules
+    devbox.validate_playbooks(workspace)   # must not die on the module dependency
 
 
 def test_render_env_file_shell_quotes_values():

@@ -114,10 +114,7 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # privileged account, which is the box's debugging entry point
 # (`devbox ssh --admin`). That editor is the apt `vim` the init script
 # installs: `nvim` comes from an attachment's home-manager generation, so it
-# lives in that agent's profile and nowhere else. `github-auth` is here rather
-# than in the workspace playbook because it writes /etc/gitconfig, which every
-# account on the box then shares: the line it writes names a credential helper,
-# and the helper answers from the calling account's own GITHUB_TOKEN. Fixed and
+# lives in that agent's profile and nowhere else. Fixed and
 # built-in: there is no box config file, so a box grows beyond this only when an
 # attached workspace contributes a `runas = ["root"]` mod.
 # `nix` is box-scoped for the same reason: /nix and the nix-daemon are one
@@ -127,8 +124,7 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # generation, so its plugins are fetched imperatively, from the ~/.vimrc
 # `dotfiles` writes. An agent's vim is the flake's module of that name, which is
 # why the two halves are named apart - one name resolves to one implementation.
-BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim-plug", "github-auth",
-                 "nix")
+BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim-plug", "nix")
 
 # The workspace playbook: what one attachment needs inside its own account.
 # Ordering constraints are encoded here: jj must precede repo-bootstrap (which
@@ -136,11 +132,15 @@ BOX_BASE_MODS = ("dotfiles-packages", "dotfiles", "vim-plug", "github-auth",
 # `runas = ["admin", "agent"]`, and each scope runs only its own half. A
 # workspace's `mods` are appended after this.
 # `home-manager` runs first: it is the declarative half of the account, and a
-# bash mod after it can use what the generation put on the PATH. `vim` is a name
-# that half provides: there is no mods/vim.sh, so it resolves to the flake's
-# nix/modules/vim.nix (see resolve_playbook).
-WORKSPACE_BASE_MODS = ("home-manager", "jj", "dotfiles", "vim", "neovim",
-                       "claude-code", "cargo-binstall", "repo-bootstrap")
+# bash mod after it can use what the generation put on the PATH. `vim` and
+# `github-auth` are names that half provides: there is no mods/vim.sh or
+# mods/github-auth.sh, so they resolve to the flake's nix/modules/vim.nix and
+# nix/modules/github-auth.nix (see resolve_playbook). `github-auth` lives at
+# ~/.config/git/config rather than ~/.gitconfig - which `dotfiles`/configenv
+# overwrites - so it needs no root and no box-wide /etc/gitconfig any more.
+WORKSPACE_BASE_MODS = ("home-manager", "github-auth", "jj", "dotfiles", "vim",
+                       "neovim", "claude-code", "cargo-binstall",
+                       "repo-bootstrap")
 
 # Which playbook a provisioning run is executing. The scope decides which
 # `runas` targets of each mod run (see scoped_runas); it is resolved entirely

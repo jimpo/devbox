@@ -31,9 +31,7 @@ precedence — now keyed on the marker's own mods directory — the `# /// mod`
 metadata block — `requires`/`runas`/`packages`, plus
 its rejection of unknown keys, bad values, duplicate and mislabeled fences — the
 two playbooks and `scoped_runas`'s narrowing of each mod's targets (including
-`github-auth`'s box scope and its `/etc/gitconfig` target — what keeps the
-credential helper out of the `~/.gitconfig` that `dotfiles` overwrites — and
-`repo-bootstrap` requiring it across the playbook boundary, and `nix`'s box
+`nix`'s box
 scope + the `trusted-users` line that names the privileged account and never an
 agent, and `home-manager`'s agent scope + its `requires = ["nix"]` across that
 same boundary, and the vim split — `vim` resolving to the flake's module with no
@@ -68,7 +66,13 @@ any built-in's `packages`, its `home.activation` entry merging
 with its own flag, neither retired — whose `Authorization` header carries the
 literal `''${GITHUB_TOKEN}`/`''${LINEAR_API_KEY}`: nix's escape for an
 antiquotation, asserted present in the module and unexpanded in the payload file
-the box receives, with the `[env]` value itself nowhere in `nix/`),
+the box receives, with the `[env]` value itself nowhere in `nix/`), the
+**converted `github-auth`** (`modules/github-auth.nix`, agent-scoped now
+rather than a root box mod: it claims `~/.config/git/config` — never
+`/etc/gitconfig` — with a `home.file`, `dotfiles`/configenv's setup.sh never
+touching that path being what removes the ordering constraint the box-mod
+version needed, and `repo-bootstrap` still requiring it, now satisfied as a
+module rather than across the box/workspace boundary),
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
 (`_refresh_ssh_aliases`: one stanza per file, the collapse rule, per-box
@@ -194,6 +198,13 @@ the generation), `:scriptnames` as the agent lists the store's vimrc and the
 account's own `~/.vimrc`, and `:colorscheme` there answers base16-chalk — that
 last one is what proves the store's plugins loaded before the account's vimrc
 ran, since configenv's file sets it while being sourced.
+
+For `github-auth`, on that same box: as the agent, `git config
+credential.https://github.com.helper` (or `cat ~/.config/git/config`) names
+`gh auth git-credential`, and with a `GITHUB_TOKEN` in `[env]`, `git clone
+https://github.com/<private-repo>` succeeds with no prompt; as the privileged
+user, the same `git config` shows nothing, and the same clone prompts for
+credentials - it has no generation to carry the module.
 
 For Claude Code, on that same box: `command -v claude` as the agent answers
 `~/.nix-profile/bin/claude` (not `~/.local/bin/claude`, which an account
