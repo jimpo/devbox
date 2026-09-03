@@ -31,7 +31,8 @@
 # before it exists simply has no creds.
 { config, ... }:
 {
-  # Where the bash mods install their binaries (jj, claude, cargo-binstall).
+  # Where the bash mods install their binaries (claude, codex), and where the
+  # codex installer looks before deciding whether to edit a shell profile.
   # home.sessionPath lands in hm-session-vars.sh, which the file below sources -
   # as does any module's home.sessionVariables.
   home.sessionPath = [ "$HOME/.local/bin" ];

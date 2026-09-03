@@ -1476,34 +1476,6 @@ def test_uv_and_cargo_binstall_are_packages_in_the_generation(isolated_mods,
         (devbox.BUILTIN_MODS_DIR / "cargo-binstall.nix").read_text()
 
 
-def test_codex_is_an_opt_in_module_and_ships_switched_off(isolated_mods,
-                                                          tmp_path):
-    # The OpenAI Codex CLI is a package module, and a workspace's own to ask
-    # for: Claude Code is the base playbook's agent CLI, so `codex` is named in
-    # `mods` or it is not in the generation at all. Every shipped module still
-    # gets a flag either way - a missing attribute is an evaluation error in
-    # nix, not a false.
-    assert "codex" in devbox.nix_module_names()
-    assert devbox.find_mod_script("codex", None) is None
-    assert "codex" not in devbox.WORKSPACE_BASE_MODS
-    marker_dir = tmp_path / "ws"
-    marker_dir.mkdir()
-    plain = _workspace(marker_dir=marker_dir)
-    asked = _workspace(marker_dir=marker_dir, mods=["codex"])
-    assert "codex" not in devbox.resolve_playbook(
-        devbox.workspace_playbook(plain), plain.marker.mods_dir).modules
-    assert "codex" in devbox.resolve_playbook(
-        devbox.workspace_playbook(asked), asked.marker.mods_dir).modules
-    assert "codex.enable = false;" in devbox.render_workspace_nix(
-        _nix_context(), {"codex": False})
-    # ~/.codex holds codex's own auth.json, history and sessions, and its
-    # config.toml is the account's file - a module that claimed any of them
-    # would make it a read-only store symlink.
-    module = (devbox.BUILTIN_MODS_DIR / "codex.nix").read_text()
-    assert "home.packages = [ pkgs.codex ];" in module
-    assert "home.file" not in module
-
-
 def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():
     # The CLI that runs the switch and the flake it switches to are one
     # version, so a bump cannot half-land.
@@ -1704,96 +1676,126 @@ def test_the_retired_cloudflared_tunnel_mod_says_where_it_went(isolated_mods,
     assert "`cloudflared`" in err
 
 
-# ---- claude-code and the MCP mods: declarative package, imperative config ----
-def _module_source(name):
-    return (devbox.BUILTIN_MODS_DIR / f"{name}.nix").read_text()
+# ---- the agent CLIs: installs that keep themselves current ------------------
+def _script_source(name):
+    return (devbox.BUILTIN_MODS_DIR / f"{name}.sh").read_text()
 
 
-def _module_code(name):
-    """A module's expressions, without the prose comments that discuss them -
-    so an assertion about what the nix says is not answered by a comment."""
-    return "\n".join(line for line in _module_source(name).splitlines()
+def _script_body(name):
+    """A mod's commands, without the prose comments that discuss them - so an
+    assertion about what the script runs is not answered by a comment (the
+    `# /// mod` metadata block goes with them; parse_mod_metadata reads that)."""
+    return "\n".join(line for line in _script_source(name).splitlines()
                      if not line.lstrip().startswith("#"))
 
 
-def test_claude_code_is_the_generations_and_installs_no_apt_package(isolated_mods,
-                                                                    pubkey):
-    # A base mod, so the name stays in WORKSPACE_BASE_MODS and resolves to the
-    # module: nothing curls the installer, and the `packages = ["jq"]` the merge
-    # needs is gone with it - the last built-in that asked apt for jq.
+def _metadata(name):
+    path = devbox.BUILTIN_MODS_DIR / f"{name}.sh"
+    return devbox.parse_mod_metadata(path.read_text(), path)
+
+
+def test_claude_code_installs_the_binary_that_updates_itself(isolated_mods, pubkey):
+    # A base mod, and a script rather than a module, for the one property a
+    # store path cannot have: the native installer puts ~/.local/bin/claude in
+    # the agent's own home, where the running binary replaces itself as new
+    # versions ship, between reconverges. Nothing in the generation provides a
+    # `claude`, so PATH order has nothing to shadow.
     assert "claude-code" in devbox.WORKSPACE_BASE_MODS
-    assert "claude-code" in devbox.nix_module_names()
-    assert devbox.find_mod_script("claude-code", None) is None
-    module = _module_code("claude-code")
-    assert "pkgs.claude-code" in module
-    assert "install.sh" not in module and "curl" not in module
-    for path in devbox.BUILTIN_MODS_DIR.glob("*.sh"):
-        assert "jq" not in devbox.parse_mod_metadata(
-            path.read_text(), path).get("packages", [])
+    assert "claude-code" not in devbox.nix_module_names()
+    assert devbox.find_mod_script("claude-code", None) is not None
+    body = _script_body("claude-code")
+    assert "curl -fsSL https://claude.ai/install.sh | bash" in body
+    # Nothing switches the auto-updater off, which is the whole point of the
+    # account owning the binary.
+    assert "DISABLE_AUTOUPDATER" not in _script_source("claude-code")
+    # The settings merge needs jq, which the driver apt-installs as the
+    # privileged user before this body runs.
+    assert _metadata("claude-code")["packages"] == ["jq"]
     payload = _payload_map(_workspace(), _global_config(pubkey))
-    assert "mods/claude-code.sh" not in payload
-    assert "nix/modules/claude-code.nix" in payload
-    assert "claude-code.enable = true;" in payload["nix/workspace.nix"].content
+    assert "mods/claude-code.sh" in payload
+    assert "nix/modules/claude-code.nix" not in payload
+    assert "claude-code" in [line.split("\t")[0] for line
+                             in payload["manifest"].content.splitlines()]
 
 
-def test_claude_code_merges_its_setting_instead_of_owning_the_file():
-    # Claude Code writes ~/.claude/settings.json itself, and home-manager owns a
-    # file by symlinking it read-only into the store - so the one setting devbox
-    # needs is merged into whatever the file already holds, by an activation
-    # step. `home.file` for that path would either break Claude's writes or have
-    # it replace the symlink, which the next activation refuses.
-    module = _module_code("claude-code")
-    assert "home.file" not in module
-    assert "programs.claude-code" not in module
-    assert 'lib.hm.dag.entryAfter [ "writeBoundary" ]' in module
-    assert "home.activation.devboxClaudeCode" in module
-    assert '.permissions.defaultMode = "bypassPermissions"' in module
-    assert ".claude/settings.json" in module
-    # One name, one implementation: the imperative half rides inside the module
-    # rather than under a second mod name.
-    assert "lib.mkIf config.devbox.mods.claude-code.enable" in module
+def test_claude_code_merges_its_setting_into_whatever_claude_wrote():
+    # Claude Code writes ~/.claude/settings.json itself - `/config` in a live
+    # session edits that file - so the one setting devbox needs is merged into
+    # what is already there rather than the file being written whole. That is
+    # what makes a reconverge leave a live session's edits alone.
+    body = _script_body("claude-code")
+    assert '.permissions.defaultMode = "bypassPermissions"' in body
+    assert "$HOME/.claude/settings.json" in body
+    assert "jq " in body
+
+
+def test_codex_is_an_opt_in_install_that_updates_itself(isolated_mods, pubkey,
+                                                        tmp_path):
+    # The OpenAI Codex CLI, and a workspace's own to ask for: Claude Code is the
+    # base playbook's agent CLI, so `codex` is named in `mods` or it is not
+    # installed at all.
+    assert "codex" not in devbox.WORKSPACE_BASE_MODS
+    assert "codex" not in devbox.box_playbook()
+    assert "codex" not in devbox.nix_module_names()
+    body = _script_body("codex")
+    # OpenAI's standalone installer, which is also what `codex update` re-runs
+    # for a standalone install - so the account can update itself in place.
+    assert "https://chatgpt.com/codex/install.sh" in body
+    assert "CODEX_NON_INTERACTIVE=1" in body
+    # The installer appends an `export PATH=...` block to a shell profile only
+    # when its install directory is absent from PATH. The agent's ~/.zshenv is a
+    # symlink into the read-only store, so the directory goes on PATH first.
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in body
+
+    marker_dir = tmp_path / "ws"
+    marker_dir.mkdir()
+    plain = _workspace(marker_dir=marker_dir)
+    asked = _workspace(marker_dir=marker_dir, mods=["codex"])
+    assert "codex" not in [s.name for s in devbox.resolve_playbook(
+        devbox.workspace_playbook(plain), plain.marker.mods_dir).specs]
+    assert "codex" in [s.name for s in devbox.resolve_playbook(
+        devbox.workspace_playbook(asked), asked.marker.mods_dir).specs]
+    payload = _payload_map(asked, _global_config(pubkey))
+    assert "mods/codex.sh" in payload
+    assert "codex" in [line.split("\t")[0] for line
+                       in payload["manifest"].content.splitlines()]
+    assert "mods/codex.sh" not in _payload_map(plain, _global_config(pubkey))
 
 
 @pytest.mark.parametrize("name,server,url", [
     ("claude-github-mcp", "github", "https://api.githubcopilot.com/mcp/"),
     ("claude-linear-mcp", "linear", "https://mcp.linear.app/mcp"),
 ])
-def test_the_mcp_mods_stay_two_opt_in_modules(isolated_mods, pubkey, tmp_path,
-                                              name, server, url):
-    # Two names, two modules, two flags - so a config that names one of them and
-    # not the other keeps working exactly as it did, and neither is retired.
-    assert name in devbox.nix_module_names()
-    assert devbox.find_mod_script(name, None) is None
+def test_the_mcp_mods_stay_two_opt_in_mods(isolated_mods, pubkey, tmp_path,
+                                           name, server, url):
+    # Two names, two scripts - so a config that names one of them and not the
+    # other keeps working exactly as it did, and neither is retired.
     assert name not in devbox.WORKSPACE_BASE_MODS
     assert name not in devbox.box_playbook()
     assert name not in devbox.provision.RETIRED_MODS
-    assert (devbox.BUILTIN_MODS_DIR / f"{name}.nix").is_file()
+    assert name not in devbox.nix_module_names()
+    assert (devbox.BUILTIN_MODS_DIR / f"{name}.sh").is_file()
+    # It registers the server with the agent's own `claude`, so claude-code has
+    # to have run first - which the base playbook does, ahead of any workspace
+    # mod appended after it.
+    assert _metadata(name)["requires"] == ["claude-code"]
 
     marker_dir = tmp_path / "ws"
     marker_dir.mkdir()
     workspace = _workspace(marker_dir=marker_dir, mods=[name])
-    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
-                                       workspace.marker.mods_dir)
-    assert name in playbook.modules
+    devbox.validate_playbooks(workspace)
     payload = _payload_map(workspace, _global_config(pubkey))
-    assert f"mods/{name}.sh" not in payload
-    assert f"{name}.enable = true;" in payload["nix/workspace.nix"].content
-    # The other one ships too, and off: a missing attribute is an evaluation
-    # error in nix, not a false.
+    assert f"mods/{name}.sh" in payload
     other = ("claude-linear-mcp" if name == "claude-github-mcp"
              else "claude-github-mcp")
-    assert f"nix/modules/{other}.nix" in payload
-    assert f"{other}.enable = false;" in payload["nix/workspace.nix"].content
+    assert f"mods/{other}.sh" not in payload
 
-    module = _module_code(name)
-    assert url in module
-    assert f"mcp add --scope user --transport http {server}" in module
-    # Registering an MCP server is `claude mcp add` writing ~/.claude.json, a
-    # file Claude Code rewrites constantly - so it is an activation step, not a
-    # home.file the store would own.
-    assert "home.file" not in module
-    assert 'lib.hm.dag.entryAfter [ "writeBoundary" ]' in module
-    assert f"lib.mkIf config.devbox.mods.{name}.enable" in module
+    body = _script_body(name)
+    assert url in body
+    assert f"mcp add --scope user --transport http {server}" in body
+    # `mcp add` on a name that is already registered is an error, and this runs
+    # on every reconverge.
+    assert f"mcp remove --scope user {server}" in body
 
 
 @pytest.mark.parametrize("name,var", [
@@ -1803,26 +1805,22 @@ def test_the_mcp_mods_stay_two_opt_in_modules(isolated_mods, pubkey, tmp_path,
 def test_the_mcp_header_reaches_the_box_unexpanded(isolated_mods, pubkey,
                                                    tmp_path, name, var):
     # The header is a LITERAL `${VAR}` that Claude Code resolves from the
-    # environment at call time. `''${` is nix's escape for it inside an indented
-    # string; a bare `${` would open an antiquotation, and the file would fail
-    # to evaluate rather than ship the two words. The shipped payload file is
-    # the module verbatim, so the escape has to be in the source.
-    module = _module_code(name)
-    assert f"Authorization: Bearer ''${{{var}}}" in module
-    assert re.search(r"(?<!'')\$\{" + var + r"\}", module) is None
+    # environment when it calls the server. Single quotes are what keep the mod's
+    # own shell from expanding it, so the two words reach `claude mcp add`.
+    body = _script_body(name)
+    assert f"'Authorization: Bearer ${{{var}}}'" in body
 
     marker_dir = tmp_path / "ws"
     marker_dir.mkdir()
     workspace = _workspace(marker_dir=marker_dir, mods=[name],
                            env={var: devbox.EnvVar("s3cret")})
     payload = _payload_map(workspace, _global_config(pubkey))
-    assert payload[f"nix/modules/{name}.nix"].content == _module_source(name)
-    assert f"''${{{var}}}" in payload[f"nix/modules/{name}.nix"].content
-    # /nix/store is world-readable and shared by every attachment, so the VALUE
-    # is nowhere in the flake - only the name of the variable holding it.
+    assert payload[f"mods/{name}.sh"].content == _script_source(name)
+    # The value is in no payload file at all: creds travel separately, into the
+    # 0600 ~/.config/devbox/env of the account that owns them, which is what
+    # keeps the payload safe to make agent-readable.
     for pf in payload.values():
-        if pf.path.startswith("nix/"):
-            assert "s3cret" not in pf.content
+        assert "s3cret" not in pf.content
 
 
 # ---- resolve_env (global + workspace [env], workspace overrides per-key) --------

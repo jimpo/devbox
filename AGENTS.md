@@ -66,19 +66,20 @@ naming it in `EnvironmentFile=` — systemd's parser reads bare `KEY=value` and
 drops devbox's `export KEY=…` lines — and it uses home-manager's capitalised
 `Unit`/`Service`/`Install` sections; plus `RETIRED_MODS`, which turns a config
 still naming the folded-in `cloudflared-tunnel` into an error saying where it
-went), the **converted `claude-code` and the two MCP mods** (the base mod
-resolving to `modules/claude-code.nix` with no script and no apt `jq` left in
-any built-in's `packages`, its `home.activation` entry merging
-`permissions.defaultMode` rather than claiming `~/.claude/settings.json` with a
-`home.file`, and the MCP pair staying **two** opt-in names — each shipped, each
-with its own flag, neither retired — whose `Authorization` header carries the
-literal `''${GITHUB_TOKEN}`/`''${LINEAR_API_KEY}`: nix's escape for an
-antiquotation, asserted present in the module and unexpanded in the payload file
-the box receives, with the `[env]` value itself nowhere in `nix/`), **`codex`**
-(the OpenAI Codex CLI as an opt-in package module: shipped and discovered like
-any other, absent from `WORKSPACE_BASE_MODS`, resolving to the generation only
-for a workspace that names it, flagged `false` for one that does not, and
-claiming no `home.file` — `~/.codex` is codex's own), the
+went), the **agent CLIs, which install themselves rather than being packaged**
+(`claude-code` a base mod with a `<name>.sh` and no module of that name, running
+the native installer with nothing switching `DISABLE_AUTOUPDATER` on, carrying
+the apt `jq` its settings merge needs, and merging `permissions.defaultMode`
+into whatever `~/.claude/settings.json` already holds; **`codex`** the same
+shape as an opt-in — OpenAI's standalone installer, the one `codex update`
+re-runs, with `CODEX_NON_INTERACTIVE=1` and the `~/.local/bin` PATH export that
+keeps the installer out of the generation-owned `~/.zshenv`, shipped and given
+a manifest line only for a workspace that names it; and the MCP pair staying
+**two** opt-in names, neither retired, each `requires = ["claude-code"]`,
+each removing its server before adding it, whose `Authorization` header carries
+the literal single-quoted `${GITHUB_TOKEN}`/`${LINEAR_API_KEY}` — asserted
+present in the script and unexpanded in the payload file the box receives, with
+the `[env]` value itself in NO payload file), the
 **converted `github-auth`** (`modules/github-auth.nix`, agent-scoped now
 rather than a root box mod: it claims `~/.config/git/config` — never
 `/etc/gitconfig` — with a `home.file`, `dotfiles`/configenv's setup.sh never
@@ -261,26 +262,27 @@ user, the same `git config` shows nothing, and the same clone prompts for
 credentials - it has no generation to carry the module.
 
 For Claude Code, on that same box: `command -v claude` as the agent answers
-`~/.nix-profile/bin/claude` (not `~/.local/bin/claude`, which an account
-attached by an older devbox still holds), `claude --version` matches the
-`manifest.json` version at the nixpkgs pin, and `claude doctor` reports no
-auto-updater — the package's wrapper `--set`s `DISABLE_AUTOUPDATER=1`, so a
-store binary cannot try to replace itself. `jq -r .permissions.defaultMode
-~/.claude/settings.json` is `bypassPermissions`, and that file is a REAL file,
-not a store symlink: `/config` in a live session still writes it, and a second
-`devbox sync --mods=home-manager` neither fails nor reverts what Claude wrote.
-Add a `mods = ["claude-github-mcp", "claude-linear-mcp"]` workspace with the two
-tokens in `[env]`: `claude mcp list` shows both connected, and
-`jq '.mcpServers' ~/.claude.json` holds the literal `${GITHUB_TOKEN}` /
-`${LINEAR_API_KEY}` — the header text, never the value, which is the whole point
-of the nix escape.
+`~/.local/bin/claude`, and `claude doctor` reports the auto-updater ON with a
+writable install directory — the account owns the binary, which is the whole
+reason this is a script mod. `jq -r .permissions.defaultMode
+~/.claude/settings.json` is `bypassPermissions`, and a second `devbox sync
+--mods=claude-code` neither fails nor reverts what `/config` wrote in a live
+session. The one that only a real box can show is the update itself: leave a box
+up across a Claude Code release and the agent's `claude --version` moves without
+any devbox command being run. Add a `mods = ["claude-github-mcp",
+"claude-linear-mcp"]` workspace with the two tokens in `[env]`: `claude mcp
+list` shows both connected, and `jq '.mcpServers' ~/.claude.json` holds the
+literal `${GITHUB_TOKEN}` / `${LINEAR_API_KEY}` — the header text, never the
+value.
 
 For `codex`, add it to a workspace's `mods`: as that agent, `command -v codex`
-answers `~/.nix-profile/bin/codex`, `codex --version` matches the package
-version at the nixpkgs pin, and `codex exec 'say hi'` runs — with an
-`OPENAI_API_KEY` in `[env]` it needs no login, and `ls ~/.codex` shows only
-what codex itself wrote (no store symlink), which is what says a second
-`devbox sync --mods=home-manager` cannot disturb its config or its auth.
+answers `~/.local/bin/codex` and it is a symlink into a release directory under
+`~/.codex`; `codex --version` matches the log line the mod printed, and `codex
+exec 'say hi'` runs (with an `OPENAI_API_KEY` in `[env]` it needs no login).
+`codex update` is the check that matters, and it needs the real install: it
+reports a standalone install and re-runs the installer rather than telling you
+to use a package manager, and `~/.zshenv` is still the generation's store
+symlink afterwards, with no `Codex installer` PATH block appended anywhere.
 
 A workspace with `mods = ["cloudflared"]` is the module to exercise by hand,
 since only a box runs the real binary: with a `CLOUDFLARE_TOKEN` in `[env]`,

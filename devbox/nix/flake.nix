@@ -59,6 +59,15 @@
 # Then run `devbox nix check` before you commit it. Nothing else on a host
 # evaluates a module.
 #
+# THE OTHER DIRECTION IS THE SAME MOVE MIRRORED - write `<name>.sh`, delete
+# `<name>.nix`, leave the playbook tuples alone - and `claude-code` and `codex`
+# are deliberately on that side of the line. Both install a binary into
+# ~/.local/bin that replaces ITSELF as new versions ship, which a read-only
+# store path cannot do; a package would pin each to the version this file's
+# nixpkgs rev happens to name. Their MCP companions (`claude-github-mcp`,
+# `claude-linear-mcp`) are scripts for a plainer reason: they drive the
+# `claude` those installers put in the account's own home.
+#
 # THIS FILE NEVER LISTS MODULES BY NAME. `modules` below is every `.nix` file
 # `readDir` finds directly under `./modules`, which exists only in an assembled
 # payload - devbox writes one file there per name it resolves (built-in,

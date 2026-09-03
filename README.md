@@ -779,32 +779,31 @@ git clone`; a module satisfies that wherever it sits, since it isn't a step in
 the run — the generation carrying it is switched by `home-manager`, first in
 the base playbook.
 
-**Claude Code shows the other shape**: one name whose imperative half lives
-*inside* the module. `devbox/mods/claude-code.nix` puts `pkgs.claude-code` — the
-same native binary the `claude.ai` installer fetches, at the version the nixpkgs
-pin records, with its auto-updater forced off because a store path is read-only
-— into the profile, and does the rest in a `home.activation` entry. That half
-has to stay imperative: Claude Code writes its own `~/.claude/settings.json` and
-`~/.claude.json`, and a file home-manager owns is a read-only symlink into the
-store, so declaring either one would break Claude's writes and then the *next*
-activation. The mod therefore *merges* the one setting devbox needs
-(`permissions.defaultMode`) into whatever the file already holds. The two opt-in
-MCP mods, `claude-github-mcp` and `claude-linear-mcp`, are the same shape and
-stay two separate names: each registers its server with `claude mcp add`, and
-the `Authorization` header they pass is the literal, unexpanded
-`${GITHUB_TOKEN}` / `${LINEAR_API_KEY}` that Claude resolves from the
-environment at call time — the value comes from the 0600
-`~/.config/devbox/env`, never from the world-readable store.
+**The agent CLIs stay scripts, for the one property a package cannot have:
+they update themselves.** `claude-code` (base) runs `claude.ai/install.sh`,
+which puts `~/.local/bin/claude` in the agent's own home with its auto-updater
+on, so a box that stays up follows Claude Code's releases between reconverges.
+`codex` (opt-in, `mods = ["codex"]`) runs OpenAI's standalone installer — the
+same command `codex update` re-runs, since codex reads how it was installed —
+and lands `~/.local/bin/codex` as a symlink into a release directory under
+`~/.codex`. A store path is read-only and carries whatever version its nixpkgs
+pin names, which is the wrong trade for a tool that ships most days. Nothing in
+the generation provides either binary, so the PATH order (`~/.nix-profile/bin`
+first) has nothing to shadow, and `devbox sync --mods=claude-code` re-runs the
+install.
 
-**`codex`, the OpenAI Codex CLI, is the plain shape of the same idea** and an
-opt-in: `mods = ["codex"]` puts `pkgs.codex` in the generation, and that is the
-whole module. Nothing declares `~/.codex` — codex writes its own `auth.json`,
-history and sessions there, and `config.toml` is the account's file, so
-approvals and its bubblewrap sandbox stay codex's defaults (edit that file on
-the box, or pass `--dangerously-bypass-approvals-and-sandbox`). An
-`OPENAI_API_KEY` in `[env]` reaches it the way every credential does, through
-the 0600 `~/.config/devbox/env` that `~/.zshenv` sources; `codex login` is the
-other route, and writes into the account's home.
+Each mod also writes the account-level configuration devbox wants, *merged*
+rather than owned: `claude-code` sets `permissions.defaultMode` inside whatever
+`~/.claude/settings.json` already holds (`/config` in a live session writes that
+file too), and leaves `~/.codex` entirely to codex, so approvals and its
+bubblewrap sandbox stay codex's defaults — edit `~/.codex/config.toml` on the
+box, or pass `--dangerously-bypass-approvals-and-sandbox`. The two opt-in MCP
+mods, `claude-github-mcp` and `claude-linear-mcp`, stay two separate names, each
+registering its server with `claude mcp add`; the `Authorization` header they
+pass is the literal, unexpanded `${GITHUB_TOKEN}` / `${LINEAR_API_KEY}` that
+Claude resolves from the environment at call time. Credentials reach both CLIs
+the way every credential does — `OPENAI_API_KEY` included — through the 0600
+`~/.config/devbox/env` that `~/.zshenv` sources.
 
 **Resolution** — each mod name resolves to a `<name>.sh` script by precedence
 **workspace > global > built-in**, so a workspace can shadow a built-in by name:
