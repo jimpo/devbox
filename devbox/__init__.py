@@ -25,13 +25,15 @@ from .cli import main  # noqa: F401
 from .initscript import (INIT_SCRIPT_PATH, render_init_script,  # noqa: F401
                          substitute_tokens)
 from .provision import (BOX_BASE_MODS, BUILTIN_MODS_DIR, DEFAULT_RUNAS,  # noqa: F401
-                        DRIVER_PATH, GLOBAL_MODS_DIR, MOD_METADATA_KEYS,
+                        DRIVER_PATH, GLOBAL_MODS_DIR, GLOBAL_NIX_MODULES_DIR,
+                        MOD_METADATA_KEYS,
                         MOD_METADATA_TYPE, NIX_DIR, NIX_MODULES_DIR,
                         NIX_PAYLOAD_DIR, NIX_WORKSPACE_FILE, RUNAS_TARGETS,
                         SCOPE_BOX, SCOPE_WORKSPACE, WORKSPACE_BASE_MODS,
                         ModSpec, Playbook, PayloadFile, box_playbook,
                         build_box_payload, build_payload, build_tarball,
-                        env_for_owner, find_mod_script, load_mod_specs,
+                        env_for_owner, find_mod_script, find_nix_module,
+                        load_mod_specs,
                         nix_attr_name, nix_module_names, nix_payload_files,
                         nix_string, parse_mod_metadata, provision_log,
                         render_env_file, render_manifest, render_repos,
@@ -43,7 +45,8 @@ from .config import (ANCHOR_HOME, ANCHOR_REPO, ANCHOR_WORKSPACE,  # noqa: F401
                      DEFAULT_CACHE_DIR, DEFAULT_DISK_GB, DEFAULT_LIBVIRT_URI,
                      DEFAULT_LIGHTSAIL_BLUEPRINT, DEFAULT_LIGHTSAIL_BUNDLE,
                      DEFAULT_MEMORY_MIB, DEFAULT_NETWORK, DEFAULT_PROVIDER,
-                     DEFAULT_VCPUS, ENV_OWNERS, MODS_SUBDIR, REPO_MARKER_CONFIG,
+                     DEFAULT_VCPUS, ENV_OWNERS, MODS_SUBDIR, NIX_MODULES_SUBDIR,
+                     REPO_MARKER_CONFIG,
                      REPO_MARKER_DIR, REPO_MODES, RESERVED_USERNAMES,
                      USERNAME_RE, WORKSPACE_MARKER_FILE,
                      Ec2BoxConfig, Ec2Config, EnvVar, GlobalConfig,

@@ -62,13 +62,19 @@ it through DEVBOX_PAYLOAD_DIR, which the driver exports into each mod.
 flake (`nix/`, from NIX_DIR), which `mods/home-manager.sh` switches the agent
 account to. A playbook name resolves to ONE of the two halves (see
 `resolve_playbook`): a `<name>.sh` in any mods directory, or - only when no
-directory has one - the flake's `modules/<name>.nix`. So converting a mod is a
-one-file change either way, and a workspace that ships its own `<name>.sh` still
-gets its own, converted or not. A mod is a bash script or a module, never both;
-`nix/workspace.nix` is rendered per attachment (see render_workspace_nix) the
-way `manifest` and `repos` are, and carries no creds - /nix/store is
-world-readable and shared by every attachment on the box. The flake is
-agent-only: a box run ships none of it, and the privileged account stays on apt.
+directory has one - a `<name>.nix` in any nix-modules directory, same
+**workspace > global > built-in** precedence as the bash side (see
+find_nix_module and config.Marker.nix_modules_dir - `nix/modules/` sits beside
+`mods/` at every level: `<workspace>/nix/modules/`,
+`~/.config/devbox/nix/modules/`, and devbox's own `nix/modules/`). So
+converting a mod, or writing a workspace's own module from scratch, is a
+one-file change either way, and a workspace that ships its own `<name>.sh`
+still gets its own, converted or not. A mod is a bash script or a module,
+never both; `nix/workspace.nix` is rendered per attachment (see
+render_workspace_nix) the way `manifest` and `repos` are, and carries no
+creds - /nix/store is world-readable and shared by every attachment on the
+box. The flake is agent-only: a box run ships none of it, and the privileged
+account stays on apt.
 """
 from __future__ import annotations
 
@@ -94,11 +100,14 @@ DRIVER_PATH = Path(__file__).parent / "provision-driver.sh"
 # `modules/<mod>.nix` per converted mod. Every `.nix` file under it travels in
 # the payload verbatim, so adding a module needs no change here.
 NIX_DIR = Path(__file__).parent / "nix"
-# One `<name>.nix` per converted mod. This directory is a mod source in its own
-# right: a playbook name with no `<name>.sh` anywhere resolves to the module of
-# that name, which is what makes converting a mod a one-file change (see
-# resolve_playbook). Resolved at call time through nix_module_names, so tests
-# can monkeypatch it.
+# One `<name>.nix` per converted mod - devbox's own, built-in nix-module
+# source, lowest of the three precedence levels (workspace > global >
+# built-in - see find_nix_module). A playbook name with no `<name>.sh`
+# anywhere resolves to the module of that name from whichever of the three
+# has one, which is what makes converting a mod (or writing a workspace's own
+# module from scratch) a one-file change (see resolve_playbook). Resolved at
+# call time through nix_module_names/find_nix_module, so tests can
+# monkeypatch it.
 NIX_MODULES_DIR = NIX_DIR / "modules"
 # Where it lands in the payload, next to `mods/`. The home-manager mod names it
 # through DEVBOX_PAYLOAD_DIR.
@@ -108,6 +117,9 @@ NIX_PAYLOAD_DIR = "nix"
 NIX_WORKSPACE_FILE = "workspace.nix"
 # Global user mods, shared across a user's workspaces.
 GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
+# Global user nix modules, the nix-side sibling of GLOBAL_MODS_DIR - same
+# shape as a workspace's own nix_modules_dir (config.Marker), one level up.
+GLOBAL_NIX_MODULES_DIR = GLOBAL_CONFIG_PATH.parent / "nix" / "modules"
 
 # The box playbook: what a machine needs once, regardless of who lives on it -
 # the apt half of the dotfiles setup (`dotfiles-packages`, required by the
@@ -232,13 +244,47 @@ def workspace_playbook(workspace: WorkspaceConfig) -> list:
     return [*WORKSPACE_BASE_MODS, *workspace.mods]
 
 
-def nix_module_names(modules_dir: Optional[Path] = None) -> list:
-    """The mods the flake provides, one per `<name>.nix` file, sorted. The
-    directory defaults to the module constant, resolved at call time."""
-    modules_dir = modules_dir or NIX_MODULES_DIR
-    if not modules_dir.is_dir():
-        return []
-    return sorted(p.stem for p in modules_dir.glob("*.nix"))
+def nix_module_names(nix_modules_dir: Optional[Path] = None,
+                     global_nix_modules_dir: Optional[Path] = None,
+                     builtin_modules_dir: Optional[Path] = None) -> list:
+    """Every mod name any nix source - a workspace's own nix_modules_dir (see
+    config.Marker), the global GLOBAL_NIX_MODULES_DIR, or the built-in flake's
+    NIX_MODULES_DIR - provides a `<name>.nix` for, sorted and de-duplicated.
+    Mirrors find_mod_script's three sources; which FILE actually answers to a
+    given name (workspace > global > built-in) is find_nix_module's job, not
+    this one - a name can appear here because only the built-in ships it, even
+    though a workspace's own file of the same name is what will actually be
+    used. The global/built-in dirs default to the module constants, resolved
+    at call time (so tests can monkeypatch them); `nix_modules_dir` is None
+    for a box-scope run, which has no workspace and no flake at all."""
+    global_nix_modules_dir = global_nix_modules_dir or GLOBAL_NIX_MODULES_DIR
+    builtin_modules_dir = builtin_modules_dir or NIX_MODULES_DIR
+    names = set()
+    for base in (nix_modules_dir, global_nix_modules_dir, builtin_modules_dir):
+        if base is not None and base.is_dir():
+            names.update(p.stem for p in base.glob("*.nix"))
+    return sorted(names)
+
+
+def find_nix_module(name: str, nix_modules_dir: Optional[Path],
+                    global_nix_modules_dir: Optional[Path] = None,
+                    builtin_modules_dir: Optional[Path] = None) -> Optional[Path]:
+    """Where a mod's nix module is, by precedence workspace > global >
+    built-in - the same precedence find_mod_script gives bash mods, so a
+    workspace (or a user's global config) can ship its own module, or shadow a
+    built-in one, exactly the way it can ship its own `<name>.sh`. `None` if no
+    directory has one. The global / built-in dirs default to the module
+    constants, resolved at call time; `nix_modules_dir` is None for a box-scope
+    run, which has no workspace to shadow from."""
+    global_nix_modules_dir = global_nix_modules_dir or GLOBAL_NIX_MODULES_DIR
+    builtin_modules_dir = builtin_modules_dir or NIX_MODULES_DIR
+    for base in (nix_modules_dir, global_nix_modules_dir, builtin_modules_dir):
+        if base is None:
+            continue
+        candidate = base / f"{name}.nix"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def find_mod_script(name: str, mods_dir: Optional[Path],
@@ -276,14 +322,19 @@ RETIRED_MODS = {
 def resolve_mod(name: str, mods_dir: Optional[Path],
                 global_mods_dir: Optional[Path] = None,
                 builtin_mods_dir: Optional[Path] = None,
-                modules_dir: Optional[Path] = None) -> Path:
+                nix_modules: bool = False,
+                nix_modules_dir: Optional[Path] = None,
+                global_nix_modules_dir: Optional[Path] = None,
+                builtin_modules_dir: Optional[Path] = None) -> Path:
     """Locate a mod's script by name (see find_mod_script), or die naming every
-    place a `<name>.sh` could have been.
+    place a `<name>.sh` (or, with `nix_modules=True`, a `<name>.nix`) could
+    have been.
 
-    `modules_dir` widens that message to say that a nix module answers to a name
-    too - passed for a workspace-scope run, where one can, and left out for a
-    box, where the flake plays no part. A name a module DOES answer to never
-    reaches here: resolve_playbook takes it out of the script half first."""
+    `nix_modules=True` widens that message to say a nix module answers to a
+    name too - passed for a workspace-scope run, where one can, and left False
+    for a box, where the flake plays no part. A name a module DOES answer to
+    never reaches here: resolve_playbook takes it out of the script half
+    first."""
     global_mods_dir = global_mods_dir or GLOBAL_MODS_DIR
     builtin_mods_dir = builtin_mods_dir or BUILTIN_MODS_DIR
     path = find_mod_script(name, mods_dir, global_mods_dir, builtin_mods_dir)
@@ -296,10 +347,14 @@ def resolve_mod(name: str, mods_dir: Optional[Path],
     where = [f"{d}/{name}.sh" for d in (mods_dir, global_mods_dir, builtin_mods_dir)
              if d is not None]
     hint = f"Add {name}.sh to one of them"
-    if modules_dir is not None:
-        where.append(f"{modules_dir}/{name}.nix")
+    if nix_modules:
+        global_nix_modules_dir = global_nix_modules_dir or GLOBAL_NIX_MODULES_DIR
+        builtin_modules_dir = builtin_modules_dir or NIX_MODULES_DIR
+        where += [f"{d}/{name}.nix"
+                 for d in (nix_modules_dir, global_nix_modules_dir, builtin_modules_dir)
+                 if d is not None]
         hint = (f"Add {name}.sh to one of the mods directories, or "
-                f"{name}.nix to the flake's modules directory")
+                f"{name}.nix to one of the nix/modules directories")
     die(f"mod '{name}' not found: looked in {', '.join(where)}. "
         f"{hint}, or fix the `mods` list in the config.")
 
@@ -424,16 +479,18 @@ class ModSpec:
 
 
 def load_mod_specs(names: list, mods_dir: Optional[Path],
-                   modules_dir: Optional[Path] = None) -> list:
+                   nix_modules: bool = False,
+                   nix_modules_dir: Optional[Path] = None) -> list:
     """Resolve every named mod to its bash script and parse its metadata, in
     playbook order. One read per mod, shared by validation and payload assembly.
 
     Every name here is a script: resolve_playbook has already taken out the ones
-    the generation provides. `modules_dir` only reaches the failure message,
-    which then says a module could have answered too."""
+    the generation provides. `nix_modules`/`nix_modules_dir` only reach the
+    failure message, which then says a module could have answered too."""
     specs = []
     for name in names:
-        path = resolve_mod(name, mods_dir, modules_dir=modules_dir)
+        path = resolve_mod(name, mods_dir, nix_modules=nix_modules,
+                           nix_modules_dir=nix_modules_dir)
         meta = parse_mod_metadata(path.read_text(), path)
         runas = meta.get("runas") or list(DEFAULT_RUNAS)
         unknown = [r for r in runas if r not in RUNAS_TARGETS]
@@ -461,23 +518,27 @@ class Playbook:
 
 
 def resolve_playbook(names: list, mods_dir: Optional[Path],
-                     scope: str = SCOPE_WORKSPACE) -> Playbook:
+                     scope: str = SCOPE_WORKSPACE,
+                     nix_modules_dir: Optional[Path] = None) -> Playbook:
     """Split a playbook by where each name comes from: a bash script if any mods
-    directory has one, else the flake's module of that name, else a hard error
-    naming every place that was looked in.
+    directory has one, else a nix module of that name (workspace > global >
+    built-in - see find_nix_module), else a hard error naming every place that
+    was looked in.
 
     Called with the FULL configured playbook, so a `requires` on a converted mod
     still resolves (see validate_playbooks). At box scope no module is
-    consulted at all."""
-    modules_dir = NIX_MODULES_DIR if scope == SCOPE_WORKSPACE else None
-    provided = set(nix_module_names(modules_dir)) if modules_dir else set()
+    consulted at all - `nix_modules_dir` is a workspace's own (see
+    config.Marker), and irrelevant at box scope regardless of what's passed."""
+    is_workspace = scope == SCOPE_WORKSPACE
+    provided = set(nix_module_names(nix_modules_dir)) if is_workspace else set()
     scripts, modules = [], []
     for name in names:
         if name in provided and find_mod_script(name, mods_dir) is None:
             modules.append(name)
         else:
             scripts.append(name)
-    return Playbook(specs=load_mod_specs(scripts, mods_dir, modules_dir=modules_dir),
+    return Playbook(specs=load_mod_specs(scripts, mods_dir, nix_modules=is_workspace,
+                                         nix_modules_dir=nix_modules_dir),
                     modules=modules)
 
 
@@ -544,7 +605,8 @@ def validate_playbooks(workspace: WorkspaceConfig) -> None:
     box = resolve_playbook(box_playbook(), None, SCOPE_BOX)
     _validate_ordering(box.specs, config_path)
     attachment = resolve_playbook(workspace_playbook(workspace),
-                                  workspace.marker.mods_dir)
+                                  workspace.marker.mods_dir,
+                                  nix_modules_dir=workspace.marker.nix_modules_dir)
     _validate_ordering(attachment.specs, config_path,
                        prior={s.name for s in box.specs} | set(attachment.modules))
 
@@ -709,20 +771,25 @@ def render_workspace_nix(context: dict, mods: dict) -> str:
         + "}\n")
 
 
-def nix_payload_files(context: dict, modules: list) -> list:
+def nix_payload_files(context: dict, modules: list,
+                      nix_modules_dir: Optional[Path] = None) -> list:
     """The flake directory as payload files: the flake itself, every module it
-    ships, and the rendered `workspace.nix`.
+    ships (workspace > global > built-in, one file per name - see
+    find_nix_module), and the rendered `workspace.nix`.
 
     `modules` is the half of this attachment's playbook the generation provides
     (see resolve_playbook), which becomes the true half of the rendered flags;
     every other shipped module is rendered false. Both the files and the flags
-    come from the modules directory, so a sibling adding `modules/<mod>.nix`
-    ships it and gets its flag by writing the file - there is no second place to
-    register it."""
+    come from the same three-source lookup, so a sibling adding a
+    `<mod>.nix` anywhere in it - built-in, global, or this workspace's own -
+    ships it and gets its flag by writing the file; there is no second place
+    to register it. `nix_modules_dir` is a workspace's own (see
+    config.Marker); None widens nothing beyond the global/built-in set (a box
+    never calls this at all - see build_box_payload)."""
     if not (NIX_DIR / "flake.nix").is_file():
         die(f"devbox internal error: the home-manager flake is not at "
             f"{NIX_DIR} (broken install?)")
-    names = nix_module_names()
+    names = nix_module_names(nix_modules_dir)
     generation = set(modules)
     files = [PayloadFile(
         f"{NIX_PAYLOAD_DIR}/{NIX_WORKSPACE_FILE}",
@@ -732,10 +799,10 @@ def nix_payload_files(context: dict, modules: list) -> list:
             continue
         files.append(PayloadFile(f"{NIX_PAYLOAD_DIR}/{path.name}",
                                  path.read_text(), 0o644))
-    modules_dir = NIX_MODULES_DIR
     for name in names:
+        module_path = find_nix_module(name, nix_modules_dir)
         files.append(PayloadFile(f"{NIX_PAYLOAD_DIR}/modules/{name}.nix",
-                                 (modules_dir / f"{name}.nix").read_text(), 0o644))
+                                 module_path.read_text(), 0o644))
     return files
 
 
@@ -789,10 +856,12 @@ def build_payload(workspace: WorkspaceConfig, gc: GlobalConfig, admin_user: str)
     deps are checked against the box's cumulative state, not the subset."""
     validate_playbooks(workspace)
     attachment = resolve_playbook(workspace_playbook(workspace),
-                                  workspace.marker.mods_dir)
+                                  workspace.marker.mods_dir,
+                                  nix_modules_dir=workspace.marker.nix_modules_dir)
     context = _workspace_context(workspace, gc, admin_user)
     payload = _assemble(attachment.specs, context, SCOPE_WORKSPACE, workspace.repos)
-    payload.extend(nix_payload_files(context, attachment.modules))
+    payload.extend(nix_payload_files(context, attachment.modules,
+                                     workspace.marker.nix_modules_dir))
     return payload
 
 

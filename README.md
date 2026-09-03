@@ -685,10 +685,18 @@ flake, never both, and a converted mod keys on its own
 `devbox.mods.<name>.enable` flag. It is **agent-only**: the box's privileged
 account keeps stock apt bash and unconfigured vim — no generation, no
 dotfiles either — so `devbox box ssh` works whatever state a workspace's (or
-its own) nix and per-account config might be in. Workspace-local `.nix`
-modules are not supported — a
-workspace that needs something of its own ships a bash mod, exactly as before.
-Nothing from `[env]` may appear in a nix expression: `/nix/store` is
+its own) nix and per-account config might be in.
+
+**A nix module resolves by the same precedence a bash mod does** — workspace
+`nix/modules/<name>.nix` (beside its `mods/`, either marker shape) > global
+`~/.config/devbox/nix/modules/<name>.nix` > devbox's own built-in one — so a
+mod that has nothing to do with devbox itself (a workspace's own rust
+toolchain, say) doesn't have to live in devbox's repo, or even be a bash
+script, to become a module: drop the file where it belongs and name it in
+`mods` (or leave it un-named for the "shipped but off" case, same as any
+built-in). The flake discovers every `.nix` file devbox resolves and ships
+into the payload's `nix/modules/`, by file presence, not a list it has to be
+added to. Nothing from `[env]` may appear in a nix expression: `/nix/store` is
 world-readable and shared by every attachment. A converted mod that needs a
 credential names the **path** of the 0600 `~/.config/devbox/env` and reads it at
 run time — which is how `cloudflared`, a module that installs `pkgs.cloudflared`

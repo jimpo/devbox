@@ -29,21 +29,31 @@
 #
 # ---- MODULE CONVENTIONS (read this before adding a module) ------------------
 #
-# CONVERTING A MOD, end to end. Four steps, and the fourth is "nothing":
+# CONVERTING A MOD, end to end. Three steps, and the third is "nothing":
 #
 #   1. Write `modules/<mod-name>.nix`, named exactly as the bash mod it
 #      replaces (see the shape below).
-#   2. Add `./modules/<mod-name>.nix` to the `modules` list below -
-#      alphabetically, one entry per line.
-#   3. DELETE `mods/<mod-name>.sh`, in the same commit. A script wins over a
+#   2. DELETE `mods/<mod-name>.sh`, in the same commit. A script wins over a
 #      module of the same name, so while it exists the bash mod is what runs
 #      and the new module is inert.
-#   4. Leave `WORKSPACE_BASE_MODS` (provision.py) ALONE. The name stays in the
+#   3. Leave `WORKSPACE_BASE_MODS` (provision.py) ALONE. The name stays in the
 #      playbook: that tuple lists what an attachment gets, not which half
 #      provides it, and devbox resolves each name by file presence -
-#      `<name>.sh` in any mods directory, else `modules/<name>.nix`. Removing
-#      the name would turn the module off. The same goes for a mod a workspace
-#      names in its own `mods = [...]`: that config keeps working untouched.
+#      `<name>.sh` in any mods directory, else `<name>.nix` in any
+#      nix-modules directory. Removing the name would turn the module off.
+#      The same goes for a mod a workspace names in its own `mods = [...]`:
+#      that config keeps working untouched.
+#
+# THIS FILE NEVER LISTS MODULES BY NAME. `modules` below is every `.nix` file
+# `readDir` finds directly under `./modules` - devbox writes one payload
+# `nix/modules/<name>.nix` per name it resolves (built-in, global, or a
+# workspace's own - see provision.find_nix_module), whatever the source, and
+# this flake just imports whatever landed there. That is what makes a
+# workspace's or a user's global `nix/modules/<name>.nix` work with zero
+# changes here: it never has to be devbox's own repo. `provision.py`'s
+# `NIX_MODULES_DIR` is the payload's `modules/` before it travels, so a
+# built-in conversion is still "write the file, delete the script" - there is
+# just no line to add to a list any more.
 #
 # Two consequences worth knowing. A mod that `requires` a converted one still
 # validates - a module is not a step in the run, so it satisfies a dependency
@@ -53,13 +63,13 @@
 # whole generation.
 #
 # `devbox.mods.<name>.enable` MEANS "the generation provides this mod". devbox
-# renders one flag per file in this directory (options.nix declares them
+# renders one flag per resolved module name (options.nix declares them
 # free-form), so:
 #
 #   * a mod the workspace's playbook names, with no `<name>.sh` anywhere -> true
 #   * a mod the workspace never asked for                                -> false
 #   * a mod some `<name>.sh` still answers to (a workspace shadowing a
-#     built-in with its own script, or step 3 not done yet)              -> false
+#     built-in with its own script, or step 2 not done yet)              -> false
 #
 # The flag is never true at the same time as a bash mod of that name running:
 # one name, one implementation. A module READS its own flag and never declares
@@ -88,11 +98,15 @@
 # Credentials stay in the 0600 ~/.config/devbox/env that `devbox sync
 # --envvars` writes, and a mod that needs one reads it at run time.
 #
-# Workspace-local .nix modules are NOT supported. The workspace > global >
-# built-in shadowing that bash mods have does not translate to the module
-# system (`disabledModules`/`lib.mkForce` are clumsier than dropping a file
-# into a directory). A workspace that needs something of its own ships a bash
-# mod, exactly as it does today.
+# WORKSPACE-LOCAL AND GLOBAL .nix MODULES ARE SUPPORTED, same
+# workspace > global > built-in precedence as a bash mod: a workspace's own
+# `nix/modules/<name>.nix` (beside its `mods/`, same shape at either marker
+# spelling - see config.Marker.nix_modules_dir) or a user's global
+# `~/.config/devbox/nix/modules/<name>.nix` resolves exactly like devbox's own
+# built-in one, or shadows it if both exist. A module needing sibling files of
+# its own (its own lib, say) isn't supported yet - every shipped module today
+# is one self-contained file, and only `readDir`-discovered `.nix` files
+# travel in the payload.
 {
   description = "devbox agent home environment";
 
@@ -106,12 +120,26 @@
 
   outputs = { nixpkgs, home-manager, ... }:
     let
+      inherit (nixpkgs) lib;
+
       # A box is x86_64 (libvirt, most EC2/Lightsail) or aarch64 (Graviton),
       # and devbox cannot know which from the host, so the configuration is
       # built for both and `mods/home-manager.sh` picks by `uname -m`. That is
       # why the attribute name carries the system: `pkgs` for the wrong one
       # fails at evaluation, and a single `agent` could only ever guess.
       systems = [ "aarch64-linux" "x86_64-linux" ];
+
+      # Every mod this payload ships a module for, whatever put it here -
+      # devbox's own built-in, a user's global config, or this workspace's
+      # own (see provision.nix_payload_files) - discovered rather than named,
+      # which is what lets a module live outside devbox's own repo. `readDir`
+      # on `./modules` is pure: by the time this evaluates, the flake (this
+      # whole directory) is already a realized store path (`path:` copies it
+      # there - see the note above), so this reads no more of the filesystem
+      # than importing a hardcoded list would.
+      moduleFiles = lib.filterAttrs (name: type: type == "regular" && lib.hasSuffix ".nix" name)
+        (builtins.readDir ./modules);
+      discoveredModules = map (name: ./modules + "/${name}") (builtins.attrNames moduleFiles);
 
       mkAgent = system: home-manager.lib.homeManagerConfiguration {
         pkgs = nixpkgs.legacyPackages.${system};
@@ -121,18 +149,7 @@
           # devbox's own shell plumbing: the agent's ~/.zshenv. Not a mod, so
           # it is always in the generation and reads no `devbox.mods` flag.
           ./zshenv.nix
-          # Converted mods, alphabetically, one entry per line.
-          ./modules/cargo-binstall.nix
-          ./modules/claude-code.nix
-          ./modules/claude-github-mcp.nix
-          ./modules/claude-linear-mcp.nix
-          ./modules/cloudflared.nix
-          ./modules/github-auth.nix
-          ./modules/jj.nix
-          ./modules/neovim.nix
-          ./modules/uv.nix
-          ./modules/vim.nix
-        ];
+        ] ++ discoveredModules;
       };
     in
     {

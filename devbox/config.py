@@ -41,10 +41,17 @@ from .util import die, warn
 # Mods sit beside their config file either way (`.devbox/mods/` / `mods/`), so
 # the two shapes stay symmetric. Which one was found is the `root_is_repo` bit,
 # and it is what supplies each repo's default host path (see `_resolve_repos`).
+#
+# A workspace's own nix modules sit beside `mods/` the same way, in their own
+# `nix/modules/` (`.devbox/nix/modules/` / `nix/modules/`) rather than nested
+# inside it - the same shape devbox's own built-in `mods/` and `nix/modules/`
+# have as siblings at the repo root (see provision.py), and the same shape the
+# global config uses (`~/.config/devbox/mods/` / `~/.config/devbox/nix/modules/`).
 WORKSPACE_MARKER_FILE = "devbox.toml"       # <root>/devbox.toml
 REPO_MARKER_DIR = ".devbox"                 # <repo>/.devbox/
 REPO_MARKER_CONFIG = "config.toml"          # <repo>/.devbox/config.toml
 MODS_SUBDIR = "mods"
+NIX_MODULES_SUBDIR = Path("nix") / "modules"
 
 # How a repo gets onto the box. There is no "none": a workspace with nothing to
 # check out simply lists no repos.
@@ -364,6 +371,7 @@ class Marker:
     root: Path                   # the workspace root
     config_path: Path            # <root>/devbox.toml, or <root>/.devbox/config.toml
     mods_dir: Path               # <root>/mods, or <root>/.devbox/mods
+    nix_modules_dir: Path        # <root>/nix/modules, or <root>/.devbox/nix/modules
     root_is_repo: bool           # which spelling was found (see the constants above)
 
 
@@ -500,10 +508,13 @@ def _marker_at(cur: Path) -> Optional[Marker]:
             f"repo, {WORKSPACE_MARKER_FILE} if it holds repos; remove the other.")
     if visible.is_file():
         return Marker(root=cur, config_path=visible,
-                      mods_dir=cur / MODS_SUBDIR, root_is_repo=False)
+                      mods_dir=cur / MODS_SUBDIR,
+                      nix_modules_dir=cur / NIX_MODULES_SUBDIR, root_is_repo=False)
     if hidden.is_file():
         return Marker(root=cur, config_path=hidden,
-                      mods_dir=cur / REPO_MARKER_DIR / MODS_SUBDIR, root_is_repo=True)
+                      mods_dir=cur / REPO_MARKER_DIR / MODS_SUBDIR,
+                      nix_modules_dir=cur / REPO_MARKER_DIR / NIX_MODULES_SUBDIR,
+                      root_is_repo=True)
     return None
 
 

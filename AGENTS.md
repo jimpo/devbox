@@ -79,7 +79,16 @@ de-customization** (the box playbook shrunk to `dotfiles-packages` + `nix`:
 `runas = ["agent"]` with its admin-only `~/.zshenv` append deleted, and the
 privileged account's login shell left on `init-script.sh`'s `/bin/bash`
 instead of being switched to zsh — `vim-plug.sh` and `github-auth.sh`
-deleted outright),
+deleted outright), **workspace-local and global nix modules** (JIM-209:
+`find_nix_module`/`nix_module_names` against fake workspace/global/built-in
+directories — the same workspace > global > built-in precedence
+`find_mod_script`/`resolve_mod` give bash mods, a name only the workspace's
+own `nix_modules_dir` has resolving with no built-in counterpart at all, one
+shadowing a built-in of the same name, a global one shadowed in turn by a
+workspace's own, and the six-places-looked failure message now naming three
+nix directories alongside the three bash ones — plus the flake itself
+`readDir`ing `./modules` rather than importing a fixed list, asserted by its
+absence of any hardcoded `./modules/<name>.nix` line),
 payload/tarball assembly, `[env]` merge +
 `run_envvars` remote command), the per-attachment SSH aliases
 (`_refresh_ssh_aliases`: one stanza per file, the collapse rule, per-box
@@ -339,16 +348,27 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   the name, false otherwise — so a shadowed mod runs its script and nothing
   else. Every shipped module gets a flag either way, because a missing
   attribute is an evaluation error in nix, not a false. Converting a mod is
-  therefore: write `modules/<name>.nix`, add the line to `flake.nix`'s list,
-  delete `mods/<name>.sh`, and leave the playbook tuples alone (the recipe is
-  spelled out in `flake.nix`'s conventions block, which is the contract the
-  conversion tickets read). Home-manager is **agent-only**: a box run ships none of this,
-  and the privileged account keeps stock apt bash and unconfigured vim - no
-  dotfiles either - so `devbox box ssh` stays the machine's debugging entry
-  point regardless of any per-account state. Workspace-local `.nix` modules are
-  **not** supported — workspace > global > built-in shadowing does not
-  translate to the module system, and the escape hatch stays a bash mod, which
-  works exactly as it always has. **No cred ever enters a nix expression**:
+  therefore: write `modules/<name>.nix`, delete `mods/<name>.sh`, and leave the
+  playbook tuples alone (the recipe is spelled out in `flake.nix`'s
+  conventions block, which is the contract the conversion tickets read) —
+  `flake.nix` itself needs no line added: it `readDir`s `./modules` at
+  evaluation time rather than importing a fixed list, so a new file is
+  discovered, not registered. Home-manager is **agent-only**: a box run ships
+  none of this, and the privileged account keeps stock apt bash and
+  unconfigured vim - no dotfiles either - so `devbox box ssh` stays the
+  machine's debugging entry point regardless of any per-account state.
+  **Workspace-local and global nix modules ARE supported** (JIM-209): a nix
+  module resolves by the same workspace > global > built-in precedence a bash
+  mod does — `<workspace>/nix/modules/<name>.nix` (beside its `mods/`, either
+  marker shape — see `config.Marker.nix_modules_dir`) >
+  `~/.config/devbox/nix/modules/<name>.nix` > devbox's own built-in
+  `NIX_MODULES_DIR` (see `find_nix_module`) — so a mod that has nothing to do
+  with devbox itself never has to live in devbox's own repo to become a
+  module; the bash escape hatch (a workspace's own `<name>.sh`) still works
+  exactly as it always has, and still wins over any module of the same name.
+  A module needing sibling files of its own isn't supported yet — every
+  shipped module is one self-contained file. **No cred ever enters a nix
+  expression**:
   /nix/store is world-readable and shared by every attachment. `zshenv.nix` is
   the one module that is not a mod — always in the generation, gated on no
   flag: it owns the agent's `~/.zshenv` (the file every zsh reads, `ssh <box>
