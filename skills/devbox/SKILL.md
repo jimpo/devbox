@@ -22,7 +22,7 @@ box (`devbox create`), getting its own unprivileged account there. Several
 workspaces can share one box: the VM is the security boundary, the accounts are
 organization.
 
-**Accounts.** One privileged user per box (`--user`, default host `$USER`), which
+**Accounts.** One privileged user per box (`--user`, default `admin`), which
 provisioning runs as, plus one unprivileged account per attached workspace
 (`agent_user`, default = the workspace name) with **no sudo**, under which that
 workspace's AI agents, all its checkouts and the `[env]` creds they need live —

@@ -42,7 +42,8 @@ from .provision import (BOX_BASE_MODS, BUILTIN_MODS_DIR, CHECK_CONTEXT,  # noqa:
                         resolve_mod, resolve_playbook, scoped_runas,
                         validate_playbooks, workspace_playbook)
 from .config import (ANCHOR_HOME, ANCHOR_REPO, ANCHOR_WORKSPACE,  # noqa: F401
-                     AwsConfig, BoxSpec, DEFAULT_BASE_IMAGE_URL,
+                     AwsConfig, BoxSpec, DEFAULT_ADMIN_USER,
+                     DEFAULT_BASE_IMAGE_URL,
                      DEFAULT_CACHE_DIR, DEFAULT_DISK_GB, DEFAULT_LIBVIRT_URI,
                      DEFAULT_LIGHTSAIL_BLUEPRINT, DEFAULT_LIGHTSAIL_BUNDLE,
                      DEFAULT_MEMORY_MIB, DEFAULT_NETWORK, DEFAULT_PROVIDER,

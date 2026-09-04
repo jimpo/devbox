@@ -1,4 +1,3 @@
-import os
 import dataclasses
 import argparse
 import re
@@ -2462,7 +2461,7 @@ def test_cmd_box_create_passes_lightsail_flags_into_the_spec(monkeypatch, pubkey
     spec = provider.seen["spec"]
     assert spec.name == "aws-foo-gpu" and spec.provider == "aws"
     assert spec.lightsail.bundle == "medium_3_0"
-    assert spec.admin_user == os.environ.get("USER", "")
+    assert spec.admin_user == devbox.DEFAULT_ADMIN_USER
     # Lightsail runs user-data as a shell script, so create must hand it one
     # (hostname = the box's canonical name).
     assert spec.user_data.startswith("#!/bin/bash\n")
@@ -3353,34 +3352,42 @@ def test_resolve_box_spec_defaults_to_libvirt_and_the_global_defaults(global_con
     box = devbox.resolve_box_spec(_box_args("dev"), global_config, "dev")
     assert box.name == "dev"                 # libvirt boxes stay bare-named
     assert box.provider == "libvirt"
-    assert box.admin_user == "alice"
+    # The privileged account is a fixed name, NOT whoever ran the command: it is
+    # the machine's generic rescue login, and the creator's $USER on it would be
+    # an accident of who typed `box create`.
+    assert box.admin_user == "admin" == devbox.DEFAULT_ADMIN_USER
     assert (box.vcpus, box.memory_mib, box.disk_gb) == (
         global_config.vcpus, global_config.memory_mib, global_config.disk_gb)
     assert box.ec2 is None and box.lightsail is None
 
 
-def test_resolve_box_spec_flags_win_over_the_defaults(global_config, monkeypatch):
-    monkeypatch.setenv("USER", "alice")
+def test_resolve_box_spec_flags_win_over_the_defaults(global_config):
     args = _box_args("dev", vcpus=2, memory=2048, disk=10, user="bob")
     box = devbox.resolve_box_spec(args, global_config, "dev")
     assert (box.vcpus, box.memory_mib, box.disk_gb) == (2, 2048, 10)
-    assert box.admin_user == "bob"
+    assert box.admin_user == "bob"           # --user still wins
 
 
-def test_the_default_disk_has_room_for_a_shared_nix_store(global_config, monkeypatch):
+def test_the_default_admin_user_is_a_legal_username_an_agent_cannot_take():
+    # It is the sanctioned default for the box's account, so it has to pass the
+    # same validation any --user does - and stay reserved for the agent side,
+    # where an account of that name would now collide with the box's own.
+    assert devbox.USERNAME_RE.match(devbox.DEFAULT_ADMIN_USER)
+    assert devbox.DEFAULT_ADMIN_USER in devbox.RESERVED_USERNAMES
+
+
+def test_the_default_disk_has_room_for_a_shared_nix_store(global_config):
     # A box holds several workspaces' checkouts and build trees on top of one
     # /nix store, which is a few GB on its own. The default carries that;
     # `[defaults] disk_gb` and --disk still size a box that needs something else
     # (see test_resolve_box_spec_flags_win_over_the_defaults).
     assert devbox.DEFAULT_DISK_GB >= 100
-    monkeypatch.setenv("USER", "alice")
     box = devbox.resolve_box_spec(_box_args("dev"), devbox.GlobalConfig.load(
         devbox.Path("/nonexistent-global-config.toml")), "dev")
     assert box.disk_gb == devbox.DEFAULT_DISK_GB
 
 
-def test_resolve_box_spec_composes_the_canonical_cloud_name(global_config, monkeypatch):
-    monkeypatch.setenv("USER", "alice")
+def test_resolve_box_spec_composes_the_canonical_cloud_name(global_config):
     args = _box_args("dev", provider="ec2", instance_type="g5.xlarge", arch="arm64")
     box = devbox.resolve_box_spec(args, global_config, "dev")
     assert box.name == "ec2-dev"
@@ -3393,29 +3400,25 @@ def test_resolve_box_spec_composes_the_canonical_cloud_name(global_config, monke
     ({"spot": True}, True),
     ({"on_demand": True}, False),
 ])
-def test_resolve_box_spec_market_flags(global_config, monkeypatch, flags, expected):
+def test_resolve_box_spec_market_flags(global_config, flags, expected):
     # Neither flag leaves it None, which defers to the global [ec2].spot.
-    monkeypatch.setenv("USER", "alice")
     args = _box_args("dev", provider="ec2", instance_type="t3.micro", **flags)
     assert devbox.resolve_box_spec(args, global_config, "dev").ec2.spot is expected
 
 
-def test_resolve_box_spec_ec2_requires_an_instance_type(global_config, monkeypatch):
-    monkeypatch.setenv("USER", "alice")
+def test_resolve_box_spec_ec2_requires_an_instance_type(global_config):
     with pytest.raises(SystemExit):
         devbox.resolve_box_spec(_box_args("dev", provider="ec2"), global_config, "dev")
 
 
-def test_resolve_box_spec_lightsail_defaults(global_config, monkeypatch):
-    monkeypatch.setenv("USER", "alice")
+def test_resolve_box_spec_lightsail_defaults(global_config):
     box = devbox.resolve_box_spec(_box_args("dev", provider="aws"), global_config, "dev")
     assert box.name == "aws-dev"
     assert box.lightsail.bundle is None      # the provider substitutes the default
     assert box.lightsail.blueprint == devbox.DEFAULT_LIGHTSAIL_BLUEPRINT
 
 
-def test_resolve_box_spec_lightsail_flags(global_config, monkeypatch):
-    monkeypatch.setenv("USER", "alice")
+def test_resolve_box_spec_lightsail_flags(global_config):
     args = _box_args("dev", provider="aws", bundle="small_3_0",
                      blueprint="ubuntu_22_04", zone="us-east-1c")
     box = devbox.resolve_box_spec(args, global_config, "dev")
@@ -3425,18 +3428,18 @@ def test_resolve_box_spec_lightsail_flags(global_config, monkeypatch):
 
 
 def test_resolve_box_spec_rejects_a_name_that_already_has_a_provider_prefix(
-        global_config, monkeypatch):
+        global_config):
     # The prefix is composed in automatically; passing one would double it.
-    monkeypatch.setenv("USER", "alice")
     args = _box_args("ec2-dev", provider="ec2", instance_type="t3.micro")
     with pytest.raises(SystemExit):
         devbox.resolve_box_spec(args, global_config, "ec2-dev")
 
 
-def test_resolve_box_spec_rejects_an_invalid_admin_username(global_config, monkeypatch):
-    monkeypatch.setenv("USER", "")
+def test_resolve_box_spec_rejects_an_invalid_admin_username(global_config):
+    # Only --user can be illegal now; the default is a literal.
     with pytest.raises(SystemExit):
-        devbox.resolve_box_spec(_box_args("dev"), global_config, "dev")
+        devbox.resolve_box_spec(_box_args("dev", user="Not A Username"),
+                                global_config, "dev")
 
 
 # ---- EC2 provider -----------------------------------------------------------

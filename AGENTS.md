@@ -22,7 +22,10 @@ global/workspace config loading + merging (`GlobalConfig.load`,
 box/workspace split (`resolve_box_spec` from argv, the default disk size a
 shared `/nix` store has to fit inside, the rejection of box-level
 keys in a workspace's config, `box` defaulting, `agent_user` defaulting +
-username/reserved-name validation), the two marker spellings (`find_workspace`:
+username/reserved-name validation, and the box's own `admin_user` defaulting to
+the fixed `"admin"` rather than to the host's `$USER` — with `--user` still
+winning, and that default itself a legal username the agent side still
+reserves), the two marker spellings (`find_workspace`:
 walk-up for either, nearest level wins, both-at-once refused, and the
 `root_is_repo`/mods-dir each implies), the `[[repos]]` list (name-supplied host
 path + guest dir, the nameless "the root is the repo" entry and its refusal
@@ -315,7 +318,16 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   against `USERNAME_RE` / `RESERVED_USERNAMES` — a directory basename is often
   not a legal username, and failing here costs a second instead of a boot; the
   "must differ from the box's privileged account" half can only be checked at
-  attach time, since that account belongs to the machine.
+  attach time, since that account belongs to the machine. `admin_user` defaults
+  to the literal `DEFAULT_ADMIN_USER` (`"admin"`) rather than to the host's
+  `$USER`: that account is the machine's generic rescue login (stock apt bash,
+  unconfigured vim, no dotfiles, no git auth), so whoever happened to type
+  `devbox box create` is the wrong thing to name it after. It stays in
+  `RESERVED_USERNAMES`, which is agent-side only — a workspace called `admin`
+  would collide with the box's own account. Only newly created boxes are
+  affected: every provider stamps the name onto the instance and every command
+  reads it back from there (see `providers/`), so an existing box keeps
+  whatever it was created with.
 
   **Two marker spellings, one `Marker`.** `find_workspace` walks up for either
   `<root>/devbox.toml` (the root HOLDS repos) or `<repo>/.devbox/config.toml`

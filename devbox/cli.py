@@ -48,7 +48,8 @@ from pathlib import Path
 from typing import Optional
 
 from .initscript import render_init_script
-from .config import (BoxSpec, DEFAULT_PROVIDER, GlobalConfig, PROVIDERS,
+from .config import (BoxSpec, DEFAULT_ADMIN_USER, DEFAULT_PROVIDER,
+                     GlobalConfig, PROVIDERS,
                      WorkspaceConfig, SSH_DIR, SSH_USER_CONFIG, find_workspace,
                      find_workspace_opt, known_hosts_path, parse_instance_name,
                      resolve_box_spec, resolve_instance, resolve_workspace)
@@ -1056,7 +1057,8 @@ def _add_box_create_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--provider", choices=PROVIDERS, default=None,
                         help=f"provider to launch on (default: {DEFAULT_PROVIDER})")
     parser.add_argument("--user", default=None,
-                        help="the box's privileged account (default: $USER)")
+                        help=f"the box's privileged account "
+                             f"(default: {DEFAULT_ADMIN_USER})")
     parser.add_argument("--vcpus", type=int, default=None, help="libvirt: vCPUs")
     parser.add_argument("--memory", type=int, default=None, metavar="MIB",
                         help="libvirt: memory in MiB")

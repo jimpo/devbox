@@ -140,7 +140,7 @@ means retyping the flags.
 Every box has one privileged user and one unprivileged account per attached
 workspace. AI agents run as the latter:
 
-| | **privileged** (`--user`, default `$USER`) | **agent** (`agent_user`, default = the workspace name) |
+| | **privileged** (`--user`, default `admin`) | **agent** (`agent_user`, default = the workspace name) |
 | --- | --- | --- |
 | how many | one per box | one per attached workspace |
 | sudo | NOPASSWD `ALL` | **none**, and in no group that grants it |

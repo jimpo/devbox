@@ -22,7 +22,6 @@ a change that spans a client and its server is one agent's job, not two accounts
 from __future__ import annotations
 
 import dataclasses
-import os
 import re
 import tomllib
 from pathlib import Path
@@ -89,10 +88,17 @@ PREFIXED_PROVIDERS = tuple(p for p in PROVIDERS if p != DEFAULT_PROVIDER)
 # time costs a second; failing in `useradd` costs a boot.
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
+# What `devbox box create` names the privileged account when --user says
+# nothing. It is a fixed, generic name because that account is a fixed, generic
+# thing: the machine's rescue login (stock apt bash, unconfigured vim, no
+# dotfiles, no git auth), not anybody's personal environment.
+DEFAULT_ADMIN_USER = "admin"
+
 # Usernames the agent account must never take: standard Debian/Ubuntu system
-# accounts, plus the default login user of the cloud images the providers boot
+# accounts, the default login user of the cloud images the providers boot
 # (`ubuntu` on Ubuntu cloud images and Lightsail blueprints, `ec2-user` on
-# Amazon Linux). Taking one of these would either collide with an existing
+# Amazon Linux), and DEFAULT_ADMIN_USER, which the box's own privileged account
+# holds. Taking one of these would either collide with an existing
 # sudo-capable account or fight the distro over a system uid.
 RESERVED_USERNAMES = frozenset({
     "root", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail",
@@ -880,7 +886,7 @@ def resolve_box_spec(args, gc: GlobalConfig, bare_name: str) -> BoxSpec:
             f"('{provider}-' is added automatically); "
             f"pass the name as '{parse_instance_name(bare_name)[1]}'")
 
-    admin_user = args.user or os.environ.get("USER", "")
+    admin_user = args.user or DEFAULT_ADMIN_USER
     if not USERNAME_RE.match(admin_user):
         die(f"the box's privileged user {admin_user!r} is not a valid Linux "
             f"username (lowercase letters/digits/'-'/'_', not starting with a "
