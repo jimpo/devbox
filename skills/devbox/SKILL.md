@@ -179,9 +179,10 @@ There are two built-in playbooks: the **box** one (`dotfiles-packages → nix`),
 which runs once per box as root, and the **workspace** one (`home-manager →
 github-auth → jj → dotfiles → vim → neovim → claude-code → cargo-binstall →
 repo-bootstrap`), which runs once per attachment in that
-workspace's account. Add a
-workspace mod only for extra tooling (`Cargo.toml` → a rust mod, `package.json` →
-a node mod):
+workspace's account. A workspace names anything else it needs in `mods`, which
+built-in opt-ins answer to as well as its own: `mods = ["nodejs"]` gets the
+Node.js LTS with npm from the generation. Add a mod of your own for tooling no
+built-in covers (`Cargo.toml` → a rust mod):
 
 1. List it: `mods = ["rust"]` in the marker file.
 2. Write `<mods dir>/rust.sh` (`.devbox/mods/` or `mods/`, matching the marker)

@@ -287,6 +287,14 @@ reports a standalone install and re-runs the installer rather than telling you
 to use a package manager, and `~/.zshenv` is still the generation's store
 symlink afterwards, with no `Codex installer` PATH block appended anywhere.
 
+For `nodejs`, add it to a workspace's `mods`: as that agent, `node --version`
+is the LTS major (not the newest node), `command -v npm` is in the generation's
+profile rather than `~/.local/bin`, and `npm install -g <cli>` SUCCEEDS - the
+one thing the module exists to fix, since npm's default prefix is the
+read-only store path node itself sits in. Then `ssh <agent-alias> '<cli>
+--version'` finds what that install put in `~/.npm-global/bin`, which is the
+non-interactive PATH the sessionPath entry buys.
+
 A workspace with `mods = ["cloudflared"]` is the module to exercise by hand,
 since only a box runs the real binary: with a `CLOUDFLARE_TOKEN` in `[env]`,
 `systemctl --user status cloudflared` is active and `ps` shows no token; with the

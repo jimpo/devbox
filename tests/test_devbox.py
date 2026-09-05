@@ -1475,6 +1475,33 @@ def test_uv_and_cargo_binstall_are_packages_in_the_generation(isolated_mods,
         (devbox.BUILTIN_MODS_DIR / "cargo-binstall.nix").read_text()
 
 
+def test_nodejs_is_an_opt_in_module_that_relocates_npms_global_prefix(
+        isolated_mods, tmp_path):
+    # A workspace that never names it gets no node at all, which is what
+    # keeping it out of WORKSPACE_BASE_MODS buys: it is a language runtime, and
+    # a box hosts workspaces that want nothing to do with one.
+    assert "nodejs" in devbox.nix_module_names()
+    assert devbox.find_mod_script("nodejs", None) is None
+    marker_dir = tmp_path / "ws"
+    marker_dir.mkdir()
+
+    def modules(mods):
+        workspace = _workspace(marker_dir=marker_dir, mods=mods)
+        return devbox.resolve_playbook(devbox.workspace_playbook(workspace),
+                                       workspace.marker.mods_dir).modules
+
+    assert "nodejs" not in modules([])
+    assert "nodejs" in modules(["nodejs"])
+    # npm's default prefix is the read-only store path node itself lives in, so
+    # `npm install -g` only works if the module moves it into the account - and
+    # only reaches a PATH if the same module puts the new bin directory on one.
+    body = (devbox.BUILTIN_MODS_DIR / "nodejs.nix").read_text()
+    assert 'home.sessionVariables.NPM_CONFIG_PREFIX = "$HOME/.npm-global";' in body
+    assert 'home.sessionPath = [ "$HOME/.npm-global/bin" ];' in body
+    # The LTS alias `pkgs.nodejs`, not the `pkgs.nodejs_latest` beside it.
+    assert "home.packages = [ pkgs.nodejs ];" in body
+
+
 def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():
     # The CLI that runs the switch and the flake it switches to are one
     # version, so a bump cannot half-land.
