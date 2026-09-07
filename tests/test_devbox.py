@@ -1602,6 +1602,13 @@ def test_the_agents_zshenv_is_the_generations_and_holds_no_creds():
     assert "programs.zsh.enable = true;" in code
     assert "programs.zsh.envExtra" in code
     assert 'home.file.".zshenv"' not in code
+    # The zsh counterpart of ~/.bash_env's nix block, and for the same reason:
+    # the installer wires /etc/profile.d and the interactive rc files, which a
+    # non-interactive zsh reads none of. Sourcing the profile script after
+    # home-manager's own block puts ~/.nix-profile/bin ahead of the
+    # ~/.local/bin home.sessionPath contributes.
+    assert "/etc/profile.d/nix.sh" in code
+    assert "/etc/profile.d/nix-daemon.sh" in code
 
 
 def test_dotfiles_is_the_generations_and_imports_configenv(isolated_mods):

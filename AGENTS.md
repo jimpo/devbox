@@ -485,7 +485,14 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   `programs.zsh` is home-manager's own writer of that file, and a `home.file`
   claiming the same path is a second one, which the `home-manager-files` build
   refuses; enabling it here rather than leaving it to `dotfiles` is what keeps
-  `~/.zshenv` in the generation for a playbook that has no `dotfiles`.
+  `~/.zshenv` in the generation for a playbook that has no `dotfiles`. It also
+  sources the nix profile script, which is the zsh half of what `~/.bash_env`
+  does for bash and for the same reason: a non-interactive zsh reads
+  `/etc/zsh/zshenv` and `~/.zshenv` and nothing else, so `ssh <agent-alias>
+  '<cmd>'` — the agent's login shell is zsh — would otherwise have
+  `~/.local/bin` and no generation at all. home-manager appends `envExtra`
+  after its own block, so the profile script's `~/.nix-profile/bin` lands
+  ahead of the `~/.local/bin` `home.sessionPath` contributes.
 - `provision-driver.sh` — runs as the privileged user. `ensure_admin` wires that
   account; `ensure_agent` creates the attaching workspace's (idempotent, also
   reachable as `--ensure-agent`, enabling lingering so that account's systemd

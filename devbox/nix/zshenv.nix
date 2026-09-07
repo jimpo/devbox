@@ -17,6 +17,21 @@
 # and ~/.zshrc; enabling it here as well is what keeps ~/.zshenv in the
 # generation for an account whose playbook has no `dotfiles`.
 #
+# home-manager's own block comes FIRST in the file it writes, and `envExtra` is
+# appended after it, which is what makes the PATH order below work out.
+#
+# NIX IS HERE BECAUSE ITS OWN WIRING IS NOT ENOUGH, exactly as in ~/.bash_env.
+# The installer edits /etc/profile.d, /etc/bash.bashrc and /etc/zsh/zshrc - a
+# login shell's and an interactive shell's files. A non-interactive zsh reads
+# /etc/zsh/zshenv and this file and nothing else, so without the source below
+# it has ~/.local/bin (from home.sessionPath, through hm-session-vars.sh) and
+# no generation at all: every tool that moved into the store becomes invisible
+# to `ssh <agent-alias> '<cmd>'`, while the binaries a bash mod left in
+# ~/.local/bin keep answering. The profile script prepends ~/.nix-profile/bin,
+# so sourcing it after home-manager's block puts the generation AHEAD of
+# ~/.local/bin - the declarative answer first, and a leftover imperative
+# binary unable to shadow it.
+#
 # NO CREDS, as everywhere in this flake: /nix/store is world-readable and shared
 # by every attachment on the box. The file SOURCES the account's 0600
 # ~/.config/devbox/env (written by `devbox sync --envvars`); no value from it is
@@ -37,5 +52,16 @@
     # This account's devbox-managed [env] creds, written 0600 by
     # `devbox sync --envvars`.
     [ -f "$HOME/.config/devbox/env" ] && . "$HOME/.config/devbox/env"
+
+    # The box-wide multi-user store: NIX_PROFILES, NIX_SSL_CERT_FILE and both
+    # profiles' bin, this account's first. The script's own guard makes a
+    # second sourcing a no-op, and it handles zsh's word splitting itself.
+    # Both spellings, because which one the installer writes has changed
+    # across nix releases.
+    if [ -r /etc/profile.d/nix.sh ]; then
+      . /etc/profile.d/nix.sh
+    elif [ -r /etc/profile.d/nix-daemon.sh ]; then
+      . /etc/profile.d/nix-daemon.sh
+    fi
   '';
 }
