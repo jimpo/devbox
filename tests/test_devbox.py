@@ -1245,14 +1245,14 @@ def test_a_workspace_own_nix_module_shadows_the_built_in_one(isolated_mods,
     # Same precedence bash mods get: a workspace's own file of a built-in's
     # name wins, exactly like test_a_workspace_script_shadows_a_converted_mod.
     marker_dir = tmp_path / "ws"
-    _write_nix_module(marker_dir / ".devbox" / "mods", "vim",
-                      "{ }\n# my own vim\n")
+    _write_nix_module(marker_dir / ".devbox" / "mods", "neovim",
+                      "{ }\n# my own neovim\n")
     workspace = _workspace(marker_dir=marker_dir)
-    module_path = devbox.find_nix_module("vim", workspace.marker.mods_dir)
-    assert module_path.read_text().endswith("# my own vim\n")
+    module_path = devbox.find_nix_module("neovim", workspace.marker.mods_dir)
+    assert module_path.read_text().endswith("# my own neovim\n")
     payload = {pf.path: pf for pf in
               devbox.build_payload(workspace, _global_config(pubkey), "alice")}
-    assert payload["nix/modules/vim.nix"].content.endswith("# my own vim\n")
+    assert payload["nix/modules/neovim.nix"].content.endswith("# my own neovim\n")
 
 
 def test_a_workspace_script_still_wins_over_its_own_module_of_that_name(
@@ -1261,18 +1261,19 @@ def test_a_workspace_script_still_wins_over_its_own_module_of_that_name(
     # `<name>.sh` and `<name>.nix` sit next to each other, and the script wins.
     marker_dir = tmp_path / "ws"
     mods_dir = marker_dir / ".devbox" / "mods"
-    _write_nix_module(mods_dir, "vim", "{ }\n# my own vim module\n")
-    (mods_dir / "vim.sh").write_text("#!/usr/bin/env bash\n: my own vim script\n")
+    _write_nix_module(mods_dir, "neovim", "{ }\n# my own neovim module\n")
+    (mods_dir / "neovim.sh").write_text(
+        "#!/usr/bin/env bash\n: my own neovim script\n")
     workspace = _workspace(marker_dir=marker_dir)
     playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
                                        workspace.marker.mods_dir)
-    assert "vim" in [s.name for s in playbook.specs]
-    assert "vim" not in playbook.modules
+    assert "neovim" in [s.name for s in playbook.specs]
+    assert "neovim" not in playbook.modules
     payload = {pf.path: pf for pf in
               devbox.build_payload(workspace, _global_config(pubkey), "alice")}
-    assert "my own vim script" in payload["mods/vim.sh"].content
+    assert "my own neovim script" in payload["mods/neovim.sh"].content
     # The module still ships (every discovered name does), but it is inert.
-    assert "vim.enable = false;" in payload["nix/workspace.nix"].content
+    assert "neovim.enable = false;" in payload["nix/workspace.nix"].content
 
 
 def test_a_global_nix_module_resolves_and_is_shadowed_by_a_workspace_one(
@@ -1384,7 +1385,7 @@ def test_cmd_nix_check_evaluates_the_assembled_flake(monkeypatch, tmp_path,
     # The flake it evaluated is a real one: skeleton + modules + workspace.nix.
     assert (out_dir / "nix" / "flake.nix").is_file()
     assert (out_dir / "nix" / "workspace.nix").is_file()
-    assert (out_dir / "nix" / "modules" / "vim.nix").is_file()
+    assert (out_dir / "nix" / "modules" / "neovim.nix").is_file()
     assert "nix check passed" in capsys.readouterr().out
 
 
@@ -1403,7 +1404,7 @@ def test_cmd_nix_check_clears_a_reused_out_dir(monkeypatch, tmp_path,
     stale.write_text("{ }\n")
     devbox.cli.cmd_nix_check(_nix_check_args(out_dir=str(out_dir)), None, None)
     assert not stale.exists()
-    assert (out_dir / "nix" / "modules" / "vim.nix").is_file()
+    assert (out_dir / "nix" / "modules" / "neovim.nix").is_file()
 
 
 def test_cmd_nix_check_builds_only_when_asked(monkeypatch, tmp_path,
@@ -2336,42 +2337,23 @@ def test_the_old_dotfiles_packages_name_says_where_it_went(isolated_mods, capsys
     assert "`box-packages`" in err
 
 
-def test_vim_is_a_module_for_the_agent_only(isolated_mods):
-    # An agent's vim is the flake's module, so no `vim.sh` may exist anywhere -
-    # a script of that name wins at every level of the precedence, and the
-    # generation would ship the module switched off. The privileged account
-    # has no generation and no vim-plug either: it keeps stock, unconfigured
-    # apt vim, so there is no box-side half of this mod at all any more.
-    assert "vim" in devbox.WORKSPACE_BASE_MODS
-    assert "vim" in devbox.nix_module_names()
+def test_vim_is_configenvs_and_devbox_has_no_mod_of_that_name(isolated_mods):
+    # The editor and the ~/.vimrc that configures it are stated in one place,
+    # configenv's module, which `dotfiles` imports. devbox therefore ships
+    # neither half of a `vim` mod: a bare name in the playbook resolves to
+    # nothing, so the name is absent from the tuple as well as from the
+    # directory. The privileged account has no generation and no vim-plug
+    # either - it keeps stock, unconfigured apt vim.
+    assert "vim" not in devbox.WORKSPACE_BASE_MODS
+    assert "vim" not in devbox.nix_module_names()
     assert devbox.find_mod_script("vim", None) is None
-    assert "vim" in devbox.resolve_playbook(
-        devbox.workspace_playbook(_workspace()), None).modules
+    assert not (devbox.BUILTIN_MODS_DIR / "vim.nix").exists()
     assert "vim-plug" not in devbox.box_playbook()
     assert not (devbox.BUILTIN_MODS_DIR / "vim-plug.sh").exists()
-
-
-def test_the_vim_module_declares_the_plugin_set_and_reads_its_own_flag():
-    # The plugins are stated in the module because nix cannot read them out of
-    # the ~/.vimrc that names them, and `vimPlugins` normalizes an upstream name
-    # (`rust.vim` is `rust-vim`), so the three attribute names are pinned here.
-    text = (devbox.BUILTIN_MODS_DIR / "vim.nix").read_text()
-    assert "config.devbox.mods.vim.enable" in text
-    for plugin in ("base16-vim", "rust-vim", "vim-go"):
-        assert plugin in text
-    # `-u <generated vimrc>` makes vim skip the account's own file, so the
-    # generated one sources it back - otherwise configenv's vim config, which
-    # sets the colorscheme while being sourced, would stop applying.
-    assert "source ~/.vimrc" in text
-    # configenv's module puts a plain `pkgs.vim` in the same profile, and two
-    # derivations cannot both own ~/.nix-profile/bin/vim. `home.packages` is a
-    # merged list no module can take an entry out of, so the wrapper outranks
-    # the plain one instead. `programs.vim` would add its package at the
-    # default priority, which collides.
-    code = "\n".join(line for line in text.splitlines()
-                      if not line.strip().startswith("#"))
-    assert "lib.hiPrio" in code
-    assert "programs.vim" not in code
+    # `dotfiles` is the entry that carries it, and it is agent-scoped.
+    assert "dotfiles" in devbox.WORKSPACE_BASE_MODS
+    assert "dotfiles" in devbox.resolve_playbook(
+        devbox.workspace_playbook(_workspace()), None).modules
 
 
 def test_github_auth_is_a_home_manager_module_now(isolated_mods):

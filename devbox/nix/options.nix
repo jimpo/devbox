@@ -59,10 +59,11 @@ in
   };
 
   config = {
-    # Unfree packages are allowed, which the two editor modules need: nixpkgs'
-    # vim/neovim plugin updater stamps `meta.license = unfree` on every plugin
-    # whose licence it could not detect - base16-vim and vim-go among them - so
-    # an editor's plugin set does not evaluate without this.
+    # Unfree packages are allowed, which both editors' plugin sets need:
+    # nixpkgs' vim/neovim plugin updater stamps `meta.license = unfree` on
+    # every plugin whose licence it could not detect - base16-vim and vim-go
+    # among them - so neither `neovim.nix` nor configenv's vim evaluates
+    # without this.
     #
     # It takes effect despite flake.nix handing `homeManagerConfiguration` a
     # `pkgs`: that only sets `nixpkgs.config` to a `mkDefault`, and

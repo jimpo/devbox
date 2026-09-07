@@ -177,7 +177,7 @@ src = ".claude/skills"
 
 There are two built-in playbooks: the **box** one (`box-packages → nix`),
 which runs once per box as root, and the **workspace** one (`home-manager →
-github-auth → jj → dotfiles → vim → neovim → claude-code → cargo-binstall →
+github-auth → jj → dotfiles → neovim → claude-code → cargo-binstall →
 repo-bootstrap`), which runs once per attachment in that
 workspace's account. A workspace names anything else it needs in `mods`, which
 built-in opt-ins answer to as well as its own: `mods = ["nodejs"]` gets the

@@ -690,7 +690,7 @@ box playbook (fixed, built-in):     box-packages → nix
                                     # runs once per box, as root
 
 workspace playbook (built-in base):   home-manager → github-auth → jj →
-                                    dotfiles → vim → neovim → claude-code →
+                                    dotfiles → neovim → claude-code →
                                     cargo-binstall → repo-bootstrap
 workspace mods (config.toml):         + rust + wasm-tools + …
                                     # runs once per attachment, in its account
@@ -700,7 +700,7 @@ Ordering encodes the constraints (jj before repo-bootstrap, which clones with
 it; `nix` before `home-manager`, which switches with it — across the playbook
 boundary, since a box mod always ran earlier). Names in the workspace base that
 no script answers to (`home-manager` aside: `github-auth`, `jj`, `dotfiles`,
-`vim`, `neovim`) are modules of the generation rather than steps in the run.
+`neovim`) are modules of the generation rather than steps in the run.
 The 95% case is "just add rust": `mods = ["rust"]`.
 
 **A box takes no config, so its playbook is fixed** — `box-packages` (an apt
@@ -762,7 +762,8 @@ tunnel that cannot authenticate is visible rather than silently down.
 devbox takes that repository as a non-flake input — so `~/.vimrc`,
 `~/.tmux.conf`, `~/.gitconfig`, `~/.zshrc` (oh-my-zsh, the `jimpo` theme) and
 `~/.config/{jj,nvim}` are store symlinks the switch places, shared by every
-account on the box rather than cloned into each one. `imports` cannot sit
+account on the box rather than cloned into each one. It carries vim itself as
+well, through `programs.vim`. `imports` cannot sit
 inside a conditional, so configenv carries its own `enable` option and the
 module drives it from `devbox.mods.dotfiles.enable`. The input names a branch
 rather than a rev, deliberately: an edit to the shared configs reaches a box on
@@ -774,16 +775,15 @@ point of that account is to work regardless of what state a workspace's (or
 its own) nix generation or per-account config might be in, so it carries
 neither.
 
-**vim is split by name**, because its two halves are different things
-— one implementation and one absence. An agent's is `devbox/mods/vim.nix`,
-which takes the plugin set (base16-vim, vim-go, rust.vim) from the store and
-wraps the binary so `~/.vimrc` is still read; the
-privileged account has no generation and no dotfiles, so it keeps whatever
-apt's `vim` ships with, unconfigured. They still cannot share the name `vim`:
-a script of that name would shadow the module for every agent. configenv's
-module puts a plain `vim` in the same profile, and two derivations cannot both
-own `~/.nix-profile/bin/vim`, so the module marks its wrapper `lib.hiPrio` and
-that one wins.
+**vim rides in with `dotfiles`, and devbox has no mod of that name.**
+configenv's module states the plugin set (base16-vim, vim-go, rust.vim) and the
+`~/.vimrc` that asks for it in one place, and wraps the binary so that file is
+still read — `programs.vim`'s wrapper is `vim -u <generated vimrc>`, and `-u`
+makes vim skip the account's own, so the generated one sources it back after a
+`packloadall`. An agent gets all of it from the generation. The privileged
+account has no generation and no dotfiles, so it keeps whatever apt's `vim`
+ships with, unconfigured — an absence, not a second implementation, which is
+why there is nothing on the box side to name.
 
 **`github-auth` is a home-manager module too**, `devbox/mods/github-auth.nix`:
 it points git's credential helper at `gh auth git-credential` from

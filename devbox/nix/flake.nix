@@ -124,10 +124,10 @@
 # the same `home.file` entry are an evaluation conflict, and a module that
 # claims a path some bash mod writes on the box is a switch that aborts on its
 # own stale `<file>.devbox-backup` the second time round. `dotfiles.nix`
-# imports configenv, which owns ~/.zshrc (through `programs.zsh`), ~/.vimrc,
-# ~/.ideavimrc, ~/.tmux.conf, ~/.gitconfig, ~/.config/jj/config.toml and
-# ~/.config/nvim; devbox's own zshenv.nix owns ~/.zshenv through the same
-# `programs.zsh`. A module wanting one of those reaches for whatever keeps it
+# imports configenv, which owns ~/.zshrc (through `programs.zsh`), vim
+# (through `programs.vim`), ~/.vimrc, ~/.ideavimrc, ~/.tmux.conf,
+# ~/.gitconfig, ~/.config/jj/config.toml and ~/.config/nvim; devbox's own
+# zshenv.nix owns ~/.zshenv through the same `programs.zsh`. A module wanting one of those reaches for whatever keeps it
 # off the path instead - a `programs.<name>` option that writes elsewhere
 # (`neovim.sideloadInitLua`), a config directory the program reads in addition
 # (`jj.nix`'s conf.d), or plain `home.packages` with no `programs.<name>` at
@@ -139,8 +139,8 @@
 # that own one file - two packages both providing bin/vim, say. A priority
 # settles it where the duplicate is unavoidable: every path gets 5 unless its
 # meta says otherwise, so `lib.hiPrio` on the one that should win skips the
-# other rather than colliding (`vim.nix`). NEITHER of these two failures is an
-# evaluation error, so `devbox nix check` sees them only with `--build`.
+# other rather than colliding. NEITHER of these two failures is an evaluation
+# error, so `devbox nix check` sees them only with `--build`.
 #
 # NO SECRETS, EVER. /nix/store is world-readable, on a box every attached
 # workspace shares, so nothing from a workspace's `[env]` may appear in a nix

@@ -139,7 +139,7 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # generation of its own: it is the box's
 # debugging entry point (`devbox ssh --admin`) and deliberately stays
 # independent of anything that could itself need fixing - stock apt bash,
-# unconfigured apt vim, no oh-my-zsh, no vim-plug, no git credential helper.
+# unconfigured apt vim, no oh-my-zsh, no git credential helper.
 # `nvim` and every agent's configured vim/git come from that attachment's
 # home-manager generation instead, so they live in that agent's profile and
 # nowhere else.
@@ -155,13 +155,16 @@ BOX_BASE_MODS = ("box-packages", "nix")
 # clones with it). `dotfiles` is agent-only now - the privileged account gets
 # none of it (see BOX_BASE_MODS). A workspace's `mods` are appended after this.
 # `home-manager` runs first: it is the declarative half of the account, and a
-# bash mod after it can use what the generation put on the PATH. `vim` and
-# `github-auth` are names that half provides: no mods directory has a vim.sh or
-# a github-auth.sh, so they resolve to the built-in vim.nix and github-auth.nix
-# sitting beside the scripts (see resolve_playbook). `github-auth` lives at
-# ~/.config/git/config rather than ~/.gitconfig - which `dotfiles`/configenv
-# overwrites - so it needs no root and no box-wide /etc/gitconfig any more.
-WORKSPACE_BASE_MODS = ("home-manager", "github-auth", "jj", "dotfiles", "vim",
+# bash mod after it can use what the generation put on the PATH.
+# `github-auth` is a name that half provides: no mods directory has a
+# github-auth.sh, so it resolves to the built-in github-auth.nix sitting beside
+# the scripts (see resolve_playbook). It lives at ~/.config/git/config rather
+# than ~/.gitconfig - which `dotfiles`/configenv overwrites - so it needs no
+# root and no box-wide /etc/gitconfig any more.
+# The editor is not a name of its own: configenv's module states vim's package
+# and its plugin set beside the ~/.vimrc that asks for them, so `dotfiles` is
+# the entry that carries vim.
+WORKSPACE_BASE_MODS = ("home-manager", "github-auth", "jj", "dotfiles",
                        "neovim", "claude-code", "cargo-binstall",
                        "repo-bootstrap")
 

@@ -43,9 +43,10 @@ playbook apt-only — just `box-packages` and `nix`, and no module at all —
 and `nix`'s box
 scope + the `trusted-users` line that names the privileged account and never an
 agent, and `home-manager`'s agent scope + its `requires = ["nix"]` across that
-same boundary, and the vim split — `vim` resolving to the flake's module with no
-`vim.sh` anywhere, and no admin-side implementation left at all: the
-privileged account keeps stock, unconfigured apt vim), manifest
+same boundary, and the vim story — no `vim` name in either playbook and
+neither half of such a mod in `devbox/mods/`, because configenv's module
+carries the editor beside the `~/.vimrc` it configures, while the privileged
+account keeps stock, unconfigured apt vim), manifest
 rendering, `render_repos` + the `repos` payload file, env-file quoting,
 the home-manager flake (`render_workspace_nix`: the rendered attribute set, nix
 string escaping and bare-vs-quoted attribute names, a `<name>.enable` flag per
@@ -107,8 +108,8 @@ dropped names (`emacs`, `tmux`, `fzf`, `ripgrep`, …) appear in no built-in
 mod script, and the old name is in `RETIRED_MODS`), the **admin
 de-customization** (the box playbook shrunk to `box-packages` + `nix`,
 and the privileged account's login shell left on `init-script.sh`'s
-`/bin/bash` rather than zsh — `vim-plug.sh` and `github-auth.sh`
-deleted outright), **workspace-local and global nix modules** (JIM-209:
+`/bin/bash` rather than zsh — no `vim-plug.sh` and no `github-auth.sh`
+anywhere), **workspace-local and global nix modules** (JIM-209:
 `find_nix_module`/`nix_module_names` against fake workspace/global/built-in
 directories — the same workspace > global > built-in precedence
 `find_mod_script`/`resolve_mod` give bash mods, out of the SAME three
@@ -277,16 +278,15 @@ paths up to `<file>.devbox-backup` and every later one is a no-op reconverge;
 the backups are byte-identical to what the generation now links, so delete them
 by hand or `devbox detach --purge` the account.
 
-For the vim split, on that same box: `vim` opens with no error in BOTH accounts
-- the agent's from the generation, `:scriptnames` there listing the store's
-vimrc and the account's own `~/.vimrc`, and `:colorscheme` answering
-base16-chalk, which is what proves the store's plugins loaded before the
-account's vimrc ran, since configenv's file sets it while being sourced; the
-privileged account's is stock apt vim with no `~/.vimrc`, no plugins and no
-colorscheme to check, which is the point. The agent's `command -v vim` is the
-generation's wrapper and not configenv's plain `pkgs.vim` beside it in the same
-profile, which is what `lib.hiPrio` in `vim.nix` buys — `:scriptnames` naming
-the store's vimrc is the same fact read from inside.
+For vim, on that same box: it opens with no error in BOTH accounts - the
+agent's from the generation, `:scriptnames` there listing the store's vimrc and
+the account's own `~/.vimrc`, and `:colorscheme` answering base16-chalk, which
+is what proves the store's plugins loaded before the account's vimrc ran, since
+configenv's file sets it while being sourced; the privileged account's is stock
+apt vim with no `~/.vimrc`, no plugins and no colorscheme to check, which is
+the point. The agent's `command -v vim` is the wrapper configenv's
+`programs.vim` builds, one derivation in that profile providing `bin/vim` —
+`:scriptnames` naming the store's vimrc is the same fact read from inside.
 
 For `github-auth`, on that same box: as the agent, `git config
 credential.https://github.com.helper` (or `cat ~/.config/git/config`) names
