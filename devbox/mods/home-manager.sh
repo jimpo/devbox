@@ -36,10 +36,19 @@
 #
 # `-b devbox-backup` moves a file the generation wants to own but did not write
 # aside to `<file>.devbox-backup`, rather than aborting the switch. An account
-# that bash mods have set up has such a file (a plain ~/.zshenv, which
-# nix/zshenv.nix owns), and a failed activation would leave the account with no
-# generation at all. Only the first switch meets one: after it, every file the
-# generation owns is its own symlink and no mod writes there.
+# a bash mod has written into has such files, and a failed activation would
+# leave it with no generation at all. Only the first switch meets one: after
+# it, every file the generation owns is its own symlink and no mod writes
+# there.
+#
+# `--refresh` re-resolves the flake's mutable inputs instead of reusing nix's
+# cached answer for up to `tarball-ttl` (an hour by default). `configenv` is
+# the one input named by branch rather than by rev (see nix/flake.nix), and
+# without this a shared-configs edit would reach the box an hour late, with no
+# way to hurry it from here. The pinned inputs are content-addressed, so it
+# costs one branch lookup and no re-download. home-manager passes the flag
+# through to the `nix build` that evaluates `--flake`, which is why it sits
+# after the `--`.
 #
 # Idempotency: `home-manager switch` is a reconcile - an unchanged flake
 # produces the same generation and touches nothing.
@@ -86,5 +95,5 @@ esac
 # `--flake` argument. Before the `--` it would apply to resolving $HM_FLAKE,
 # which is a different flake with a lock of its own.
 echo "==> home-manager switch (agent-$system)"
-nix run "$HM_FLAKE" -- switch -b devbox-backup --no-write-lock-file \
+nix run "$HM_FLAKE" -- switch -b devbox-backup --no-write-lock-file --refresh \
   --flake "path:$flake#agent-$system"

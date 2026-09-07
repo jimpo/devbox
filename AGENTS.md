@@ -38,9 +38,9 @@ modular-provisioning logic (mod resolution
 precedence — now keyed on the marker's own mods directory — the `# /// mod`
 metadata block — `requires`/`runas`/`packages`, plus
 its rejection of unknown keys, bad values, duplicate and mislabeled fences — the
-two playbooks and `scoped_runas`'s narrowing of each mod's targets (`dotfiles`
-now agent-only, so the box playbook is apt-only — just `dotfiles-packages` and
-`nix` — and `nix`'s box
+two playbooks and `scoped_runas`'s narrowing of each mod's targets (the box
+playbook apt-only — just `dotfiles-packages` and `nix`, and no module at all —
+and `nix`'s box
 scope + the `trusted-users` line that names the privileged account and never an
 agent, and `home-manager`'s agent scope + its `requires = ["nix"]` across that
 same boundary, and the vim split — `vim` resolving to the flake's module with no
@@ -85,15 +85,23 @@ present in the script and unexpanded in the payload file the box receives, with
 the `[env]` value itself in NO payload file), the
 **converted `github-auth`** (`modules/github-auth.nix`, agent-scoped now
 rather than a root box mod: it claims `~/.config/git/config` — never
-`/etc/gitconfig` — with a `home.file`, `dotfiles`/configenv's setup.sh never
-touching that path being what removes the ordering constraint the box-mod
-version needed, and `repo-bootstrap` still requiring it, now satisfied as a
-module rather than across the box/workspace boundary), the **admin
-de-customization** (the box playbook shrunk to `dotfiles-packages` + `nix`:
-`dotfiles` and `vim-plug` dropped from it, `dotfiles.sh` narrowed to
-`runas = ["agent"]` with its admin-only `~/.zshenv` append deleted, and the
-privileged account's login shell left on `init-script.sh`'s `/bin/bash`
-instead of being switched to zsh — `vim-plug.sh` and `github-auth.sh`
+`/etc/gitconfig` — with a `home.file`, configenv owning `~/.gitconfig` and
+nothing else claiming the XDG path, and `repo-bootstrap` still requiring it,
+now satisfied as a
+module rather than across the box/workspace boundary), the **converted
+`dotfiles`** (JIM-255: a base mod that is only `modules/dotfiles.nix` — no
+script anywhere, no manifest line, no mod script naming configenv except the
+apt half; it imports the repository devbox takes as a NON-flake input
+(`flake = false`, so no second nixpkgs to `follows`) through the
+`extraSpecialArgs` the flake hands every module, by `.outPath` rather than by
+the input attribute set an `imports` entry would read as an inline module, and
+sets configenv's own `enable` from `devbox.mods.dotfiles.enable` rather than
+wrapping the import in an `mkIf` that `imports` cannot hold; the branch is
+named with no rev, and `home-manager.sh` passes `--refresh` so a switch
+re-resolves it), the **admin
+de-customization** (the box playbook shrunk to `dotfiles-packages` + `nix`,
+and the privileged account's login shell left on `init-script.sh`'s
+`/bin/bash` rather than zsh — `vim-plug.sh` and `github-auth.sh`
 deleted outright), **workspace-local and global nix modules** (JIM-209:
 `find_nix_module`/`nix_module_names` against fake workspace/global/built-in
 directories — the same workspace > global > built-in precedence
@@ -183,7 +191,7 @@ It does not and cannot exercise `box create`/`up`/`stop`/`destroy`/`host`/
 `create`/`detach`/`list --attached`/`jj fetch` end-to-end against real infra
 (`jj fetch`'s actual `jj git fetch` needs a
 booted, provisioned box), the actual behavior of the built-in mods on a real
-box (dotfiles, repo bootstrap, the multi-user nix
+box (repo bootstrap, the multi-user nix
 install and its daemon — though
 `repo-bootstrap`'s loop over the `repos` file is plain bash and can be run by
 hand against fake `jj`/`git`), **anything nix evaluates** — pytest covers the
@@ -193,9 +201,12 @@ and it needs no box: it assembles a payload flake in a temp dir and forces
 activationPackage` against it, with EVERY module enabled (a false
 `devbox.mods.<name>.enable` leaves that module's body inside an unforced
 `mkIf`, so a check mirroring a real playbook would evaluate almost nothing).
-**Run it on any change to a `.nix` file, before committing.** `--build` also
-realises the closure, which is minutes of downloads and catches what
-evaluation cannot. `--out-dir DIR` keeps the assembled flake to poke at. It
+**Run it on any change to a `.nix` file, before committing.** It reaches the
+network — `configenv` is named by branch, so evaluation resolves it. `--build`
+also realises the closure, which is minutes of downloads and catches what
+evaluation cannot, including the two failures evaluation cannot see: two
+packages owning one path in the profile (`buildEnv`) and two `home.file`
+entries owning one path in the home (`home-manager-files`). `--out-dir DIR` keeps the assembled flake to poke at. It
 needs `nix` on the host's PATH; failing that, the same check runs on a box
 (`devbox ssh`), where the `nix` mod has installed one. The `home-manager
 switch` itself, and how a module behaves once activated, stay on-box manual
@@ -240,14 +251,25 @@ what makes it a pre-commit step rather than a post-deploy one.
 
 For the `jj` module, on the same box: `ssh <agent-alias> 'jj --version'` finds
 jujutsu from `~/.nix-profile/bin`; `~/.config/jj/config.toml` is configenv's
-own copy, a REAL file `dotfiles` wrote, and `~/.config/jj/conf.d/00-devbox.toml`
-is the generation's store symlink beside it; `jj config get user.name` in a
-checkout returns the workspace's identity, which is conf.d's value winning over
+copy and `~/.config/jj/conf.d/00-devbox.toml` the identity beside it, both
+store symlinks of the same generation; `jj config get user.name` in a checkout
+returns the workspace's identity, which is conf.d's value winning over
 config.toml's; and a setting in `~/.config/jj/conf.d/local.toml` takes effect
 over both, which is the by-hand override route on the box. The one that matters
 is the reconverge: run `devbox sync --mods` **twice** and both runs report a
-switch — the two halves write different files, so neither backs the other's up
-and no `config.toml.devbox-backup` is ever created.
+switch, with no `config.toml.devbox-backup` ever created — a generation reruns
+over its own symlinks and backs nothing up.
+
+For the `dotfiles` module, on that same box: as the agent, `~/.vimrc`,
+`~/.tmux.conf`, `~/.gitconfig`, `~/.zshrc` and `~/.config/{jj,nvim}` are all
+store symlinks; an interactive `devbox ssh` gets the oh-my-zsh prompt with the
+`jimpo` theme, and `ssh <agent-alias> 'echo $SOME_ENV_KEY'` — NON-interactive,
+so `~/.zshenv` only — still returns an `[env]` value, which is the one that
+regresses silently. The privileged account has none of it. On a box whose
+accounts a `dotfiles` SCRIPT once set up, the first switch backs each of those
+paths up to `<file>.devbox-backup` and every later one is a no-op reconverge;
+the backups are byte-identical to what the generation now links, so delete them
+by hand or `devbox detach --purge` the account.
 
 For the vim split, on that same box: `vim` opens with no error in BOTH accounts
 - the agent's from the generation, `:scriptnames` there listing the store's
@@ -255,7 +277,10 @@ vimrc and the account's own `~/.vimrc`, and `:colorscheme` answering
 base16-chalk, which is what proves the store's plugins loaded before the
 account's vimrc ran, since configenv's file sets it while being sourced; the
 privileged account's is stock apt vim with no `~/.vimrc`, no plugins and no
-colorscheme to check, which is the point.
+colorscheme to check, which is the point. The agent's `command -v vim` is the
+generation's wrapper and not configenv's plain `pkgs.vim` beside it in the same
+profile, which is what `lib.hiPrio` in `vim.nix` buys — `:scriptnames` naming
+the store's vimrc is the same fact read from inside.
 
 For `github-auth`, on that same box: as the agent, `git config
 credential.https://github.com.helper` (or `cat ~/.config/git/config`) names
@@ -403,10 +428,12 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   mods directories — and the `home-manager` mod switches to it. Adding a module
   is one new file and no registration. A mod is a bash script
   or a module here, never both. `flake.nix` pins nixpkgs and home-manager to
-  exact revs and carries the module conventions in one comment block; there is
+  exact revs, takes `configenv` as a NON-flake input on a rolling `main`
+  (`dotfiles.nix` imports it; `home-manager.sh` passes `--refresh` so a switch
+  re-resolves that branch), and carries the module conventions in one comment
+  block; there is
   deliberately **no `flake.lock`** — the pins make the lock nix writes on the
-  box deterministic, and no host here has `nix` to generate or verify one
-  (adopting a checked-in lock is the natural follow-up once one does).
+  box deterministic for the two that have them.
   `options.nix` declares `devbox.workspace.*` and the free-form
   `devbox.mods.<name>.enable`, and is the only file that imports the rendered
   `workspace.nix` — which `render_workspace_nix` writes per attachment (agent
@@ -451,13 +478,14 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   ever enters a nix expression**:
   /nix/store is world-readable and shared by every attachment. `zshenv.nix` is
   the one module that is not a mod — always in the generation, gated on no
-  flag: it owns the agent's `~/.zshenv` (the file every zsh reads, `ssh <box>
-  '<cmd>'` included), puts `~/.local/bin` on PATH through `home.sessionPath`,
-  and *sources* the 0600 `~/.config/devbox/env` from it rather than carrying a
-  value out of it. It deliberately does not enable `programs.zsh`, which would
-  make the generation own `~/.zshrc` as well — that file belongs to the
-  `dotfiles` bash mod, and one file written by both halves is what breaks the
-  second activation.
+  flag: it enables `programs.zsh` and appends to the agent's `~/.zshenv` (the
+  file every zsh reads, `ssh <box> '<cmd>'` included) through `envExtra`, puts
+  `~/.local/bin` on PATH through `home.sessionPath`, and *sources* the 0600
+  `~/.config/devbox/env` from it rather than carrying a value out of it.
+  `programs.zsh` is home-manager's own writer of that file, and a `home.file`
+  claiming the same path is a second one, which the `home-manager-files` build
+  refuses; enabling it here rather than leaving it to `dotfiles` is what keeps
+  `~/.zshenv` in the generation for a playbook that has no `dotfiles`.
 - `provision-driver.sh` — runs as the privileged user. `ensure_admin` wires that
   account; `ensure_agent` creates the attaching workspace's (idempotent, also
   reachable as `--ensure-agent`, enabling lingering so that account's systemd

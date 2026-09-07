@@ -4,15 +4,15 @@
 # runas = ["root"]
 # ///
 #
-# mod: dotfiles-packages - the root half of the configenv setup: its install.sh,
-# which apt-installs the package set the dotfiles/editor config expects (incl.
-# unzip, which setup.sh's vim CSApprox step needs).
+# mod: dotfiles-packages - configenv's install.sh, which apt-installs the
+# package set the shared configs expect system-wide (incl. unzip, which the
+# vim CSApprox step needs).
 #
-# Split out of the `dotfiles` mod because it is the one piece that genuinely
-# needs privilege and cannot be expressed as `packages` - install.sh is an
-# arbitrary script from a clone, not a package list. Being system-wide, it is
-# also a genuinely box-level mod in the base: it runs once per box, while its
-# partner runs setup.sh per account, unprivileged.
+# BOX-LEVEL, and root: apt is the machine's, so this runs once per box rather
+# than once per attachment. It cannot be expressed as `packages` either -
+# install.sh is an arbitrary script from a clone, not a package list. The
+# per-account half of configenv is the `dotfiles` module, which places the
+# files themselves out of the nix store and needs no privilege.
 #
 # Idempotency: apt install is a no-op when the packages are already present, so
 # a reconverge is fast.

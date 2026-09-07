@@ -7,12 +7,9 @@
 # behind it, not the transport.
 #
 # LIVES AT ~/.config/git/config, git's XDG global config - not ~/.gitconfig.
-# `dotfiles`/configenv's setup.sh copies its own gitconfig over ~/.gitconfig,
-# which would erase a helper written there; nothing touches
-# ~/.config/git/config, so this module can own it outright and needs no
-# ordering constraint against `dotfiles` at all. (Formerly a root mod writing
-# the same helper into /etc/gitconfig, box-wide, specifically to dodge that
-# clobber - agent-scoped state makes the workaround unnecessary.)
+# The `dotfiles` module owns ~/.gitconfig (it is one of the files configenv
+# places), and two modules cannot own one file. git reads both, so this one
+# takes the XDG path and owns it outright.
 #
 # The helper line holds no secret: it names a helper, and the helper answers
 # with whatever GITHUB_TOKEN is in the CALLING account's own

@@ -142,8 +142,9 @@ def _check_name_unique(gc: GlobalConfig, name: str) -> None:
 # ---- box lifecycle --------------------------------------------------------------
 def _boot_box(box: BoxSpec, gc: GlobalConfig, provider) -> None:
     """Launch a box and run its own playbook. The box playbook needs no workspace:
-    it is the apt half of the dotfiles setup plus a usable shell for the
-    privileged account, which is the box's debugging entry point."""
+    it is the apt package set the shared configs expect plus the nix store every
+    attachment shares, on a machine whose privileged account is the box's
+    debugging entry point."""
     _check_name_unique(gc, box.name)
     # Built before the launch so a broken mod surfaces before we boot a machine.
     tarball = build_tarball(build_box_payload(box.admin_user, gc))

@@ -179,11 +179,11 @@ machine:
   matters to you; devbox doesn't ship one.
 - **Shared CPU, RAM and disk.** N agents running `cargo build` contend, and one
   can ENOSPC the rest. Box sizing is now an N-workspace decision.
-- **Duplication, deliberately.** Each account gets its own oh-my-zsh, dotfiles
-  and checkouts — a few minutes and a few hundred MB per
+- **Duplication, deliberately.** Each account gets its own home and its own
+  checkouts — a few minutes and a few hundred MB per
   attach, accepted in exchange for accounts that don't share state. (What the
   generation provides is the exception: /nix/store is one machine-wide store, so
-  two accounts on the same plugin set share the paths.)
+  two accounts on the same dotfiles and plugin set share the paths.)
 - **One provisioning run per box at a time.** Concurrent attaches share apt's
   lock (devbox sets `DPkg::Lock::Timeout=600`) and the ownership markers are
   written atomically, but nothing serializes two full runs.
@@ -697,9 +697,11 @@ workspace mods (config.toml):         + rust + wasm-tools + …
 ```
 
 Ordering encodes the constraints (jj before repo-bootstrap, which clones with
-it; `dotfiles-packages`, the apt half, before `dotfiles`, the per-user half —
-across the playbook boundary, since a box mod always ran earlier). The 95%
-case is "just add rust": `mods = ["rust"]`.
+it; `nix` before `home-manager`, which switches with it — across the playbook
+boundary, since a box mod always ran earlier). Names in the workspace base that
+no script answers to (`home-manager` aside: `github-auth`, `jj`, `dotfiles`,
+`vim`, `neovim`) are modules of the generation rather than steps in the run.
+The 95% case is "just add rust": `mods = ["rust"]`.
 
 **A box takes no config, so its playbook is fixed** — `dotfiles-packages` (apt,
 as root) and `nix` (the multi-user nix store and its daemon, which every
@@ -753,27 +755,40 @@ and declares a `systemd.user.service`, gets its `CLOUDFLARE_TOKEN`. Lingering
 and across a reboot; `devbox status` lists the account's failed user units, so a
 tunnel that cannot authenticate is visible rather than silently down.
 
-**`dotfiles` is agent-only.** It declares `runas = ["agent"]` and lives only in
-the workspace playbook — the privileged account gets none of it. `devbox box
-ssh`, the debugging shell, deliberately stays on stock apt bash and
-unconfigured vim instead: the whole point of that account is to work
-regardless of what state a workspace's (or its own) nix generation or
-per-account config might be in, so it carries neither.
+**`dotfiles` is a module, and agent-only.** `devbox/mods/dotfiles.nix` imports
+[configenv](https://github.com/jimpo/configenv)'s own home-manager module —
+devbox takes that repository as a non-flake input — so `~/.vimrc`,
+`~/.tmux.conf`, `~/.gitconfig`, `~/.zshrc` (oh-my-zsh, the `jimpo` theme) and
+`~/.config/{jj,nvim}` are store symlinks the switch places, shared by every
+account on the box rather than cloned into each one. `imports` cannot sit
+inside a conditional, so configenv carries its own `enable` option and the
+module drives it from `devbox.mods.dotfiles.enable`. The input names a branch
+rather than a rev, deliberately: an edit to the shared configs reaches a box on
+the next `devbox sync --mods=home-manager`, which passes `--refresh` so nix
+re-resolves it.
+The privileged account gets none of it. `devbox box ssh`, the debugging shell,
+deliberately stays on stock apt bash and unconfigured vim instead: the whole
+point of that account is to work regardless of what state a workspace's (or
+its own) nix generation or per-account config might be in, so it carries
+neither.
 
-**vim is split by name instead**, because its two halves are different things
+**vim is split by name**, because its two halves are different things
 — one implementation and one absence. An agent's is `devbox/mods/vim.nix`,
-which takes the plugin set (base16-vim, vim-go, rust.vim) from the store; the
+which takes the plugin set (base16-vim, vim-go, rust.vim) from the store and
+wraps the binary so `~/.vimrc` is still read; the
 privileged account has no generation and no dotfiles, so it keeps whatever
 apt's `vim` ships with, unconfigured. They still cannot share the name `vim`:
-a script of that name would shadow the module for every agent.
+a script of that name would shadow the module for every agent. configenv's
+module puts a plain `vim` in the same profile, and two derivations cannot both
+own `~/.nix-profile/bin/vim`, so the module marks its wrapper `lib.hiPrio` and
+that one wins.
 
 **`github-auth` is a home-manager module too**, `devbox/mods/github-auth.nix`:
 it points git's credential helper at `gh auth git-credential` from
-`~/.config/git/config` (git's XDG global config) instead of the box-wide
-`/etc/gitconfig` a root mod used to write. `dotfiles`/configenv's `setup.sh`
-overwrites each account's own `~/.gitconfig`, which would erase a helper
-written there, but it never touches the XDG path — so the module needs no
-ordering constraint against `dotfiles` and no privilege at all.
+`~/.config/git/config` (git's XDG global config) rather than the box-wide
+`/etc/gitconfig` or the account's own `~/.gitconfig`. configenv owns
+`~/.gitconfig`, and two modules cannot own one file, so this one takes the XDG
+path git reads as well — and needs no privilege at all.
 `repo-bootstrap` still `requires = ["jj", "github-auth"]` for a private `jj
 git clone`; a module satisfies that wherever it sits, since it isn't a step in
 the run — the generation carrying it is switched by `home-manager`, first in
@@ -928,7 +943,7 @@ belongs to another workspace, if it exists with no record at all (pass `--adopt`
 or if the agent has somehow acquired sudo or a root-equivalent group. It is a
 driver preamble rather than a mod on purpose: it must always run, must not be
 shadowable by a workspace's own mods directory, and must not be skippable via
-`devbox sync --mods=dotfiles`.
+`devbox sync --mods=claude-code`.
 
 **Idempotency contract:** every mod either overwrites unconditionally or guards
 on "already done", so `create` and every reconverge are safe. Each built-in
@@ -942,7 +957,7 @@ needs it. The box playbook is indexed first, so a workspace mod may depend on a 
 mod — the machine exists before any attachment does. It is **not** a resolver —
 it never reorders or auto-inserts; it just validates order (so a future reorder
 can't silently break things). Built-in examples: `repo-bootstrap`
-`requires = ["jj", "github-auth"]`, `dotfiles` `requires = ["dotfiles-packages"]`.
+`requires = ["jj", "github-auth"]`, `home-manager` `requires = ["nix"]`.
 
 ### Example: a rust workspace
 
@@ -1072,11 +1087,10 @@ That helper line lives in **`~/.config/git/config`**, git's XDG global config,
 written per account by the generation rather than once per box as root. It
 holds no secret — it names a helper, and the helper answers with whatever
 `GITHUB_TOKEN` the *calling* account has in its own `~/.config/devbox/env`.
-Agent-scoped rather than box-wide: `dotfiles`/configenv's `setup.sh` overwrites
-each account's own `~/.gitconfig`, which would erase a helper written there,
-but it never touches the XDG path, so the module needs no ordering constraint
-against it and no privilege at all. The privileged account has neither a
-generation nor `dotfiles`, so it gets none of this — a manual `git clone` of a
+Agent-scoped rather than box-wide: configenv's module owns each account's own
+`~/.gitconfig`, and two modules cannot own one file, so this one takes the XDG
+path git reads as well — and needs no privilege at all. The privileged account
+has neither a generation nor `dotfiles`, so it gets none of this — a manual `git clone` of a
 private repo from `devbox box ssh` needs a token supplied by hand. With no
 token the helper prints nothing and exits 1, git falls through, and public
 clones are unaffected.

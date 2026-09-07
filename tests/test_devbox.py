@@ -1510,9 +1510,15 @@ def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():
     revs = re.findall(r"github:nix-community/home-manager/([0-9a-f]{40})", flake)
     assert len(revs) == 1
     assert f'HM_REV="{revs[0]}"' in mod
-    # Both inputs pinned to an exact rev, so the lock nix writes on the box is
-    # deterministic without one being checked in.
+    # nixpkgs and home-manager are pinned to an exact rev, so the lock nix
+    # writes on the box is deterministic for them without one being checked in.
     assert re.search(r"github:NixOS/nixpkgs/[0-9a-f]{40}", flake)
+    # configenv is the deliberate exception: it rolls with its own `main`, so
+    # the switch has to re-resolve that branch rather than reuse nix's cached
+    # answer for up to `tarball-ttl`.
+    assert re.search(r'url = "github:jimpo/configenv";', flake)
+    assert not re.search(r"github:jimpo/configenv/[0-9a-f]{40}", flake)
+    assert "--refresh" in mod
 
 
 def test_the_flake_discovers_modules_by_file_presence_not_a_list():
@@ -1580,7 +1586,6 @@ def test_the_agents_zshenv_is_the_generations_and_holds_no_creds():
     code = "\n".join(line for line in zshenv.splitlines()
                      if not line.lstrip().startswith("#"))
     assert "./zshenv.nix" in flake
-    assert 'home.file.".zshenv"' in code
     assert "home.sessionPath" in code
     # It SOURCES the 0600 env file rather than carrying a value from it:
     # /nix/store is world-readable and shared by every attachment on the box.
@@ -1588,19 +1593,64 @@ def test_the_agents_zshenv_is_the_generations_and_holds_no_creds():
     # devbox's own plumbing, not an optional mod: always in the generation, and
     # gated on no `devbox.mods.<name>.enable` flag.
     assert "devbox.mods" not in code
-    # `programs.zsh` would make the generation own ~/.zshrc too, and that file
-    # is the `dotfiles` bash mod's (configenv installs oh-my-zsh into it). One
-    # file written by both halves is what breaks the SECOND activation.
-    assert "programs.zsh" not in code
+    # ~/.zshenv has exactly one writer. home-manager's own zsh module writes it
+    # (the generation's session variables go in it), and a `home.file` entry
+    # for the same path is a second one, which the home-manager-files build
+    # refuses. So this appends through `envExtra`, and enables `programs.zsh`
+    # itself so the file is in the generation even for a playbook with no
+    # `dotfiles`.
+    assert "programs.zsh.enable = true;" in code
+    assert "programs.zsh.envExtra" in code
+    assert 'home.file.".zshenv"' not in code
 
 
-def test_dotfiles_never_touches_zshenv():
-    # Agent-only now, and an agent's ~/.zshenv is a symlink into the store
-    # (nix/zshenv.nix); appending to it would break the account's next
-    # activation, so the mod must never write it.
-    mod = (devbox.BUILTIN_MODS_DIR / "dotfiles.sh").read_text()
-    code = [line for line in mod.splitlines() if not line.strip().startswith("#")]
-    assert not any(".zshenv" in line for line in code)
+def test_dotfiles_is_the_generations_and_imports_configenv(isolated_mods):
+    # A base mod with no script anywhere, so the playbook resolves the name to
+    # the module and the driver gets no line for it: the shared configs are
+    # placed by the switch, out of the store, not by a clone in each account.
+    assert "dotfiles" in devbox.WORKSPACE_BASE_MODS
+    assert "dotfiles" in devbox.nix_module_names()
+    assert devbox.find_mod_script("dotfiles", None) is None
+    playbook = devbox.resolve_playbook(
+        devbox.workspace_playbook(_workspace()), None)
+    assert "dotfiles" in playbook.modules
+    assert "dotfiles" not in [s.name for s in playbook.specs]
+
+    text = (devbox.BUILTIN_MODS_DIR / "dotfiles.nix").read_text()
+    code = "\n".join(line for line in text.splitlines()
+                      if not line.strip().startswith("#"))
+    # `imports` cannot sit inside `mkIf`, so configenv carries its own enable
+    # option and this module drives it from the flag every module reads.
+    assert "imports = [ configenv.outPath ];" in code
+    assert "configenv.enable = config.devbox.mods.dotfiles.enable;" in code
+    assert "mkIf" not in code
+    # A workstation's editors and fonts are not a headless box's.
+    assert "desktop" not in code
+
+
+def test_the_flake_hands_configenv_to_the_modules(isolated_mods):
+    # configenv uses home-manager's non-flake interface, so devbox takes the
+    # repository itself as an input and a module imports its default.nix. A
+    # non-flake input has no nixpkgs of its own, so the box builds one closure.
+    flake = (devbox.NIX_DIR / "flake.nix").read_text()
+    code = "\n".join(line for line in flake.splitlines()
+                      if not line.strip().startswith("#"))
+    assert "flake = false;" in code
+    assert "follows" not in code.split("configenv = {")[1].split("};")[0]
+    # extraSpecialArgs is how a module reaches an input at all.
+    assert "extraSpecialArgs = { inherit configenv; };" in code
+
+
+def test_the_shared_configs_are_placed_once_per_box_not_cloned_per_account():
+    # The whole point of the conversion: nothing clones configenv into an
+    # account or runs its setup.sh there any more, so no mod script may name
+    # the repository.
+    for script in devbox.BUILTIN_MODS_DIR.glob("*.sh"):
+        code = [line for line in script.read_text().splitlines()
+                if not line.strip().startswith("#")]
+        if script.name == "dotfiles-packages.sh":
+            continue          # the apt half still runs install.sh, as root
+        assert not any("configenv" in line for line in code), script.name
 
 
 # ---- cloudflared: a converted opt-in mod that ships a systemd user service ---
@@ -2220,22 +2270,18 @@ def test_shipped_mods_never_call_sudo(isolated_mods):
 
 
 def test_dotfiles_is_agent_only_and_the_box_playbook_stays_apt_only(isolated_mods):
-    # The privileged account gets no configenv dotfiles any more - it stays on
-    # stock apt bash/vim, independent of any per-account setup that could
-    # itself need fixing. dotfiles is workspace-scoped only.
+    # The privileged account gets no configenv dotfiles - it stays on stock apt
+    # bash/vim, independent of any per-account setup that could itself need
+    # fixing. The shared configs are a module, and a module is one agent's
+    # generation, so the box playbook consults none of it.
     box = devbox.resolve_playbook(devbox.box_playbook(), None,
-                                  devbox.SCOPE_BOX).specs
-    workspace = devbox.resolve_playbook(
-        devbox.workspace_playbook(_workspace()), None).specs
-    assert devbox.render_manifest(box, devbox.SCOPE_BOX).splitlines() == [
+                                  devbox.SCOPE_BOX)
+    assert devbox.render_manifest(box.specs, devbox.SCOPE_BOX).splitlines() == [
         "dotfiles-packages\troot\t",   # the apt half: once, as root, per box
         "nix\troot\txz-utils",
     ]
     assert "dotfiles" not in devbox.BOX_BASE_MODS
-    by_name = {s.name: s for s in workspace}
-    assert by_name["dotfiles"].runas == ["agent"]
-    assert devbox.scoped_runas(by_name["dotfiles"].runas, devbox.SCOPE_WORKSPACE) == ["agent"]
-    assert "dotfiles-packages" in by_name["dotfiles"].requires
+    assert box.modules == []
 
 
 def test_vim_is_a_module_for_the_agent_only(isolated_mods):
@@ -2262,9 +2308,18 @@ def test_the_vim_module_declares_the_plugin_set_and_reads_its_own_flag():
     for plugin in ("base16-vim", "rust-vim", "vim-go"):
         assert plugin in text
     # `-u <generated vimrc>` makes vim skip the account's own file, so the
-    # generated one sources it back - otherwise the dotfiles' vim config, which
-    # is still the bash half's business, would stop applying.
+    # generated one sources it back - otherwise configenv's vim config, which
+    # sets the colorscheme while being sourced, would stop applying.
     assert "source ~/.vimrc" in text
+    # configenv's module puts a plain `pkgs.vim` in the same profile, and two
+    # derivations cannot both own ~/.nix-profile/bin/vim. `home.packages` is a
+    # merged list no module can take an entry out of, so the wrapper outranks
+    # the plain one instead. `programs.vim` would add its package at the
+    # default priority, which collides.
+    code = "\n".join(line for line in text.splitlines()
+                      if not line.strip().startswith("#"))
+    assert "lib.hiPrio" in code
+    assert "programs.vim" not in code
 
 
 def test_github_auth_is_a_home_manager_module_now(isolated_mods):

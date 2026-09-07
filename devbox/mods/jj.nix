@@ -3,13 +3,12 @@
 # The version is nixpkgs': `pkgs.jujutsu` at the rev flake.nix pins, so bumping
 # the pin bumps jj.
 #
-# `dotfiles` OWNS ~/.config/jj/config.toml. That bash mod copies configenv's
-# whole `jj` directory into the account with `cp -f`, which replaces whatever
-# sits at that path, so this module stays off it entirely - the same split
-# `neovim.nix` makes for ~/.config/nvim. A file both halves write is what
-# breaks the reconverge: home-manager moves a file it wants to own but did not
-# write aside to `<file>.devbox-backup`, and the switch after that one aborts
-# on the backup already being there.
+# `dotfiles` OWNS ~/.config/jj/config.toml. That module places configenv's own
+# config.toml there, so this one stays off the path entirely - the same split
+# `neovim.nix` makes for ~/.config/nvim. Two modules defining one `home.file`
+# entry is an evaluation conflict, and either of them claiming a path some
+# script writes on the box is a switch that aborts on its own stale
+# `<file>.devbox-backup` the second time round.
 #
 # `programs.jujutsu` is deliberately unused. It claims config.toml as soon as
 # its `settings` is non-empty, and `settings` is not only ours to keep empty -

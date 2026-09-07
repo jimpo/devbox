@@ -25,16 +25,21 @@
 # the payload directory is not a repo. `path:` copies the directory to the
 # store as it is on disk.
 #
-# NO flake.lock. Both inputs are pinned to an exact 40-character rev instead,
-# which makes the lock nix writes on the box deterministic anyway. To bump
-# them, resolve the two branch heads and paste the revs below (the nixpkgs
-# release and the home-manager branch must match):
+# NO flake.lock. `nixpkgs` and `home-manager` are pinned to an exact
+# 40-character rev instead, which makes the lock nix writes on the box
+# deterministic for them. To bump them, resolve the two branch heads and paste
+# the revs below (the nixpkgs release and the home-manager branch must match):
 #
 #   curl -s https://api.github.com/repos/NixOS/nixpkgs/branches/nixos-26.05
 #   curl -s https://api.github.com/repos/nix-community/home-manager/branches/release-26.05
 #
 # `mods/home-manager.sh` pins its `nix run` of the home-manager CLI to the same
 # rev as the input below; bump both together.
+#
+# `configenv` IS THE EXCEPTION: it rolls with its own `main`, deliberately, so
+# an edit to the shared configs reaches every box without a devbox release.
+# `mods/home-manager.sh` passes `--refresh` so a switch resolves that branch
+# afresh rather than reusing nix's cached answer for up to `tarball-ttl`.
 #
 # ---- MODULE CONVENTIONS (read this before adding a module) ------------------
 #
@@ -115,17 +120,27 @@
 # that is global rather than per-mod (`nixpkgs.config.allowUnfree`, say) goes
 # in options.nix's `config` block, so there is one place to look for it.
 #
-# EXCEPT WHERE A BASH MOD ALREADY OWNS THE FILE. `dotfiles` runs configenv's
-# setup.sh in the same account, which writes ~/.zshrc, ~/.vimrc, ~/.tmux.conf,
-# ~/.gitconfig and ~/.config/{jj,nvim} with `cp -f`. A module must not claim
-# any of those paths: home-manager backs up a file it wants to own but did not
-# write, so the two halves taking one file from each other turns into a switch
-# that aborts on its own stale `<file>.devbox-backup`. Reach for whatever keeps
-# the module off the path - a `programs.<name>` option that writes elsewhere
+# EXCEPT WHERE ANOTHER MODULE ALREADY OWNS THE FILE. Two modules that define
+# the same `home.file` entry are an evaluation conflict, and a module that
+# claims a path some bash mod writes on the box is a switch that aborts on its
+# own stale `<file>.devbox-backup` the second time round. `dotfiles.nix`
+# imports configenv, which owns ~/.zshrc (through `programs.zsh`), ~/.vimrc,
+# ~/.ideavimrc, ~/.tmux.conf, ~/.gitconfig, ~/.config/jj/config.toml and
+# ~/.config/nvim; devbox's own zshenv.nix owns ~/.zshenv through the same
+# `programs.zsh`. A module wanting one of those reaches for whatever keeps it
+# off the path instead - a `programs.<name>` option that writes elsewhere
 # (`neovim.sideloadInitLua`), a config directory the program reads in addition
 # (`jj.nix`'s conf.d), or plain `home.packages` with no `programs.<name>` at
 # all. `github-auth.nix` is the same rule read forwards: it claims
-# ~/.config/git/config precisely because configenv writes ~/.gitconfig.
+# ~/.config/git/config precisely because configenv owns ~/.gitconfig.
+#
+# THE PROFILE IS THE SAME PROBLEM ONE LEVEL DOWN. `home.packages` is a merged
+# list no module can take an entry out of, and `buildEnv` refuses two paths
+# that own one file - two packages both providing bin/vim, say. A priority
+# settles it where the duplicate is unavoidable: every path gets 5 unless its
+# meta says otherwise, so `lib.hiPrio` on the one that should win skips the
+# other rather than colliding (`vim.nix`). NEITHER of these two failures is an
+# evaluation error, so `devbox nix check` sees them only with `--build`.
 #
 # NO SECRETS, EVER. /nix/store is world-readable, on a box every attached
 # workspace shares, so nothing from a workspace's `[env]` may appear in a nix
@@ -151,9 +166,20 @@
       url = "github:nix-community/home-manager/65258d5c65a250189fde2e35f490d15e064c4c62";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Jim's shared configuration files, as a home-manager module -
+    # `dotfiles.nix` imports it. `flake = false` because configenv uses
+    # home-manager's non-flake interface: the input is the repository itself,
+    # and `imports = [ configenv ]` resolves its default.nix. That also means
+    # it carries no nixpkgs of its own to `follows`, so the box builds one
+    # closure rather than two. Unpinned, on `main`, by decision - see the
+    # flake.lock note above.
+    configenv = {
+      url = "github:jimpo/configenv";
+      flake = false;
+    };
   };
 
-  outputs = { nixpkgs, home-manager, ... }:
+  outputs = { nixpkgs, home-manager, configenv, ... }:
     let
       inherit (nixpkgs) lib;
 
@@ -178,6 +204,10 @@
 
       mkAgent = system: home-manager.lib.homeManagerConfiguration {
         pkgs = nixpkgs.legacyPackages.${system};
+        # A module reaches an input through its own argument list. `configenv`
+        # is the only one worth handing over: it is a module a mod imports,
+        # not a package set.
+        extraSpecialArgs = { inherit configenv; };
         modules = [
           # The option surface, and the rendered workspace values.
           ./options.nix

@@ -1,46 +1,54 @@
-# devbox: vim for the agent account - the plugin set from the store, and the
-# account's own ~/.vimrc for everything else.
+# devbox mod: vim for the agent account - the plugin set from the store, and
+# the account's own ~/.vimrc for everything else.
 #
-# THE PLUGINS ARE DECLARED HERE, not read from ~/.vimrc. That file is written
-# by the `dotfiles` mod from configenv, on the box, long after this flake is
-# evaluated; nix cannot learn a plugin list from it. The three below are the
-# ones configenv's vimrc asks for, so the declaration is the same set stated in
-# the half that can fetch it. Settings, mappings and the colorscheme stay in
-# that file - this module owns only what gets installed.
+# THE PLUGINS ARE DECLARED HERE, not read from ~/.vimrc. The three below are
+# the ones configenv's vimrc asks for, stated in the half that can fetch them;
+# `vim-sensible` is the baseline over which that file's own settings win.
+# Settings, mappings and the colorscheme stay in ~/.vimrc - this module owns
+# only what gets installed.
 #
-# ~/.vimrc IS STILL READ. `vim.customize` wraps the binary as
-# `vim -u <generated vimrc>`, and `-u` makes vim skip the user's own file, so
-# the generated one sources it back. `packloadall` goes first because these
-# plugins arrive through vim's package mechanism, which vim applies AFTER the
-# vimrc, while configenv's file runs `colorscheme base16-chalk` during it.
+# ~/.vimrc IS STILL READ. `customize` wraps the binary as `vim -u <generated
+# vimrc>`, and `-u` makes vim skip the user's own file, so the generated one
+# sources it back. `packloadall` goes first because these plugins arrive
+# through vim's package mechanism, which vim applies AFTER the vimrc, while
+# configenv's file runs `colorscheme base16-chalk` during it.
 #
-# CONFIGENV'S PLUGIN MANAGER STILL RUNS, harmlessly. Its vimrc calls
-# `plug#begin()` and names the same three plugins, and `dotfiles` installs the
-# plug.vim that answers those calls, so nothing errors. Nothing fetches the
-# plugins into ~/.vim/plugged for an agent, so vim-plug contributes empty
-# directories to 'runtimepath' and the store copies are what load.
+# `lib.hiPrio` IS LOAD-BEARING, and is why this module builds the package by
+# hand rather than through `programs.vim`. configenv's module puts a plain
+# `pkgs.vim` in the same profile, two derivations cannot both own
+# ~/.nix-profile/bin/vim, and `home.packages` is a merged list no module can
+# take an entry out of. A priority makes the choice explicit instead:
+# `buildEnv` gives every path priority 5 unless its meta says otherwise, and
+# the wrapper below asks for -10, so it is the `vim` on PATH and the plain one
+# is skipped without a collision. `programs.vim` would add its package at the
+# default priority, which collides.
 #
 # The box's privileged account is not covered by any of this: it has no
-# generation, no dotfiles and no vim-plug of its own any more - it keeps
-# whatever apt's `vim` ships with, unconfigured.
+# generation and no dotfiles, so it keeps whatever apt's `vim` ships with,
+# unconfigured.
 { config, lib, pkgs, ... }:
 lib.mkIf config.devbox.mods.vim.enable {
-  programs.vim = {
-    enable = true;
+  home.packages = [
+    (lib.hiPrio (pkgs.vim.customize {
+      # The wrapper's binaries: vim, vimdiff, rvim and the rest.
+      name = "vim";
 
-    # A terminal vim. The option's default is `vim-full`, the GUI build, whose
-    # closure a headless box has no use for.
-    packageConfigurable = pkgs.vim;
+      vimrcConfig = {
+        customRC = ''
+          packloadall
+          if filereadable(expand('~/.vimrc'))
+            source ~/.vimrc
+          endif
+        '';
 
-    # home-manager appends vim-sensible to whatever this names; it loads before
-    # ~/.vimrc is sourced, so configenv's own settings still win.
-    plugins = with pkgs.vimPlugins; [ base16-vim rust-vim vim-go ];
-
-    extraConfig = ''
-      packloadall
-      if filereadable(expand('~/.vimrc'))
-        source ~/.vimrc
-      endif
-    '';
-  };
+        # vim's own package mechanism, under a devbox-named package directory.
+        packages.devbox.start = with pkgs.vimPlugins; [
+          vim-sensible
+          base16-vim
+          rust-vim
+          vim-go
+        ];
+      };
+    }))
+  ];
 }

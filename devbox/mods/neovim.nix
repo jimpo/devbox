@@ -6,12 +6,12 @@
 # attachment's profile and nowhere else; the box's privileged account keeps the
 # apt `vim` the init script installs, which is what `devbox box ssh` uses.
 #
-# `dotfiles` OWNS ~/.config/nvim. That bash mod copies configenv's whole `nvim`
-# directory into the account, so `sideloadInitLua` keeps home-manager off the
-# same path: the generated lua (the provider stubs, the lua package path) is
-# loaded through a `--cmd 'lua dofile(...)'` wrapper argument before the user's
-# init.lua instead of being written to ~/.config/nvim/init.lua. Without it the
-# two halves would take that file from each other on every reconverge.
+# `dotfiles` OWNS ~/.config/nvim. That module links configenv's whole `nvim`
+# directory there, so `sideloadInitLua` keeps this one off the same path: the
+# generated lua (the provider stubs, the lua package path) is loaded through a
+# `--cmd 'lua dofile(...)'` wrapper argument before the user's init.lua
+# instead of being written to ~/.config/nvim/init.lua. Without it the two
+# would be writing into each other's directory.
 #
 # NO `programs.neovim.plugins`, for the same reason. configenv's init.lua
 # declares its plugins with `vim.pack.add`, which installs them under
