@@ -28,8 +28,10 @@
 # AGENT-ONLY, like the whole generation: the box's privileged account keeps
 # stock apt bash and unconfigured vim, deliberately independent of any
 # per-account setup that could itself need fixing (see flake.nix's
-# "home-manager is agent-only" note). The apt package set the configs assume
-# system-wide is the `dotfiles-packages` mod, which runs once per box, as root.
+# "home-manager is agent-only" note). Nothing of this is apt any more: the
+# packages the configs expect come from configenv's own module, in the agent's
+# profile, and the box's `box-packages` list holds only what has to be the
+# machine's.
 #
 # `configenv.desktop.enable` stays at its default of false: emacs, fonts and
 # the VSCode keybindings are a workstation's, and a box is headless.

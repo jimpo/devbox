@@ -163,7 +163,7 @@ machine:
 - **One apt namespace.** A `packages` entry or a `runas = ["root"]` mod from one
   workspace upgrades a library every other workspace builds against. Per-workspace
   toolchains belong in `$HOME` (rustup, uv, nvm — which is already how every
-  base mod but `dotfiles-packages` works). devbox warns when a workspace run
+  base mod but `box-packages` works). devbox warns when a workspace run
   includes a privileged mod, since that writes state the whole box shares.
 - **`devbox box destroy` takes everyone's uncommitted work.** The confirm prompt
   names the attached workspaces, and the workspace-level `devbox destroy` refuses
@@ -686,7 +686,7 @@ thing (jj, dotfiles, Claude Code, a workspace's rust toolchain, …). There are 
 playbooks**, because a box and an attachment need different things:
 
 ```
-box playbook (fixed, built-in):     dotfiles-packages → nix
+box playbook (fixed, built-in):     box-packages → nix
                                     # runs once per box, as root
 
 workspace playbook (built-in base):   home-manager → github-auth → jj →
@@ -703,9 +703,11 @@ no script answers to (`home-manager` aside: `github-auth`, `jj`, `dotfiles`,
 `vim`, `neovim`) are modules of the generation rather than steps in the run.
 The 95% case is "just add rust": `mods = ["rust"]`.
 
-**A box takes no config, so its playbook is fixed** — `dotfiles-packages` (apt,
-as root) and `nix` (the multi-user nix store and its daemon, which every
-attached workspace shares) are the only genuinely box-level mods; everything
+**A box takes no config, so its playbook is fixed** — `box-packages` (an apt
+list and no body: the login `zsh`, the privileged account's `vim`, `rsync` for
+`devbox sync`, and the handful a mod body or a native build needs before any
+generation exists) and `nix` (the multi-user nix store and its daemon, which
+every attached workspace shares) are the only genuinely box-level mods; everything
 else, `github-auth` included, installs into somebody's home. A workspace that
 needs more *system* state ships a `runas = ["root"]` mod of its own, which
 runs on the shared box when it attaches; devbox prints a warning naming it,

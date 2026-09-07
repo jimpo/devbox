@@ -39,7 +39,7 @@ precedence — now keyed on the marker's own mods directory — the `# /// mod`
 metadata block — `requires`/`runas`/`packages`, plus
 its rejection of unknown keys, bad values, duplicate and mislabeled fences — the
 two playbooks and `scoped_runas`'s narrowing of each mod's targets (the box
-playbook apt-only — just `dotfiles-packages` and `nix`, and no module at all —
+playbook apt-only — just `box-packages` and `nix`, and no module at all —
 and `nix`'s box
 scope + the `trusted-users` line that names the privileged account and never an
 agent, and `home-manager`'s agent scope + its `requires = ["nix"]` across that
@@ -98,8 +98,14 @@ the input attribute set an `imports` entry would read as an inline module, and
 sets configenv's own `enable` from `devbox.mods.dotfiles.enable` rather than
 wrapping the import in an `mkIf` that `imports` cannot hold; the branch is
 named with no rev, and `home-manager.sh` passes `--refresh` so a switch
-re-resolves it), the **admin
-de-customization** (the box playbook shrunk to `dotfiles-packages` + `nix`,
+re-resolves it), the **shrunken `box-packages`** (JIM-258: the mod that was
+`dotfiles-packages` is now a `packages` list and NO body — no clone, no
+`install.sh`, no line that is not a comment — carrying only what has to be the
+machine's rather than one account's: the driver installs it and runs an empty
+script, `runas = ["root"]` is what keeps it in a box manifest at all, the
+dropped names (`emacs`, `tmux`, `fzf`, `ripgrep`, …) appear in no built-in
+mod script, and the old name is in `RETIRED_MODS`), the **admin
+de-customization** (the box playbook shrunk to `box-packages` + `nix`,
 and the privileged account's login shell left on `init-script.sh`'s
 `/bin/bash` rather than zsh — `vim-plug.sh` and `github-auth.sh`
 deleted outright), **workspace-local and global nix modules** (JIM-209:

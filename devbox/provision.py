@@ -132,9 +132,11 @@ NIX_WORKSPACE_FILE = "workspace.nix"
 GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 
 # The box playbook: what a machine needs once, regardless of who lives on it -
-# the apt half of the dotfiles setup (`dotfiles-packages`, required by the
-# agent's own `dotfiles` mod) and the nix daemon. The privileged account gets
-# no configuration beyond that and no generation of its own: it is the box's
+# the system apt packages (`box-packages`, a list and no body: the login zsh,
+# the privileged account's vim, rsync for `devbox sync`, and the handful a mod
+# body or a native build needs before any generation exists) and the nix
+# daemon. The privileged account gets no configuration beyond that and no
+# generation of its own: it is the box's
 # debugging entry point (`devbox ssh --admin`) and deliberately stays
 # independent of anything that could itself need fixing - stock apt bash,
 # unconfigured apt vim, no oh-my-zsh, no vim-plug, no git credential helper.
@@ -146,7 +148,7 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # is a trusted user of it.
 # Fixed and built-in: there is no box config file, so a box grows beyond this
 # only when an attached workspace contributes a `runas = ["root"]` mod.
-BOX_BASE_MODS = ("dotfiles-packages", "nix")
+BOX_BASE_MODS = ("box-packages", "nix")
 
 # The workspace playbook: what one attachment needs inside its own account.
 # Ordering constraints are encoded here: jj must precede repo-bootstrap (which
@@ -328,6 +330,9 @@ def find_mod_script(name: str, mods_dir: Optional[Path],
 # error, and it is the last thing consulted: a `<name>.sh` in any mods directory
 # answers to the name first and wins, exactly as it does for any other name.
 RETIRED_MODS = {
+    "dotfiles-packages":
+        "`box-packages`, the box's system apt list, now that the shared configs "
+        "and the packages they expect are the agent's `dotfiles` module",
     "cloudflared-tunnel":
         "`cloudflared`, which now installs the binary and runs the tunnel as a "
         "systemd user service",
@@ -596,7 +601,7 @@ def validate_playbooks(workspace: WorkspaceConfig) -> None:
     instant, before any boot/SSH).
 
     The box playbook is indexed first, so a workspace mod's `requires =
-    ["dotfiles-packages"]` is satisfied by the box having run it - box mods are
+    ["box-packages"]` is satisfied by the box having run it - box mods are
     always "earlier" than any attachment, as is anything the attachment's
     generation provides. Validates the FULL configured playbooks:
     callers must pass the configured workspace even for selective runs (`devbox

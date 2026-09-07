@@ -1655,8 +1655,6 @@ def test_the_shared_configs_are_placed_once_per_box_not_cloned_per_account():
     for script in devbox.BUILTIN_MODS_DIR.glob("*.sh"):
         code = [line for line in script.read_text().splitlines()
                 if not line.strip().startswith("#")]
-        if script.name == "dotfiles-packages.sh":
-            continue          # the apt half still runs install.sh, as root
         assert not any("configenv" in line for line in code), script.name
 
 
@@ -1958,10 +1956,10 @@ def test_box_playbook_is_fixed():
 
 
 def test_the_two_playbooks_split_the_apt_half_from_the_per_user_half():
-    # dotfiles-packages is a box-level mod (root, system-wide); everything else
+    # box-packages is a box-level mod (root, system-wide); everything else
     # in the base installs into somebody's home.
-    assert "dotfiles-packages" in devbox.BOX_BASE_MODS
-    assert "dotfiles-packages" not in devbox.WORKSPACE_BASE_MODS
+    assert "box-packages" in devbox.BOX_BASE_MODS
+    assert "box-packages" not in devbox.WORKSPACE_BASE_MODS
     for per_user in ("jj", "claude-code", "repo-bootstrap"):
         assert per_user in devbox.WORKSPACE_BASE_MODS
         assert per_user not in devbox.BOX_BASE_MODS
@@ -2154,7 +2152,7 @@ def test_validate_playbooks_workspace_mod_requiring_base_mod_passes(isolated_mod
 def test_validate_playbooks_workspace_mod_requiring_a_box_mod_passes(isolated_mods, tmp_path):
     # A box mod always ran earlier - it belongs to the machine, which exists
     # before any attachment - so it satisfies a dep from the other playbook.
-    _write_workspace_mod(tmp_path, "rust", _mod('requires = ["dotfiles-packages"]'))
+    _write_workspace_mod(tmp_path, "rust", _mod('requires = ["box-packages"]'))
     devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["rust"]))
 
 
@@ -2225,7 +2223,7 @@ def _manifest_specs():
         devbox.ModSpec(name="jj", path=devbox.Path("/x/jj.sh"), requires=[],
                        runas=["agent"], packages=[]),
         devbox.ModSpec(name="dotfiles", path=devbox.Path("/x/dotfiles.sh"),
-                       requires=["dotfiles-packages"], runas=["admin", "agent"],
+                       requires=["box-packages"], runas=["admin", "agent"],
                        packages=["jq", "unzip"]),
     ]
 
@@ -2284,11 +2282,58 @@ def test_dotfiles_is_agent_only_and_the_box_playbook_stays_apt_only(isolated_mod
     box = devbox.resolve_playbook(devbox.box_playbook(), None,
                                   devbox.SCOPE_BOX)
     assert devbox.render_manifest(box.specs, devbox.SCOPE_BOX).splitlines() == [
-        "dotfiles-packages\troot\t",   # the apt half: once, as root, per box
+        # The apt list: once, as root, per box - and a `packages` column now,
+        # since the mod has no body left to do anything else in.
+        "box-packages\troot\tzsh,vim,git,curl,ca-certificates,rsync,unzip,"
+        "build-essential,pkg-config",
         "nix\troot\txz-utils",
     ]
     assert "dotfiles" not in devbox.BOX_BASE_MODS
     assert box.modules == []
+
+
+def test_box_packages_is_a_list_and_nothing_else():
+    # The whole mod is its `packages` entry: no clone, no install.sh, no line
+    # that is not a comment. The driver apt-installs the list itself, before
+    # running a body that has nothing in it.
+    script = devbox.BUILTIN_MODS_DIR / "box-packages.sh"
+    code = [line for line in script.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")]
+    assert code == []
+    meta = devbox.parse_mod_metadata(script.read_text(), script)
+    # `runas` is load-bearing even with no body: scoped_runas drops an
+    # agent-only mod from a box run entirely, packages and all.
+    assert meta["runas"] == ["root"]
+    assert devbox.scoped_runas(meta["runas"], devbox.SCOPE_BOX) == ["root"]
+
+
+def test_box_packages_keeps_only_what_has_to_be_the_machines():
+    # An agent's tooling comes out of its generation; what is left is the list
+    # a nix profile cannot serve - the login shell (chsh to a store path lets a
+    # GC delete the shell out from under the account), the privileged
+    # account's vim (it has no generation by design), rsync (the receiver for
+    # `devbox sync`, a NON-interactive ssh session), and the handful an
+    # installer or a native build reaches for before any generation exists.
+    packages = devbox.parse_mod_metadata(
+        (devbox.BUILTIN_MODS_DIR / "box-packages.sh").read_text())["packages"]
+    assert set(packages) == {"zsh", "vim", "git", "curl", "ca-certificates",
+                             "rsync", "unzip", "build-essential", "pkg-config"}
+    # The dropped ones are the generation's now, and the privileged account is
+    # deliberately unconfigured and needs none of them.
+    for gone in ("emacs", "fonts-inconsolata", "tmux", "direnv", "fzf",
+                 "ripgrep", "git-delta"):
+        assert gone not in packages
+
+
+def test_the_old_dotfiles_packages_name_says_where_it_went(isolated_mods, capsys):
+    # A config still naming the mod by its old name gets told where it went,
+    # rather than being sent to look for a script that is never coming back.
+    assert "dotfiles-packages" in devbox.provision.RETIRED_MODS
+    with pytest.raises(SystemExit):
+        devbox.resolve_mod("dotfiles-packages", None)
+    err = capsys.readouterr().err
+    assert "no longer exists" in err
+    assert "`box-packages`" in err
 
 
 def test_vim_is_a_module_for_the_agent_only(isolated_mods):

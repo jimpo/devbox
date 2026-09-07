@@ -437,11 +437,11 @@ def test_mods_run_in_manifest_order_as_the_agent_by_default(box):
 
 
 def test_runas_root_and_admin_dispatch_to_the_right_accounts(box):
-    b = box([_spec("dotfiles-packages", runas=["root"]),
+    b = box([_spec("box-packages", runas=["root"]),
              _spec("claude-code", runas=["agent"]),
              _spec("something-admin", runas=["admin"])])
     assert b.run().returncode == 0
-    assert b.ran() == [("dotfiles-packages", "root"),
+    assert b.ran() == [("box-packages", "root"),
                        ("claude-code", AGENT),
                        ("something-admin", ADMIN)]
 
@@ -449,14 +449,14 @@ def test_runas_root_and_admin_dispatch_to_the_right_accounts(box):
 # ---- box runs (no attachment) -----------------------------------------------
 def test_a_box_run_creates_no_agent_account(box):
     # The box's own playbook: a machine that no workspace has attached to yet.
-    b = box([_spec("dotfiles-packages", runas=["root"]),
+    b = box([_spec("box-packages", runas=["root"]),
              _spec("dotfiles", runas=["admin", "agent"])], agent="")
     r = b.run()
     assert r.returncode == 0, r.stderr
     assert b.log("useradd") == ""
     assert not (b.etc / "workspaces").exists()
     # `dotfiles` keeps only its admin half - the agent half is an attachment's.
-    assert b.ran() == [("dotfiles-packages", "root"), ("dotfiles", ADMIN)]
+    assert b.ran() == [("box-packages", "root"), ("dotfiles", ADMIN)]
 
 
 def test_a_box_run_still_wires_the_privileged_account(box):
