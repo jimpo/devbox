@@ -25,10 +25,14 @@
 # the payload directory is not a repo. `path:` copies the directory to the
 # store as it is on disk.
 #
-# NO flake.lock. `nixpkgs` and `home-manager` are pinned to an exact
-# 40-character rev instead, which makes the lock nix writes on the box
-# deterministic for them. To bump them, resolve the two branch heads and paste
-# the revs below (the nixpkgs release and the home-manager branch must match):
+# NO flake.lock, and none is wanted: a lock pins EVERY input, `configenv`
+# included, and that is the one input meant to roll (see below) - a locked
+# payload would freeze the branch `--refresh` exists to re-resolve, and the
+# payload directory is read-only on the box, so nothing there could update it.
+# `nixpkgs` and `home-manager` are pinned to an exact 40-character rev instead,
+# which makes the lock nix writes on the box deterministic for them. To bump
+# them, resolve the two branch heads and paste the revs below (the nixpkgs
+# release and the home-manager branch must match):
 #
 #   curl -s https://api.github.com/repos/NixOS/nixpkgs/branches/nixos-26.05
 #   curl -s https://api.github.com/repos/nix-community/home-manager/branches/release-26.05

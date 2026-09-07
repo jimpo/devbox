@@ -438,8 +438,10 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   (`dotfiles.nix` imports it; `home-manager.sh` passes `--refresh` so a switch
   re-resolves that branch), and carries the module conventions in one comment
   block; there is
-  deliberately **no `flake.lock`** — the pins make the lock nix writes on the
-  box deterministic for the two that have them.
+  deliberately **no `flake.lock`** — a lock pins every input, `configenv`
+  included, and that one is meant to roll, so the payload carries none and the
+  exact revs make the lock nix writes on the box deterministic for the other
+  two.
   `options.nix` declares `devbox.workspace.*` and the free-form
   `devbox.mods.<name>.enable`, and is the only file that imports the rendered
   `workspace.nix` — which `render_workspace_nix` writes per attachment (agent
