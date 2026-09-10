@@ -3,11 +3,20 @@
 # box stays DRY with the host environment.
 #
 # The module places ~/.vimrc, ~/.ideavimrc, ~/.tmux.conf, ~/.gitconfig,
-# ~/.config/jj/config.toml, ~/.config/nvim and ~/.config/base16-shell as store
-# symlinks, and writes ~/.zshrc through `programs.zsh.oh-my-zsh` (the `jimpo`
-# theme and its custom directory come from the store too). It also carries the
-# handful of packages those configs expect - fzf, ripgrep, delta, tmux and the
-# rest - which is why nothing here lists them.
+# ~/.config/jj/config.toml and ~/.config/nvim as store symlinks, builds vim
+# with its plugins through `programs.vim`, writes ~/.zshrc through
+# `programs.zsh.oh-my-zsh` (the `jimpo` theme and its custom directory come
+# from the store too), and sets EDITOR as a `mkDefault`. It also carries the
+# handful of packages those configs expect - fzf, ripgrep, delta, tmux, direnv
+# and the rest - which is why nothing here lists them.
+#
+# CONFIGENV IS A MODULE AND NOTHING MORE: it sets no `home.username`,
+# `home.homeDirectory` or `home.stateVersion`, and no `nixpkgs.config`. Those
+# belong to whoever imports it, and here that is options.nix, which is the
+# devbox equivalent of the `home.nix` configenv's README shows. The README's
+# `programs.home-manager.enable` is for a standalone install that runs the
+# CLI out of its own profile; `mods/home-manager.sh` runs a pinned one with
+# `nix run` instead, so the generation does not carry it.
 #
 # CONFIGENV CARRIES ITS OWN ENABLE OPTION, and this module sets it rather than
 # wrapping the import in `lib.mkIf`: `imports` cannot sit inside a conditional,
@@ -33,8 +42,12 @@
 # profile, and the box's `box-packages` list holds only what has to be the
 # machine's.
 #
-# `configenv.desktop.enable` stays at its default of false: emacs, fonts and
-# the VSCode keybindings are a workstation's, and a box is headless.
+# `configenv.desktop.enable` stays at its default of false: emacs, fonts, the
+# VSCode keybindings, the base16-shell palette and the rsync backup filter are
+# a workstation's, and a box is headless. oh-my-zsh's base16 hook is still in
+# the custom directory the module links, and it sources nothing when
+# ~/.config/base16-shell is absent, so the box's zsh keeps its terminal's own
+# colors.
 { config, configenv, ... }:
 {
   imports = [ configenv.outPath ];
