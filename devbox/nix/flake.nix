@@ -54,9 +54,9 @@
 #
 #   1. Write `<mod-name>.nix` beside the script, named exactly as it (see the
 #      shape below).
-#   2. DELETE `<mod-name>.sh`, in the same commit. A script wins over a module
-#      of the same name, so while it exists the bash mod is what runs and the
-#      new module is inert.
+#   2. DELETE `<mod-name>.sh`, in the same commit. This step is NECESSARY, not
+#      tidy: a name can have both halves, so a script left in place still runs
+#      beside the new module, and the mod is installed twice.
 #   3. Leave `WORKSPACE_BASE_MODS` (provision.py) ALONE. The name stays in the
 #      playbook: that tuple lists what an attachment gets, not which half
 #      provides it, and devbox resolves each name by file presence -
@@ -89,7 +89,8 @@
 #
 # Two consequences worth knowing. A mod that `requires` a converted one still
 # validates - a module is not a step in the run, so it satisfies a dependency
-# wherever it sits. And a converted name is no longer in the driver's manifest,
+# wherever it sits (a name that has a script as well is checked by the
+# script's position, since a mod may need what the script makes). And a converted name is no longer in the driver's manifest,
 # so `devbox sync --mods=<name>` no longer knows it: the way to reconverge a
 # converted mod is `devbox sync --mods=home-manager`, which re-switches the
 # whole generation.
@@ -98,13 +99,17 @@
 # renders one flag per resolved module name (options.nix declares them
 # free-form), so:
 #
-#   * a mod the workspace's playbook names, with no `<name>.sh` anywhere -> true
+#   * a mod the workspace's playbook names                               -> true
 #   * a mod the workspace never asked for                                -> false
-#   * a mod some `<name>.sh` still answers to (a workspace shadowing a
-#     built-in with its own script, or step 2 not done yet)              -> false
 #
-# The flag is never true at the same time as a bash mod of that name running:
-# one name, one implementation. A module READS its own flag and never declares
+# A `<name>.sh` does not change the flag. A name can have both halves: the
+# script is a step in the driver's manifest and the module is part of the
+# generation, and the switch (`home-manager`, the first workspace mod) comes
+# before any script runs - so a script can use what its module put on the
+# PATH, and a module cannot use what a script makes in the same run. Each
+# suffix shadows only its own: to replace a built-in module, a workspace
+# ships its own `<name>.nix` (an empty `{ ... }: { }` turns it off), never a
+# `<name>.sh`. A module READS its own flag and never declares
 # it. A module that needs more than a boolean declares its own options in its
 # own namespace (`options.devbox.<name>.<option>`), outside `devbox.mods`.
 #

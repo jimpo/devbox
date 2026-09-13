@@ -62,16 +62,16 @@ it through DEVBOX_PAYLOAD_DIR, which the driver exports into each mod.
 
 **The declarative half.** An attachment's payload also carries a home-manager
 flake (`nix/`, from NIX_DIR), which `mods/home-manager.sh` switches the agent
-account to. A playbook name resolves to ONE of the two halves (see
-`resolve_playbook`): a `<name>.sh` in any mods directory, or - only when no
-directory has one - a `<name>.nix`, same **workspace > global > built-in**
-precedence as the bash side, out of the SAME three directories (see
-`mods_dirs`): every level holds both halves, devbox's own built-ins included,
-so `<name>.sh` and `<name>.nix` sit next to each other and "a script wins" is
-a rule about one directory listing. So converting a mod, or writing a
-workspace's own module from scratch, is a one-file change either way, and a
-workspace that ships its own `<name>.sh` still gets its own, converted or not.
-A mod is a bash script or a module, never both.
+account to. A playbook name resolves to either half or to both (see
+`resolve_playbook`): a `<name>.sh` in any mods directory is a step in the
+driver's manifest, and a `<name>.nix` in any mods directory is part of the
+generation. Each half resolves on its own, by the same **workspace > global >
+built-in** precedence, out of the SAME three directories (see `mods_dirs`):
+every level holds both halves, devbox's own built-ins included, so `<name>.sh`
+and `<name>.nix` sit next to each other. Each suffix shadows its own suffix
+and never the other, so a workspace replaces a built-in module with its own
+`<name>.nix` (an empty `{ ... }: { }` turns it off) and a built-in script with
+its own `<name>.sh`.
 
 NIX_DIR holds only the flake SKELETON (`flake.nix`, `options.nix`,
 `zshenv.nix`); `nix/modules/` exists only in an assembled payload, where
@@ -109,8 +109,8 @@ from .util import die
 # `packages = ["devbox"]` ships them (see pyproject.toml). BOTH halves of a mod
 # live here, `<name>.sh` and `<name>.nix`, the way they do in a workspace's own
 # mods directory and in the user's global one - one directory per precedence
-# level, so `<name>.sh` and `<name>.nix` sit next to each other and "a script
-# wins" is a rule about one listing.
+# level, so `<name>.sh` and `<name>.nix` sit next to each other and which halves
+# a name has is a fact about one listing.
 BUILTIN_MODS_DIR = Path(__file__).parent / "mods"
 DRIVER_PATH = Path(__file__).parent / "provision-driver.sh"
 # The home-manager flake SKELETON: `flake.nix`, `options.nix` and `zshenv.nix`,
@@ -156,9 +156,9 @@ BOX_BASE_MODS = ("box-packages", "nix")
 # none of it (see BOX_BASE_MODS). A workspace's `mods` are appended after this.
 # `home-manager` runs first: it is the declarative half of the account, and a
 # bash mod after it can use what the generation put on the PATH.
-# `github-auth` is a name that half provides: no mods directory has a
-# github-auth.sh, so it resolves to the built-in github-auth.nix sitting beside
-# the scripts (see resolve_playbook). It lives at ~/.config/git/config rather
+# `github-auth` is a name that half alone provides: no mods directory has a
+# github-auth.sh, and the built-in github-auth.nix sits beside the scripts (see
+# resolve_playbook). It lives at ~/.config/git/config rather
 # than ~/.gitconfig - which `dotfiles`/configenv overwrites - so it needs no
 # root and no box-wide /etc/gitconfig any more.
 # The editor is not a name of its own: configenv's module states vim's package
@@ -232,18 +232,19 @@ def env_for_owner(env: dict, owner: str) -> dict:
 
 
 # ---- mod resolution ---------------------------------------------------------
-# A playbook name resolves to ONE of two things: a bash script the driver runs,
-# or a nix module the agent's home-manager generation provides. Which, is
-# decided by file presence alone - `<name>.sh` in any mods directory, else
-# `<name>.nix` in the flake's - so converting a mod is a one-file change with no
-# registry to keep in step.
+# A playbook name resolves to a bash script the driver runs, a nix module the
+# agent's home-manager generation provides, or BOTH. Each half is decided by
+# file presence alone - `<name>.sh` in any mods directory for the script,
+# `<name>.nix` in any mods directory for the module - so converting a mod is a
+# one-file change with no registry to keep in step.
 #
-# SCRIPTS WIN, at every level of the existing precedence (workspace > global >
-# built-in). A workspace that ships its own `jj.sh` gets its own jj, converted
-# or not, and the module of that name stays inert - the alternative, running
-# both, is the one outcome that is clearly wrong. This is also what makes a
-# conversion safe to land: until the built-in `<name>.sh` is deleted, the bash
-# mod is still what runs.
+# EACH SUFFIX SHADOWS ONLY ITS OWN, at every level of the precedence
+# (workspace > global > built-in). A workspace that ships its own `jj.sh` gets
+# that script AND the built-in jj module; to replace the module it ships its
+# own `jj.nix` (an empty `{ ... }: { }` turns the module off). Both halves of
+# one name run in a fixed order: `home-manager` is the first workspace mod, so
+# the generation is switched before any script runs, and a script can use what
+# its module put on the PATH.
 #
 # The BOX playbook never consults the modules directory. The flake describes one
 # agent's home, a box run has no agent, and a box mod is system work no
@@ -315,9 +316,8 @@ def find_mod_script(name: str, mods_dir: Optional[Path],
                     builtin_mods_dir: Optional[Path] = None) -> Optional[Path]:
     """Where a mod's bash script is, by precedence workspace > global >
     built-in - so a workspace can shadow a built-in (e.g. its own
-    `dotfiles.sh`) - or None if no directory has one. A script found here wins
-    over a module of the same name sitting right beside it (see
-    resolve_playbook)."""
+    `dotfiles.sh`) - or None if no directory has one. A module of the same name
+    resolves on its own (see find_nix_module), and neither shadows the other."""
     for base in mods_dirs(mods_dir, global_mods_dir, builtin_mods_dir):
         if base is None:
             continue
@@ -352,9 +352,8 @@ def resolve_mod(name: str, mods_dir: Optional[Path],
 
     `nix_modules=True` widens that message to say a nix module answers to a
     name too - passed for a workspace-scope run, where one can, and left False
-    for a box, where the flake plays no part. A name a module DOES answer to
-    never reaches here: resolve_playbook takes it out of the script half
-    first."""
+    for a box, where the flake plays no part. A name only a module answers to
+    never reaches here: resolve_playbook leaves it out of the script half."""
     path = find_mod_script(name, mods_dir, global_mods_dir, builtin_mods_dir)
     if path is not None:
         return path
@@ -496,9 +495,9 @@ def load_mod_specs(names: list, mods_dir: Optional[Path],
     """Resolve every named mod to its bash script and parse its metadata, in
     playbook order. One read per mod, shared by validation and payload assembly.
 
-    Every name here is a script: resolve_playbook has already taken out the ones
-    the generation provides. `nix_modules` only reaches the failure message,
-    which then says a module could have answered too."""
+    Every name here needs a script: resolve_playbook has already taken out the
+    ones only the generation provides. `nix_modules` only reaches the failure
+    message, which then says a module could have answered too."""
     specs = []
     for name in names:
         path = resolve_mod(name, mods_dir, nix_modules=nix_modules)
@@ -517,23 +516,25 @@ def load_mod_specs(names: list, mods_dir: Optional[Path],
 
 @dataclasses.dataclass
 class Playbook:
-    """One playbook, resolved into its two halves: the mods that are bash
-    scripts the driver runs (`specs`, in playbook order) and the names the
-    agent's home-manager generation provides instead (`modules`).
+    """One playbook, resolved into its two halves: the mods that have a bash
+    script the driver runs (`specs`, in playbook order) and the names the
+    agent's home-manager generation provides (`modules`).
 
-    A module name produces no ModSpec and no manifest line, so the driver never
-    hears about it - which is the whole point: a converted mod stops being a
-    step in a run and becomes part of one generation."""
+    The two overlap: a name with both a `<name>.sh` and a `<name>.nix` is in
+    both. A name with only a module produces no ModSpec and no manifest line,
+    so the driver never hears about it - a converted mod stops being a step in
+    a run and becomes part of one generation."""
     specs: list
     modules: list
 
 
 def resolve_playbook(names: list, mods_dir: Optional[Path],
                      scope: str = SCOPE_WORKSPACE) -> Playbook:
-    """Split a playbook by where each name comes from: a bash script if any mods
-    directory has one, else a nix module of that name (workspace > global >
-    built-in - see find_nix_module), else a hard error naming every place that
-    was looked in.
+    """Split a playbook into its two halves, resolving each on its own: a name
+    goes to the script half if any mods directory has a `<name>.sh`, to the
+    module half if any has a `<name>.nix` (workspace > global > built-in for
+    each - see find_mod_script and find_nix_module), to both if both exist,
+    and to a hard error naming every place that was looked in if neither does.
 
     Called with the FULL configured playbook, so a `requires` on a converted mod
     still resolves (see validate_playbooks). `mods_dir` is the one directory a
@@ -541,12 +542,9 @@ def resolve_playbook(names: list, mods_dir: Optional[Path],
     module is consulted at all."""
     is_workspace = scope == SCOPE_WORKSPACE
     provided = set(nix_module_names(mods_dir)) if is_workspace else set()
-    scripts, modules = [], []
-    for name in names:
-        if name in provided and find_mod_script(name, mods_dir) is None:
-            modules.append(name)
-        else:
-            scripts.append(name)
+    scripts = [n for n in names
+               if n not in provided or find_mod_script(n, mods_dir) is not None]
+    modules = [n for n in names if n in provided]
     return Playbook(specs=load_mod_specs(scripts, mods_dir, nix_modules=is_workspace),
                     modules=modules)
 
@@ -578,9 +576,11 @@ def _validate_ordering(specs: list, config_path, prior: Optional[dict] = None) -
 
     `prior` names mods a dependency is satisfied by wherever they sit: the ones
     an earlier playbook already ran (the box's, for a workspace run), and the
-    ones this attachment's generation provides - a module is not a step in the
-    run at all, and the generation that carries it is switched by
-    `home-manager`, the first mod in the workspace base."""
+    ones this attachment's generation provides with no script half - a module
+    is not a step in the run at all, and the generation that carries it is
+    switched by `home-manager`, the first mod in the workspace base. A name
+    that also has a script is not in `prior`: a mod that requires it may need
+    what the script makes, so the script's position is checked."""
     # First index wins on a duplicate; base always precedes workspace mods, so
     # this doesn't affect the ordering guarantee.
     index = {}
@@ -606,7 +606,7 @@ def validate_playbooks(workspace: WorkspaceConfig) -> None:
     The box playbook is indexed first, so a workspace mod's `requires =
     ["box-packages"]` is satisfied by the box having run it - box mods are
     always "earlier" than any attachment, as is anything the attachment's
-    generation provides. Validates the FULL configured playbooks:
+    generation provides with no script beside it. Validates the FULL configured playbooks:
     callers must pass the configured workspace even for selective runs (`devbox
     sync --mods=a`), since deps are about the box's cumulative state, not the
     selected subset."""
@@ -615,8 +615,10 @@ def validate_playbooks(workspace: WorkspaceConfig) -> None:
     _validate_ordering(box.specs, config_path)
     attachment = resolve_playbook(workspace_playbook(workspace),
                                   workspace.marker.mods_dir)
+    scripted = {s.name for s in attachment.specs}
     _validate_ordering(attachment.specs, config_path,
-                       prior={s.name for s in box.specs} | set(attachment.modules))
+                       prior={s.name for s in box.specs}
+                       | (set(attachment.modules) - scripted))
 
 
 # ---- environment context (not %TOKEN% substitution) -------------------------
@@ -705,8 +707,8 @@ def render_env_file(env: dict) -> str:
 # ---- the home-manager flake (the agent's declarative half) -------------------
 # The `mods` bash scripts install into a home imperatively; the flake under
 # NIX_DIR describes one declaratively, and `mods/home-manager.sh` switches the
-# agent account to it. Both halves ride in the same payload, and a mod is in one
-# or the other, never both.
+# agent account to it. Both halves ride in the same payload, and a mod can have
+# either half or both.
 #
 # `workspace.nix` is to the flake what `manifest`/`repos` are to the driver: the
 # rendered file that turns a shipped, static program into this attachment's. It
@@ -752,9 +754,9 @@ def render_workspace_nix(context: dict, mods: dict) -> str:
     attachment's playbook resolves that name to the generation - so a module can
     always read `config.devbox.mods.<name>.enable` without first asking whether
     the attribute exists. The flag says one thing: "the generation provides this
-    mod". A name the workspace never asked for is false, and so is one a bash
-    `<name>.sh` answers to (the script runs and the module stays inert), which
-    is what keeps a shadowed mod from being installed twice.
+    mod". It is true for every name the playbook names, whether or not a
+    `<name>.sh` answers to that name too (then the script runs as well), and
+    false for a name the workspace never asked for.
 
     Alphabetical: an attribute set is unordered, and the module files are
     discovered in sorted order, so a rendered file diffs cleanly."""
@@ -792,7 +794,8 @@ def nix_payload_files(context: dict, modules: list,
     this assembled layout.
 
     `modules` is the half of this attachment's playbook the generation provides
-    (see resolve_playbook), which becomes the true half of the rendered flags;
+    (see resolve_playbook), scripts beside them or not, which becomes the true
+    half of the rendered flags;
     every other shipped module is rendered false. Both the files and the flags
     come from the same three-source lookup, so a sibling adding a
     `<mod>.nix` anywhere in it - built-in, global, or this workspace's own -
@@ -885,7 +888,8 @@ def build_payload(workspace: WorkspaceConfig, gc: GlobalConfig, admin_user: str)
     home-manager describes one account's home: a box run has no account to
     switch, and the privileged one is deliberately left on apt. Which half of
     the payload a playbook name lands in - a `mods/<name>.sh` the driver runs or
-    a flag on a module the generation carries - is resolve_playbook's decision.
+    a flag on a module the generation carries, or both - is resolve_playbook's
+    decision.
 
     Validates BOTH configured playbooks' metadata (`runas` targets and
     `requires` ordering) first. This is the single choke point: build_payload

@@ -43,10 +43,9 @@ from .util import die, warn
 #
 # That one directory holds BOTH halves of a mod: `<name>.sh` for a bash mod and
 # `<name>.nix` for a home-manager module (see provision.find_nix_module). A mod
-# is one or the other, never both, and keeping them in one place is what makes
-# that visible - the two files sit next to each other, and the rule that a
-# script wins over a module of the same name is a rule about one directory
-# listing rather than about two.
+# can have either or both, and keeping them in one place is what makes that
+# visible - the two files sit next to each other, and which halves a name has
+# is a fact about one directory listing rather than about two.
 WORKSPACE_MARKER_FILE = "devbox.toml"       # <root>/devbox.toml
 REPO_MARKER_DIR = ".devbox"                 # <repo>/.devbox/
 REPO_MARKER_CONFIG = "config.toml"          # <repo>/.devbox/config.toml

@@ -699,8 +699,8 @@ workspace mods (config.toml):         + rust + wasm-tools + …
 Ordering encodes the constraints (jj before repo-bootstrap, which clones with
 it; `nix` before `home-manager`, which switches with it — across the playbook
 boundary, since a box mod always ran earlier). Names in the workspace base that
-no script answers to (`home-manager` aside: `github-auth`, `jj`, `dotfiles`,
-`neovim`) are modules of the generation rather than steps in the run.
+no script answers to (`github-auth`, `jj`, `dotfiles`, `neovim`) are modules
+of the generation rather than steps in the run.
 The 95% case is "just add rust": `mods = ["rust"]`.
 
 **A box takes no config, so its playbook is fixed** — `box-packages` (an apt
@@ -718,9 +718,8 @@ first in the workspace playbook and switches the agent account to the
 home-manager flake that devbox assembles into the payload beside `mods/`
 (`nix/flake.nix`, `nix/options.nix`, `nix/zshenv.nix`, one
 `nix/modules/<mod>.nix` per resolved module, plus a `nix/workspace.nix` devbox
-renders per attachment). A mod is either a bash script or a module in that
-flake, never both, and a converted mod keys on its own
-`devbox.mods.<name>.enable` flag. It is **agent-only**: the box's privileged
+renders per attachment). A mod is a bash script, a module in that flake, or
+both, and a module keys on its own `devbox.mods.<name>.enable` flag. It is **agent-only**: the box's privileged
 account keeps stock apt bash and unconfigured vim — no generation, no
 dotfiles either — so `devbox box ssh` works whatever state a workspace's (or
 its own) nix and per-account config might be in.
@@ -729,8 +728,8 @@ its own) nix and per-account config might be in.
 same directory** — workspace `<mods dir>/<name>.nix` (either marker shape) >
 global `~/.config/devbox/mods/<name>.nix` > devbox's own built-in
 `devbox/mods/<name>.nix`. One mods directory per level holds both halves, so
-`<name>.sh` and `<name>.nix` sit next to each other and "a script wins" is a
-rule about one listing. That means a mod that has nothing to do with devbox
+`<name>.sh` and `<name>.nix` sit next to each other and which halves a name
+has is a fact about one listing. That means a mod that has nothing to do with devbox
 itself (a workspace's own rust toolchain, say) doesn't have to live in devbox's
 repo, or even be a bash script, to become a module: drop the file in `mods/`
 and name it in `mods = [...]` (or leave it un-named for the "shipped but off"
@@ -834,13 +833,22 @@ devbox/mods/*.sh                # built-in, inside the package
 
 A workspace's own mods live beside its config file, whichever spelling it uses.
 
-When **no** directory has a `<name>.sh`, the name resolves instead to the
-home-manager module of that name — a `<name>.nix` in those same directories,
-by the same precedence — and the generation provides the mod rather than the
-driver running a script. That is all converting a mod takes — write the
-module, delete the script, in one directory — and it is why a script always
-wins: a workspace that ships its own `jj.sh` gets its own jj, converted or
-not, and never both.
+The module half resolves on its own, the same way: a `<name>.nix` in those same
+directories, by the same precedence, makes the mod part of the generation. A
+name can have both halves. Then the driver runs the script AND the generation
+provides the module, and the module comes first: `home-manager` is the first
+workspace mod, so the switch happens before any script runs, and a script can
+use what its module put on the PATH (`repo-bootstrap` clones with the `jj` of
+`jj.nix`, through the credential helper `github-auth.nix` writes). A `requires`
+names a script by its place in the order; a dependency that is only a module
+is satisfied wherever it sits.
+
+Each suffix shadows only its own. A workspace that ships its own `jj.sh` gets
+that script and still gets the built-in `jj.nix`; to replace a built-in module
+it ships its own `<name>.nix` (an empty `{ ... }: { }` turns it off). So
+converting a mod is: write the module, delete the script, in one directory —
+and the delete is necessary, because a script left in place still runs beside
+the module.
 
 **Static files, env for context.** Mods are static (lintable, shellcheck-able,
 diffable, and directly runnable — the metadata below lives in a fenced block of

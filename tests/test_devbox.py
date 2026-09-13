@@ -840,7 +840,7 @@ def _bash_base_mods():
     has. A converted mod keeps its place in WORKSPACE_BASE_MODS and the
     generation provides it, so it has no line."""
     return [n for n in devbox.WORKSPACE_BASE_MODS
-            if n not in devbox.nix_module_names()]
+            if devbox.find_mod_script(n, None) is not None]
 
 
 def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubkey):
@@ -1156,10 +1156,11 @@ def test_a_module_the_playbook_never_names_is_shipped_but_off(converted, pubkey,
     assert "claude-linear-mcp.enable = false;" in payload["nix/workspace.nix"].content
 
 
-def test_a_workspace_script_shadows_a_converted_mod(converted, pubkey, tmp_path):
-    # Bash precedence is unchanged and still wins. A workspace that ships its
-    # own jj.sh gets its own jj, and the module of that name stays inert -
-    # running both is the one outcome that is clearly wrong.
+def test_a_workspace_script_runs_beside_a_converted_module(converted, pubkey,
+                                                           tmp_path):
+    # A script does not shadow a module. A workspace that ships its own jj.sh
+    # gets that script as a step in the run AND the built-in jj module in the
+    # generation: each half resolves on its own.
     converted("jj")
     marker_dir = tmp_path / "ws"
     (marker_dir / ".devbox" / "mods").mkdir(parents=True)
@@ -1168,11 +1169,29 @@ def test_a_workspace_script_shadows_a_converted_mod(converted, pubkey, tmp_path)
     workspace = _workspace(marker_dir=marker_dir)
     playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
                                        workspace.marker.mods_dir)
-    assert "jj" not in playbook.modules
+    assert "jj" in playbook.modules
     assert "jj" in [s.name for s in playbook.specs]
     payload = _payload_map(workspace, _global_config(pubkey))
     assert payload["mods/jj.sh"].content.endswith("echo my own jj\n")
-    assert "jj.enable = false;" in payload["nix/workspace.nix"].content
+    assert "jj" in [line.split("\t")[0]
+                    for line in payload["manifest"].content.splitlines()]
+    assert payload["nix/modules/jj.nix"].content == "{ }\n"
+    assert "jj.enable = true;" in payload["nix/workspace.nix"].content
+
+
+def test_a_workspace_module_is_what_replaces_a_built_in_module(converted, pubkey,
+                                                               tmp_path):
+    # Each suffix shadows its own. To turn a built-in module off, a workspace
+    # ships an empty `<name>.nix`: that file is the one the generation gets,
+    # and no script appears in the run.
+    converted("jj")
+    marker_dir = tmp_path / "ws"
+    _write_nix_module(marker_dir / ".devbox" / "mods", "jj",
+                      "{ ... }: { }\n# no jj here\n")
+    workspace = _workspace(marker_dir=marker_dir)
+    payload = _payload_map(workspace, _global_config(pubkey))
+    assert payload["nix/modules/jj.nix"].content.endswith("# no jj here\n")
+    assert "mods/jj.sh" not in payload
 
 
 def test_the_box_playbook_never_resolves_a_module(converted, pubkey, capsys):
@@ -1255,10 +1274,11 @@ def test_a_workspace_own_nix_module_shadows_the_built_in_one(isolated_mods,
     assert payload["nix/modules/neovim.nix"].content.endswith("# my own neovim\n")
 
 
-def test_a_workspace_script_still_wins_over_its_own_module_of_that_name(
-        isolated_mods, pubkey, tmp_path):
+def test_a_workspace_mod_with_both_halves_runs_both(isolated_mods, pubkey,
+                                                    tmp_path):
     # Both halves in one directory, which is the point of putting them there:
-    # `<name>.sh` and `<name>.nix` sit next to each other, and the script wins.
+    # `<name>.sh` and `<name>.nix` sit next to each other, and the name gets
+    # both - a manifest line for the script and a true flag for the module.
     marker_dir = tmp_path / "ws"
     mods_dir = marker_dir / ".devbox" / "mods"
     _write_nix_module(mods_dir, "neovim", "{ }\n# my own neovim module\n")
@@ -1268,12 +1288,14 @@ def test_a_workspace_script_still_wins_over_its_own_module_of_that_name(
     playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
                                        workspace.marker.mods_dir)
     assert "neovim" in [s.name for s in playbook.specs]
-    assert "neovim" not in playbook.modules
+    assert "neovim" in playbook.modules
     payload = {pf.path: pf for pf in
               devbox.build_payload(workspace, _global_config(pubkey), "alice")}
     assert "my own neovim script" in payload["mods/neovim.sh"].content
-    # The module still ships (every discovered name does), but it is inert.
-    assert "neovim.enable = false;" in payload["nix/workspace.nix"].content
+    assert "neovim\tagent\t\n" in payload["manifest"].content
+    assert payload["nix/modules/neovim.nix"].content.endswith(
+        "# my own neovim module\n")
+    assert "neovim.enable = true;" in payload["nix/workspace.nix"].content
 
 
 def test_a_global_nix_module_resolves_and_is_shadowed_by_a_workspace_one(
@@ -1308,10 +1330,6 @@ def test_the_builtin_mods_live_inside_the_package(tmp_path):
     assert devbox.BUILTIN_MODS_DIR.parent == package_dir
     suffixes = {p.suffix for p in devbox.BUILTIN_MODS_DIR.iterdir()}
     assert suffixes == {".sh", ".nix"}
-    # ... and no name has both halves: one mod, one implementation.
-    scripts = {p.stem for p in devbox.BUILTIN_MODS_DIR.glob("*.sh")}
-    modules = {p.stem for p in devbox.BUILTIN_MODS_DIR.glob("*.nix")}
-    assert scripts & modules == set()
 
 
 def test_the_shipped_flake_is_a_skeleton_with_no_modules_directory():
@@ -2169,6 +2187,28 @@ def test_validate_playbooks_dep_listed_after_dies(isolated_mods, tmp_path):
     _write_workspace_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
     with pytest.raises(SystemExit):
         devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["a", "b"]))
+
+
+def test_validate_playbooks_dep_with_both_halves_listed_after_dies(isolated_mods,
+                                                                  tmp_path):
+    # `b` has a module too, but a module satisfies a dependency in advance only
+    # when it has no script: `a` may need what `b.sh` makes, so `b`'s place in
+    # the playbook is still checked.
+    _write_workspace_mod(tmp_path, "a", _mod('requires = ["b"]'))
+    _write_workspace_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
+    (_mods_dir(tmp_path) / "b.nix").write_text("{ ... }: { }\n")
+    with pytest.raises(SystemExit):
+        devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["a", "b"]))
+    devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["b", "a"]))
+
+
+def test_validate_playbooks_dep_with_only_a_module_listed_after_passes(
+        isolated_mods, tmp_path):
+    # The same `b` with no script is not a step in the run, so it satisfies
+    # `a`'s dependency wherever it sits.
+    _write_workspace_mod(tmp_path, "a", _mod('requires = ["b"]'))
+    (_mods_dir(tmp_path) / "b.nix").write_text("{ ... }: { }\n")
+    devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["a", "b"]))
 
 
 def test_validate_playbooks_dep_listed_before_passes(isolated_mods, tmp_path):

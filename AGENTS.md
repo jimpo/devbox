@@ -60,9 +60,13 @@ built-in `<name>.sh` deleted and a `<name>.nix` beside where it was: a base mod
 and an opt-in one both resolving to the generation with no `ModSpec` and no
 manifest line, the `requires` on a converted mod still validating, a module the
 playbook never names shipped with `enable = false`, a workspace's own `.sh`
-shadowing a converted built-in back into the bash half, the box playbook
+running beside a converted built-in's module rather than shadowing it — a
+manifest line AND a true flag — and a workspace's own `.nix` being what
+replaces that module, the box playbook
 refusing to see a module at all, and the failure naming all four places it
-looked), the **converted `cloudflared`** (an opt-in mod that is now only
+looked; plus `requires` on a both-halves mod still enforcing its script's
+place in the order, while a module-only dependency is satisfied wherever it
+sits), the **converted `cloudflared`** (an opt-in mod that is now only
 `modules/cloudflared.nix`: the flake lists it, a workspace naming it in its own
 `mods` resolves to the generation, the module names the creds file's path and no
 `[env]` value reaches any rendered `nix/` file, it sources that file rather than
@@ -117,14 +121,15 @@ directories (`mods_dirs`) — a `<name>.nix` lives in the same `mods/` its
 `<name>.sh` scripts do at every level, devbox's own `devbox/mods/` included; a
 name only the workspace's own `mods_dir` has resolving with no built-in
 counterpart at all, one shadowing a built-in of the same name, a workspace's
-own `<name>.sh` still winning over its own `<name>.nix` beside it, a global one
+own `<name>.sh` and its own `<name>.nix` beside it both resolving — a
+manifest line and a true flag for one name — a global one
 shadowed in turn by a workspace's own, and the failure message naming three
 directories and both suffixes rather than six paths — plus the
 flake itself `readDir`ing `./modules` rather than importing a fixed list,
 asserted by its absence of any hardcoded `./modules/<name>.nix` line; and the
 packaging invariant that keeps the built-ins shippable, `BUILTIN_MODS_DIR`
-being a child of the package directory, holding both suffixes and no name in
-both), **`devbox nix check`** (`nix_check_files` turning every discovered
+being a child of the package directory and holding both suffixes),
+**`devbox nix check`** (`nix_check_files` turning every discovered
 module's flag on — a false flag leaves that module's body inside an unforced
 `mkIf`, so a check mirroring a real playbook would evaluate almost nothing —
 and widening to a workspace's own modules when there is a workspace;
@@ -398,14 +403,18 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   built-in, keyed on `marker.mods_dir`), the two playbooks
   (`box_playbook`/`workspace_playbook`), **the two halves a playbook name can
   resolve to** (`resolve_playbook` → `Playbook(specs, modules)`: a
-  `<name>.sh` in any mods directory, or — only when no directory has one — a
-  `<name>.nix` in those same directories, discovered by file presence so
+  `<name>.sh` in any mods directory puts the name in `specs`, a `<name>.nix` in
+  those same directories puts it in `modules`, and a name with both is in both
+  — the two lists overlap. Each half is discovered by file presence so
   converting a mod is a one-file change with no registry to keep in step and no
-  second directory to reach into; scripts win at every
-  level of the precedence, so a workspace's own `<name>.sh` gets it its own mod
-  and leaves the module inert, and a module name yields no `ModSpec` and no
-  manifest line — the driver never hears about it. The box playbook consults no
-  module: the flake describes one agent's home), mod metadata
+  second directory to reach into; each suffix shadows only its own suffix at
+  every level of the precedence, so a workspace replaces a built-in module with
+  its own `<name>.nix` (an empty `{ ... }: { }` turns it off) and a built-in
+  script with its own `<name>.sh`. A module-only name yields no `ModSpec` and
+  no manifest line — the driver never hears about it. `_validate_ordering`
+  treats a module as satisfying a `requires` in advance only when the name has
+  no script; a dependency with a script is checked by its place in the order.
+  The box playbook consults no module: the flake describes one agent's home), mod metadata
   (`parse_mod_metadata`, which reads the fenced `# /// mod` TOML block with
   stdlib `tomllib`; `ModSpec`, `load_mod_specs`), `scoped_runas` + `render_manifest` (the scope
   filter, applied entirely host-side so the driver never learns about scopes),
@@ -432,8 +441,12 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   attachment's payload beside `mods/` — the three skeleton files, the rendered
   `workspace.nix`, and one `modules/<name>.nix` per resolved module out of the
   mods directories — and the `home-manager` mod switches to it. Adding a module
-  is one new file and no registration. A mod is a bash script
-  or a module here, never both. `flake.nix` pins nixpkgs and home-manager to
+  is one new file and no registration. A mod is a bash script, a module here,
+  or both: the script is a step in the driver's manifest, the module part of
+  the generation, and `home-manager` — the first workspace mod — switches
+  before any script runs, so a script can use what its module put on the PATH
+  (`repo-bootstrap` runs `jj` from `jj.nix` through the credential helper
+  `github-auth.nix` writes). `flake.nix` pins nixpkgs and home-manager to
   exact revs, takes `configenv` as a NON-flake input on a rolling `main`
   (`dotfiles.nix` imports it; `home-manager.sh` passes `--refresh` so a switch
   re-resolves that branch), and carries the module conventions in one comment
@@ -448,12 +461,12 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   user, home, jj identity, and one flag per shipped module), the same job
   `render_manifest` does for the driver, escaping strings for nix rather than
   for the shell. **The flag means "the generation provides this mod"**: true
-  only when this attachment's playbook names it and no `<name>.sh` answers to
-  the name, false otherwise — so a shadowed mod runs its script and nothing
-  else. Every shipped module gets a flag either way, because a missing
-  attribute is an evaluation error in nix, not a false. Converting a mod is
-  therefore: write `<name>.nix` beside the script, delete `<name>.sh`, and
-  leave the playbook tuples alone (the recipe is spelled out in `flake.nix`'s
+  whenever this attachment's playbook names it, whether or not a `<name>.sh`
+  answers to the name too, and false otherwise. Every shipped module gets a
+  flag either way, because a missing attribute is an evaluation error in nix,
+  not a false. Converting a mod is therefore: write `<name>.nix` beside the
+  script, delete `<name>.sh` — necessary, not tidy: a script left in place
+  still runs beside the module — and leave the playbook tuples alone (the recipe is spelled out in `flake.nix`'s
   conventions block, which is the contract the conversion tickets read) —
   `flake.nix` itself needs no line added: it `readDir`s `./modules` at
   evaluation time rather than importing a fixed list, so a new file is
@@ -474,10 +487,9 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   `config.Marker.mods_dir`) > `~/.config/devbox/mods/<name>.nix` > devbox's own
   `BUILTIN_MODS_DIR` (see `find_nix_module`) — so a mod that has nothing to do
   with devbox itself never has to live in devbox's own repo to become a
-  module; the bash escape hatch (a workspace's own `<name>.sh`) still works
-  exactly as it always has, and still wins over any module of the same name,
-  which one directory per level makes visible: the two files sit next to each
-  other. `find_mod_script` and `find_nix_module` walk that one tuple and differ
+  module. A workspace's own `<name>.sh` shadows only a `<name>.sh`, and its own
+  `<name>.nix` only a `<name>.nix`; one directory per level makes that
+  visible: the two files sit next to each other. `find_mod_script` and `find_nix_module` walk that one tuple and differ
   only in the suffix. A module travels to the payload's own
   `nix/modules/<name>.nix` whatever directory it came from, so that assembled
   layout is all nix ever sees — which is what frees every source directory to

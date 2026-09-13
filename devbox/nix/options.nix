@@ -49,10 +49,10 @@ in
       description = ''
         One entry per module in `modules/`, as `<name>.enable`, rendered by
         devbox into workspace.nix. The flag means "this attachment's playbook
-        resolves <name> to the generation". It is false when the workspace
-        never asked for the mod, and false when a bash `<name>.sh` answers to
-        the name instead - a script always wins, and then it is the only thing
-        that runs. Every shipped module gets an entry either way, so a module
+        resolves <name> to the generation". It is true whenever the playbook
+        names the mod, also when a bash `<name>.sh` answers to the name (then
+        the script runs as well), and false when the workspace never asked
+        for the mod. Every shipped module gets an entry either way, so a module
         can read its own flag without the attribute being missing.
       '';
     };
