@@ -33,7 +33,9 @@ under `devbox.toml`, distinct names/dirs, the mods-dir collision, clone/push
 validation, and the hard errors on the old `[repo]`/`project` keys), the
 first-boot
 init-script render (token substitution into the shipped `init-script.sh`, now
-box-scoped), the
+box-scoped, and its `useradd` run for real against fake `id`/`getent`: joining a
+group of the account's own name when the image already ships one, as Ubuntu's
+does `admin`), the
 modular-provisioning logic (mod resolution
 precedence — now keyed on the marker's own mods directory — the `# /// mod`
 metadata block — `requires`/`runas`/`packages`, plus

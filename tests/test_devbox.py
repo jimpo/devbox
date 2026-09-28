@@ -1,5 +1,6 @@
 import dataclasses
 import argparse
+import os
 import re
 import subprocess
 
@@ -755,6 +756,51 @@ def test_render_init_script_locks_down_the_home_directory(pubkey):
     # read the privileged user's entire home.
     rendered = devbox.render_init_script(_box(), _global_config(pubkey))
     assert "--key HOME_MODE=0750" in rendered
+
+
+def _run_init_script_useradd(tmp_path, pubkey, admin_user, group_exists):
+    """Run the rendered init script up to its `useradd` and return that argv.
+
+    Fakes on PATH: `id` says the account is missing, `getent group` answers
+    `group_exists`, `useradd` records its args, and `passwd` - the next command -
+    fails, which `set -e` turns into the end of the run. Nothing touches the host."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "useradd.log"
+    fakes = {
+        "id": "exit 1",
+        "getent": f"[ \"$1\" = group ] && [ \"$2\" = {admin_user} ] && exit {0 if group_exists else 2}\nexit 2",
+        "useradd": f"printf '%s\\n' \"$@\" > {log}",
+        "passwd": "exit 1",
+    }
+    for name, body in fakes.items():
+        path = bindir / name
+        path.write_text(f"#!/usr/bin/env bash\n{body}\n")
+        path.chmod(0o755)
+    script = tmp_path / "init.sh"
+    script.write_text(devbox.render_init_script(_box(admin_user=admin_user),
+                                                _global_config(pubkey)))
+    r = subprocess.run(["bash", str(script)], capture_output=True, text=True,
+                       env={**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"})
+    assert r.returncode != 0  # stopped by the failing fake passwd, as intended
+    return log.read_text().splitlines()
+
+
+def test_render_init_script_creates_a_group_of_the_accounts_name(tmp_path, pubkey):
+    argv = _run_init_script_useradd(tmp_path, pubkey, "alice", group_exists=False)
+    assert "--user-group" in argv
+    assert "--gid" not in argv
+    assert argv[-1] == "alice"
+
+
+def test_render_init_script_joins_an_existing_group_of_the_accounts_name(tmp_path, pubkey):
+    # Ubuntu's cloud images ship an `admin` group, and `admin` is the default
+    # account name: `--user-group` refuses to create a group that exists, which
+    # aborted first boot before the account (and its SSH key) existed.
+    argv = _run_init_script_useradd(tmp_path, pubkey, "admin", group_exists=True)
+    assert "--user-group" not in argv
+    assert argv[argv.index("--gid") + 1] == "admin"
+    assert argv[-1] == "admin"
 
 
 def test_render_init_script_hostname_is_the_box_name(pubkey):

@@ -114,7 +114,17 @@ if ! id -u "$DEVBOX_USER" >/dev/null 2>&1; then
   # HOME_MODE 0750, not the distro default 0755: the unprivileged agent account
   # (created later by the driver) must not be able to read this user's home,
   # which is the side of the box that holds privilege.
-  useradd --create-home --home-dir "$DEVBOX_HOME" --user-group \
+  # A group of the account's own name may already exist - Ubuntu's cloud images
+  # ship `admin`, its legacy sudo group, which is exactly the default account
+  # name - and `--user-group` refuses to create one that does. Join it instead:
+  # this account gets passwordless sudo below anyway, so membership grants it
+  # nothing new.
+  if getent group "$DEVBOX_USER" >/dev/null; then
+    group_opt=(--gid "$DEVBOX_USER")
+  else
+    group_opt=(--user-group)
+  fi
+  useradd --create-home --home-dir "$DEVBOX_HOME" "${group_opt[@]}" \
           --key HOME_MODE=0750 --groups sudo --shell /bin/bash "$DEVBOX_USER"
 fi
 # No password login, ever (key-only), matching the cloud image's own users.
