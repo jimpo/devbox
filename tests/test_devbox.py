@@ -1446,6 +1446,9 @@ def test_cmd_nix_check_evaluates_the_assembled_flake(monkeypatch, tmp_path,
     assert [c[3] for c in runs] == ["eval"]
     assert runs[0][-1] == (
         f"{flake}#homeConfigurations.agent-x86_64-linux.activationPackage.drvPath")
+    # configenv is named by branch: the check re-resolves it rather than
+    # trusting nix's cached answer, as the home-manager mod does.
+    assert "--refresh" in runs[0]
     # The flake it evaluated is a real one: skeleton + modules + workspace.nix.
     assert (out_dir / "nix" / "flake.nix").is_file()
     assert (out_dir / "nix" / "workspace.nix").is_file()

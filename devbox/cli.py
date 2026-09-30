@@ -1034,12 +1034,18 @@ def cmd_nix_check(args: argparse.Namespace, gc: GlobalConfig, workspace=None) ->
         # add nothing, since homeConfigurations is not an output it recognises.
         # `--raw` prints a store path this command has no use for, so only the
         # build step's output is shown.
+        #
+        # `--refresh` for the same reason `mods/home-manager.sh` passes it:
+        # `configenv` is named by branch, and without it nix reuses its cached
+        # resolution for up to `tarball-ttl` - so a check run right after a
+        # push to that branch would evaluate the old tree and miss an option
+        # the push just added.
         attr = f"{flake}#homeConfigurations.agent-{system}.activationPackage"
-        steps = [(["eval", "--raw", f"{attr}.drvPath"],
+        steps = [(["eval", "--raw", "--refresh", f"{attr}.drvPath"],
                   f"evaluate agent-{system}", False)]
         if args.build:
-            steps.append((["build", "--no-link", "--print-out-paths", attr],
-                          f"build agent-{system}", True))
+            steps.append((["build", "--no-link", "--print-out-paths", "--refresh",
+                           attr], f"build agent-{system}", True))
         for argv, label, show in steps:
             cmd = ["nix", "--extra-experimental-features", "nix-command flakes",
                    *argv]
