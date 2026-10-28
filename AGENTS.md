@@ -450,7 +450,8 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
   before any script runs, so a script can use what its module put on the PATH
   (`repo-bootstrap` runs `jj` from `jj.nix` through the credential helper
   `github-auth.nix` writes). `flake.nix` pins nixpkgs and home-manager to
-  exact revs, takes `configenv` as a NON-flake input on a rolling `main`
+  exact revs (plus a second, independently bumped `nixpkgs-unstable` commit
+  that only `cloudflared` is taken from, as a security fix 26.05 lacks), takes `configenv` as a NON-flake input on a rolling `main`
   (`dotfiles.nix` imports it; `home-manager.sh` passes `--refresh` so a switch
   re-resolves that branch), and carries the module conventions in one comment
   block; there is

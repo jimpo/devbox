@@ -758,7 +758,7 @@ what assembles one and runs nix against it.
 Nothing from `[env]` may appear in a nix expression: `/nix/store` is
 world-readable and shared by every attachment. A converted mod that needs a
 credential names the **path** of the 0600 `~/.config/devbox/env` and reads it at
-run time — which is how `cloudflared`, a module that installs `pkgs.cloudflared`
+run time — which is how `cloudflared`, a module that installs `pkgs-unstable.cloudflared`
 and declares a `systemd.user.service`, gets its `CLOUDFLARE_TOKEN`. Lingering
 (enabled per account by the driver) keeps such a service running between logins
 and across a reboot; `devbox status` lists the account's failed user units, so a

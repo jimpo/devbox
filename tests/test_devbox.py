@@ -1639,7 +1639,7 @@ def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():
     assert f'HM_REV="{revs[0]}"' in mod
     # nixpkgs and home-manager are pinned to an exact rev, so the lock nix
     # writes on the box is deterministic for them without one being checked in.
-    assert re.search(r"github:NixOS/nixpkgs/[0-9a-f]{40}", flake)
+    assert re.search(r'nixpkgs.url = "github:NixOS/nixpkgs/[0-9a-f]{40}"', flake)
     # configenv is the deliberate exception: it rolls with its own `main`, so
     # the switch has to re-resolve that branch rather than reuse nix's cached
     # answer for up to `tarball-ttl`.
@@ -1772,7 +1772,22 @@ def test_the_flake_hands_configenv_to_the_modules(isolated_mods):
     assert "flake = false;" in code
     assert "follows" not in code.split("configenv = {")[1].split("};")[0]
     # extraSpecialArgs is how a module reaches an input at all.
-    assert "extraSpecialArgs = { inherit configenv; };" in code
+    assert "inherit configenv;" in code.split("extraSpecialArgs = {")[1].split("};")[0]
+
+
+def test_cloudflared_comes_from_a_pinned_unstable_nixpkgs():
+    flake = (devbox.NIX_DIR / "flake.nix").read_text()
+    code = "\n".join(line for line in flake.splitlines()
+                      if not line.strip().startswith("#"))
+    assert re.search(r'nixpkgs-unstable.url = "github:NixOS/nixpkgs/[0-9a-f]{40}";', code)
+    assert "pkgs-unstable = nixpkgs-unstable.legacyPackages.${system};" in code
+    # home-manager stays on the stable pin.
+    hm = code.split("home-manager = {")[1].split("};")[0]
+    assert "inputs.nixpkgs.follows = \"nixpkgs\";" in hm
+    mod = (devbox.BUILTIN_MODS_DIR / "cloudflared.nix").read_text()
+    mod_code = "\n".join(l for l in mod.splitlines() if not l.strip().startswith("#"))
+    assert "pkgs-unstable.cloudflared" in mod_code
+    assert "pkgs.cloudflared" not in mod_code
 
 
 def test_the_shared_configs_are_placed_once_per_box_not_cloned_per_account():

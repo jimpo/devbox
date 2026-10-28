@@ -9,13 +9,17 @@
 # ensure_agent), so this service starts at boot and keeps running between
 # logins rather than only for the length of the provisioning SSH session.
 #
+# cloudflared comes from `pkgs-unstable`, the flake's commit-pinned
+# nixpkgs-unstable, because 26.05's is missing a security fix. When 26.05
+# carries the fixed version, go back to `pkgs.cloudflared` (see flake.nix).
+#
 # THE TOKEN NEVER ENTERS THE STORE. /nix/store is world-readable and shared by
 # every attachment on the box, so the only thing below that mentions the token
 # is the PATH of the 0600 file it lives in. The two wrapper scripts read that
 # file at service start, as the agent, and hand the value to cloudflared in the
 # environment - `TUNNEL_TOKEN`, which cloudflared reads on its own - so it is
 # absent from the command line and therefore from `ps` for every other account.
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, pkgs-unstable, ... }:
 
 let
   # The credentials file `devbox sync --envvars` writes into this account's
@@ -48,11 +52,11 @@ let
     set -eu
     . ${quotedEnvFile}
     export TUNNEL_TOKEN="$CLOUDFLARE_TOKEN"
-    exec ${lib.getExe pkgs.cloudflared} tunnel --no-autoupdate run
+    exec ${lib.getExe pkgs-unstable.cloudflared} tunnel --no-autoupdate run
   '';
 in
 lib.mkIf config.devbox.mods.cloudflared.enable {
-  home.packages = [ pkgs.cloudflared ];
+  home.packages = [ pkgs-unstable.cloudflared ];
 
   systemd.user.services.cloudflared = {
     Unit = {
