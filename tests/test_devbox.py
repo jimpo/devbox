@@ -355,6 +355,65 @@ def test_resolve_workspace_env_table_without_a_value_dies(tmp_path, global_confi
         devbox.resolve_workspace(tmp_path, global_config)
 
 
+def _secrets(root, text, mode=0o600):
+    f = root / "secrets.env"
+    f.write_text(text)
+    f.chmod(mode)
+
+
+def test_secrets_env_merged_and_wins(tmp_path, global_config, capsys):
+    _write_visible_marker(tmp_path, '[env]\nA = "toml"\nB = { value = "b", owner = "admin" }\n')
+    _secrets(tmp_path, '# c\n\nA=secret\nexport B="q v"\nC=\'x\'\nD=a=b\n')
+    env = devbox.resolve_workspace(tmp_path, global_config).env
+    assert env == {
+        "A": devbox.EnvVar("secret"),
+        "B": devbox.EnvVar("q v", "admin"),   # owner kept
+        "C": devbox.EnvVar("x"),
+        "D": devbox.EnvVar("a=b"),
+    }
+    assert capsys.readouterr().err == ""
+    # nothing downstream changes: the merged values reach the rendered env file
+    assert "secret" in devbox.render_env_file(devbox.env_for_owner(env, "agent"))
+
+
+def test_secrets_env_bom_first_key_parses(tmp_path, global_config):
+    _write_visible_marker(tmp_path, "")
+    (tmp_path / "secrets.env").write_bytes(b"\xef\xbb\xbfA=1\n")
+    (tmp_path / "secrets.env").chmod(0o600)
+    env = devbox.resolve_workspace(tmp_path, global_config).env
+    assert env == {"A": devbox.EnvVar("1")}
+
+
+def test_secrets_env_hidden_marker_reads_dot_devbox_dir(tmp_path, global_config):
+    _write_marker(tmp_path, 'workspace = "p"\n')
+    _secrets(tmp_path, "X=wrong\n")             # beside the root: not read
+    _secrets(tmp_path / devbox.REPO_MARKER_DIR, "X=right\n")
+    assert devbox.resolve_workspace(tmp_path, global_config).env == {
+        "X": devbox.EnvVar("right")}
+
+
+def test_secrets_env_missing_is_silent(tmp_path, global_config, capsys):
+    _write_visible_marker(tmp_path, 'workspace = "p"\n')
+    assert devbox.resolve_workspace(tmp_path, global_config).env == {}
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("bad", ["NOEQUALS", "1BAD=x", "A B=x"])
+def test_secrets_env_bad_line_dies_naming_file_and_line(tmp_path, global_config, capsys, bad):
+    _write_visible_marker(tmp_path, 'workspace = "p"\n')
+    _secrets(tmp_path, f"OK=1\n{bad}\n")
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+    assert "secrets.env:2" in capsys.readouterr().err
+
+
+def test_secrets_env_loose_mode_warns(tmp_path, global_config, capsys):
+    _write_visible_marker(tmp_path, 'workspace = "p"\n')
+    _secrets(tmp_path, "K=v\n", mode=0o644)
+    assert devbox.resolve_workspace(tmp_path, global_config).env == {"K": devbox.EnvVar("v")}
+    assert "secrets.env" in capsys.readouterr().err
+
+
 def test_resolve_workspace_legacy_name_field_dies(tmp_path, global_config):
     # `name` used to be the VM; it's now a migration error, not silently ignored.
     _write_marker(tmp_path, 'name = "myproj"\n')

@@ -72,7 +72,9 @@ bare name to `box create`.
   clones/pushes); `gh`/`git`/`jj git` read it. A workspace's `[env]` overrides
   per-key. Unset is fine for public repos. An entry is a bare string (the agent's
   env) or `KEY = { value = "...", owner = "admin" }`, which puts it in the
-  privileged user's env instead — for a cred only a privileged mod needs.
+  privileged user's env instead — for a cred only a privileged mod needs. A
+  `secrets.env` (dotenv `KEY=value`, gitignored, ideally 0600) beside the
+  workspace config is merged into it and wins on a clash.
 - `[aws] region` (+ optional `profile`) — the shared AWS account creds; enables
   **both** the `ec2` and `aws` (Lightsail) providers. `[ec2]` (optional
   `default_security_groups`, `default_subnets`, `spot`) holds the EC2-specific

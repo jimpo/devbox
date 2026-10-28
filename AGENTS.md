@@ -27,7 +27,8 @@ the fixed `"admin"` rather than to the host's `$USER` — with `--user` still
 winning, and that default itself a legal username the agent side still
 reserves), the two marker spellings (`find_workspace`:
 walk-up for either, nearest level wins, both-at-once refused, and the
-`root_is_repo`/mods-dir each implies), the `[[repos]]` list (name-supplied host
+`root_is_repo`/mods-dir each implies), the `secrets.env` merge (both marker spellings' directories, quoting/`export`/comments,
+bad-line die naming file:line, loose-mode warning, missing file silent), the `[[repos]]` list (name-supplied host
 path + guest dir, the nameless "the root is the repo" entry and its refusal
 under `devbox.toml`, distinct names/dirs, the mods-dir collision, clone/push
 validation, and the hard errors on the old `[repo]`/`project` keys), the
@@ -353,7 +354,7 @@ while shared stdlib patches go through the re-exported `devbox.shutil`/
 
 - `config.py` — global (`GlobalConfig`, incl. `[aws]` shared AWS creds, `[ec2]`
   EC2 globals, `[env]`, `[[sync]]` defaults) + per-workspace (`WorkspaceConfig`:
-  `box`, `agent_user`, `[[repos]]`, `mods`, `sync`, `env`, `marker`) config,
+  `box`, `agent_user`, `[[repos]]`, `mods`, `sync`, `env`, `marker`) config — the workspace `env` is `[env]` plus a `secrets.env` from the config's own directory (`_merge_secrets_env`; the file wins, no path override) —
   marker resolution, `resolve_instance`/`parse_instance_name`, and
   `resolve_box_spec` — a box's
   shape assembled from `devbox box create` flags plus the global `[defaults]`,

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import stat
 import tomllib
 from pathlib import Path
 from typing import Optional
@@ -334,6 +335,39 @@ def _resolve_env(data: dict, config_path: Path) -> dict:
                 f"the admin's environment.")
         env[key] = EnvVar(spec["value"], owner)
     return env
+
+
+SECRETS_ENV_FILE = "secrets.env"
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")  # what `export KEY=...` accepts
+
+
+def _merge_secrets_env(env: dict, path: Path) -> dict:
+    """Merge a dotenv-style `secrets.env` into `env`, so credentials can live in a
+    file the agents never read (and that is gitignored) rather than in the
+    config. Lines are `[export ]KEY=value`; blank lines and `#` comments are
+    skipped; a value wrapped in matching quotes is unwrapped, with no escapes or
+    interpolation. The file wins over `[env]` on a clash, keeping that entry's
+    owner. Absent file: `env` unchanged."""
+    if not path.is_file():
+        return env
+    if path.stat().st_mode & 0o077:
+        warn(f"{path}: mode is {stat.S_IMODE(path.stat().st_mode):04o}, "
+             f"should be 0600 - it holds credentials")
+    merged = dict(env)
+    for n, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, eq, value = line.removeprefix("export ").partition("=")
+        key = key.strip()
+        if not eq or not _ENV_KEY_RE.match(key):
+            die(f"{path}:{n}: expected KEY=value")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        merged[key] = dataclasses.replace(merged[key], value=value) if key in merged \
+            else EnvVar(value)
+    return merged
 
 
 def _load_aws_config(aws_data: Optional[dict], path: Path) -> Optional[AwsConfig]:
@@ -777,7 +811,8 @@ def resolve_workspace(start: Path, global_config: GlobalConfig) -> WorkspaceConf
         repos=repos,
         mods=_resolve_mods(data, config_path),
         sync=[*global_config.sync, *_resolve_sync(data, marker, repos)],
-        env=_resolve_env(data, config_path),
+        env=_merge_secrets_env(_resolve_env(data, config_path),
+                               config_path.parent / SECRETS_ENV_FILE),
     )
 
 

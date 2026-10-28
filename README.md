@@ -511,6 +511,14 @@ pinned version metadata or dependencies, rerun `uv tool install --editable .
    scoped to just the repos the sandbox needs. Optional — a box with no
    `GITHUB_TOKEN` just has no GitHub HTTPS auth (fine for public repos).
 
+   To keep secrets out of the file agents read, put them in a dotenv-style
+   `secrets.env` beside the workspace config (next to `devbox.toml`, or inside
+   `.devbox/`): `KEY=value` lines, `#` comments, optional `export `, optional
+   matching quotes, no interpolation. It is merged into the workspace's `[env]`
+   at load time and wins on a key clash (an existing entry keeps its `owner`).
+   A missing file is fine; a mode looser than 0600 warns. **Gitignore it** —
+   devbox does not edit your ignore file.
+
    There's no `sha256` field: `devbox create` fetches `SHA256SUMS` +
    `SHA256SUMS.gpg` from alongside the image URL, verifies the signature
    against Canonical's cloud-image signing key (`gpgv` +
