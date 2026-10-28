@@ -293,7 +293,7 @@ which is what makes a change spanning them a single agent's job.
 | `devbox box stop NAME` | Gracefully shut down (ACPI) a running box; says so when more than one workspace is attached. |
 | `devbox box ssh NAME [-- args...]` | `ssh` in as the **privileged user** — the box's only sudo shell, for debugging the machine itself. |
 | `devbox box status NAME` | SSH in as the privileged user and show `cloud-init status --long` plus the tail of the box's own `~/provision.log`. |
-| `devbox box sync --mods[=a,b,c]` | Reconverge the **box playbook** (system state and the privileged account) without touching any attachment. |
+| `devbox box sync --mods` | Reconverge the **box playbook** (system state and the privileged account) without touching any attachment. |
 | `devbox box destroy NAME` | Tear down the box and its disk (the cached base image is left alone). The confirm prompt names every attached workspace, since their checkouts go with it. |
 
 **Workspace commands** act on this workspace's account on its box, and take no name.
@@ -305,7 +305,7 @@ which is what makes a change spanning them a single agent's job.
 | `devbox status` | cloud-init progress, the tail of this workspace's `~/provision-<agent_user>.log`, and this account's failed systemd user units. |
 | `devbox ip` | Print the box's IPv4. |
 | `devbox sync --envvars` | (Re-)write the devbox-managed 0600 `[env]` files — scoped creds/vars (`GITHUB_TOKEN`, API keys) into the shell env of the account each one's `owner` names. Full rewrite each run (drops keys removed from config). See "Credentials" below. |
-| `devbox sync --mods[=a,b,c]` | (Re-)run this workspace's **mods** over SSH — reconverge (add a plugin, re-apply a rust mod) without destroy+create. No list runs the whole workspace playbook; a comma-separated list runs just those (fast iteration). |
+| `devbox sync --mods` | (Re-)run this workspace's **mods** over SSH — reconverge (add a plugin, re-apply a rust mod) without destroy+create. Always runs the whole workspace playbook, including re-running the `claude-code`/`codex` installers (a download each time). |
 | `devbox sync --files` | Push host-local, non-VCS files (`[[sync]]`/`[[repos.sync]]`) onto the box via rsync — agent skills, git-excluded workspace files. Re-runnable + incremental. See "Host→box file sync" below. |
 | `devbox jj fetch [REPO]` | jj-fetch one checkout's bookmarked work into your local repo: refreshes the SSH alias (address via the provider), ensures the jj remote, and runs `jj git fetch`. Which checkout: the named one, else the one the working directory is inside, else the workspace's only one. See "Exchanging commits" below. |
 | `devbox host` | Refresh the SSH aliases used for `jj fetch` (below); prints this workspace's alias, and names the admin one. |
@@ -666,7 +666,7 @@ Each entry's `mode` says how that one checkout arrives:
 
 `repo-bootstrap` is guarded per directory, so a reconverge creates only the
 checkouts that are missing and leaves the rest alone — which is what makes adding
-a repo to a live workspace a `devbox sync --mods=repo-bootstrap`.
+a repo to a live workspace a `devbox sync --mods`.
 
 A workspace adds everything it needs as a **mod** (see below). There is no
 per-workspace first-boot hook: devbox's first-boot layer is one fixed init script
@@ -766,7 +766,7 @@ well, through `programs.vim`. `imports` cannot sit
 inside a conditional, so configenv carries its own `enable` option and the
 module drives it from `devbox.mods.dotfiles.enable`. The input names a branch
 rather than a rev, deliberately: an edit to the shared configs reaches a box on
-the next `devbox sync --mods=home-manager`, which passes `--refresh` so nix
+the next `devbox sync --mods`, which passes `--refresh` so nix
 re-resolves it.
 The privileged account gets none of it. `devbox box ssh`, the debugging shell,
 deliberately stays on stock apt bash and unconfigured vim instead: the whole
@@ -805,7 +805,7 @@ and lands `~/.local/bin/codex` as a symlink into a release directory under
 `~/.codex`. A store path is read-only and carries whatever version its nixpkgs
 pin names, which is the wrong trade for a tool that ships most days. Nothing in
 the generation provides either binary, so the PATH order (`~/.nix-profile/bin`
-first) has nothing to shadow, and `devbox sync --mods=claude-code` re-runs the
+first) has nothing to shadow, and `devbox sync --mods` re-runs the
 install.
 
 Each mod also writes the account-level configuration devbox wants, *merged*
@@ -926,9 +926,8 @@ reconverge:
 - **`devbox create`** — attaches: creates this workspace's account, injects the
   `[env]` creds, runs the workspace playbook, then pushes `[[sync]]` files. It
   blocks through all of it, so when it returns the workspace is fully provisioned.
-- **`devbox sync --mods[=a,b,c]`** / **`devbox box sync --mods`** — reconverge a
-  live box; no list runs the whole playbook, a list runs just those (fast
-  iteration while writing a mod).
+- **`devbox sync --mods`** / **`devbox box sync --mods`** — reconverge a
+  live box; always runs the whole playbook.
 
 The init script carries **no** provisioning payload — it only does base setup.
 (Trade-off: the host must stay attached during `create`; if it disconnects
@@ -953,7 +952,7 @@ belongs to another workspace, if it exists with no record at all (pass `--adopt`
 or if the agent has somehow acquired sudo or a root-equivalent group. It is a
 driver preamble rather than a mod on purpose: it must always run, must not be
 shadowable by a workspace's own mods directory, and must not be skippable via
-`devbox sync --mods=claude-code`.
+`devbox sync --mods`.
 
 **Idempotency contract:** every mod either overwrites unconditionally or guards
 on "already done", so `create` and every reconverge are safe. Each built-in
@@ -996,7 +995,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 # ... cargo tools, claude plugin install rust-analyzer-lsp, etc.
 ```
 
-`devbox sync --mods=rust` re-applies just that mod on a live box.
+`devbox sync --mods` re-applies it on a live box.
 
 ### First boot: the init script
 

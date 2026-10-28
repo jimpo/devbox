@@ -17,7 +17,7 @@ Provider seam.
     devbox create              # ensure the box exists, then attach this workspace
     devbox ssh [args...]       # ssh in as this workspace's unprivileged agent user
     devbox sync --envvars      # inject [env] creds into that account's shell env
-    devbox sync --mods[=a,b]   # (re)run provisioning mods over SSH (reconverge)
+    devbox sync --mods         # (re)run provisioning mods over SSH (reconverge)
     devbox sync --files        # rsync host-local files ([[sync]]) onto the box
     devbox jj fetch [repo]     # jj git fetch the account's work into a host repo
     devbox host                # refresh the SSH alias used for jj fetch
@@ -165,7 +165,7 @@ def _boot_box(box: BoxSpec, gc: GlobalConfig, provider) -> None:
 
     admin_alias = _wait_ready(provider, box.name, box.admin_user)
     print("==> provisioning the box (running its mods over SSH) ...")
-    _run_mods(admin_alias, tarball, [], log=provision_log())
+    _run_mods(admin_alias, tarball, log=provision_log())
 
 
 def cmd_box_create(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
@@ -244,7 +244,7 @@ def cmd_create(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceC
     print("==> injecting [env] credentials ...")
     run_envvars(admin_alias, resolve_env(workspace, gc), workspace.agent_user)
     print("==> provisioning (running mods over SSH; several minutes) ...")
-    _run_mods(admin_alias, tarball, [], log=provision_log(workspace.agent_user))
+    _run_mods(admin_alias, tarball, log=provision_log(workspace.agent_user))
     if workspace.sync:
         print("==> syncing host-local files onto the box ...")
         run_sync(workspace, agent_alias)
@@ -347,10 +347,10 @@ def _ensure_agent_account(alias: str, tarball: bytes, adopt: bool = False) -> No
             f"see the output above")
 
 
-def _run_mods(alias: str, tarball: bytes, mods: list, log: str) -> None:
+def _run_mods(alias: str, tarball: bytes, log: str) -> None:
     """Run a provisioning playbook over SSH (the driver re-runs its account
-    preamble first). `mods` selects a subset; empty = the whole playbook."""
-    rc = _run_driver(alias, tarball, mods, log=log)
+    preamble first). Always the whole playbook."""
+    rc = _run_driver(alias, tarball, [], log=log)
     if rc != 0:
         die(f"provisioning failed (exit {rc}); see the output above "
             f"or ~/{log} on the box")
@@ -801,19 +801,13 @@ def cmd_jj_fetch(args: argparse.Namespace, gc: GlobalConfig, workspace: Workspac
     print(f"fetched. Check out an agent bookmark with e.g. `jj new <bookmark>@{alias}`.")
 
 
-def _split_mods(value: str) -> list:
-    """The `--mods` optional argument -> a mod list: "" (flag with no value) =>
-    [] (the whole playbook); "a,b,c" => ["a", "b", "c"]."""
-    return [m.strip() for m in value.split(",") if m.strip()]
-
-
 def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConfig) -> None:
     # Reconverge a live box: inject [env] creds (--envvars), run provisioning
     # mods (--mods), and/or push host-local files (--files), over the
     # provider-resolved SSH alias. `devbox create` runs the same steps on a
     # fresh box (see cmd_create).
     do_envvars = args.envvars
-    do_mods = args.mods is not None      # --mods present (with or without a value)
+    do_mods = args.mods
     do_files = args.files
     if not (do_envvars or do_mods or do_files):
         die("nothing to do: pass --envvars (inject [env] creds), --mods (run "
@@ -841,10 +835,8 @@ def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceCon
         print(f"==> injecting [env] credentials into '{name}' ...")
         run_envvars(admin_alias, resolve_env(workspace, gc), workspace.agent_user)
     if do_mods:
-        mods = _split_mods(args.mods)
-        subset = f" (mods: {', '.join(mods)})" if mods else ""
-        print(f"==> provisioning '{name}' over SSH{subset} ...")
-        _run_mods(admin_alias, tarball, mods, log=provision_log(workspace.agent_user))
+        print(f"==> provisioning '{name}' over SSH ...")
+        _run_mods(admin_alias, tarball, log=provision_log(workspace.agent_user))
     if do_files:
         print(f"==> syncing host-local files to '{name}' ...")
         run_sync(workspace, agent_alias)
@@ -859,10 +851,8 @@ def cmd_box_sync(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> 
         die(f"no address for '{name}' yet (still booting?).")
     admin_user = _admin_user(provider, name)
     _, admin_alias = _refresh_ssh_aliases(name, ip, admin_user)
-    mods = _split_mods(args.mods or "")
-    subset = f" (mods: {', '.join(mods)})" if mods else ""
-    print(f"==> provisioning box '{name}' over SSH{subset} ...")
-    _run_mods(admin_alias, build_tarball(build_box_payload(admin_user, gc)), mods,
+    print(f"==> provisioning box '{name}' over SSH ...")
+    _run_mods(admin_alias, build_tarball(build_box_payload(admin_user, gc)),
               log=provision_log())
     print("done.")
 
@@ -1121,8 +1111,8 @@ def main() -> None:
     bs.set_defaults(func=cmd_box_ssh, needs_workspace=False)
     bsy = box_sub.add_parser("sync", help="reconverge the box's own playbook")
     bsy.add_argument("name", help="the box's canonical name")
-    bsy.add_argument("--mods", nargs="?", const="", default=None, metavar="a,b,c",
-                     help="run box mods over SSH (all if no list; else comma-separated)")
+    bsy.add_argument("--mods", action="store_true",
+                     help="run the box's mods over SSH")
     bsy.set_defaults(func=cmd_box_sync, needs_workspace=False)
     bd = box_sub.add_parser("destroy", help="tear down the box and its disk")
     bd.add_argument("name", help="the box's canonical name")
@@ -1164,8 +1154,8 @@ def main() -> None:
     sy = sub.add_parser("sync", help="reconverge this workspace on its box: --envvars / --mods / --files")
     sy.add_argument("--envvars", action="store_true",
                     help="inject the [env] creds/vars into the account's shell env")
-    sy.add_argument("--mods", nargs="?", const="", default=None, metavar="a,b,c",
-                    help="run provisioning mods over SSH (all if no list; else comma-separated)")
+    sy.add_argument("--mods", action="store_true",
+                    help="run the workspace's provisioning mods over SSH")
     sy.add_argument("--files", action="store_true",
                     help="push host-local files ([[sync]]/[[repos.sync]]) to the box via rsync")
     sy.add_argument("--adopt", action="store_true",

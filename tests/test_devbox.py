@@ -2268,8 +2268,8 @@ def test_validate_playbooks_dep_listed_before_passes(isolated_mods, tmp_path):
 
 
 def test_build_payload_validates_mods(isolated_mods, pubkey, tmp_path):
-    # build_payload is the choke point: a bad `requires` fails there (so a
-    # selective `devbox sync --mods=a` still validates the full playbook).
+    # build_payload is the choke point: a bad `requires` fails there (so
+    # `devbox sync --mods` validates the full playbook).
     _write_workspace_mod(tmp_path, "rust", _mod('requires = ["nonexistent"]'))
     with pytest.raises(SystemExit):
         devbox.build_payload(_workspace(marker_dir=tmp_path, mods=["rust"]),
@@ -3476,15 +3476,18 @@ def test_plan_sync_defaults_the_guest_home_to_the_agent(tmp_path):
     assert jobs[0].guest_path == "/home/botty/skills"
 
 
-def _sync_args(envvars=False, files=False, mods=None):
+def _sync_args(envvars=False, files=False, mods=False):
     import argparse
     return argparse.Namespace(name=None, workspace_dir=None, envvars=envvars, files=files, mods=mods)
 
 
-def test_split_mods_parsing():
-    assert devbox.cli._split_mods("") == []               # --mods with no value -> all
-    assert devbox.cli._split_mods("rust") == ["rust"]
-    assert devbox.cli._split_mods("a, b ,c") == ["a", "b", "c"]
+@pytest.mark.parametrize("argv", [["sync", "--mods=a"], ["box", "sync", "x", "--mods=a"]])
+def test_mods_flag_takes_no_value(argv, monkeypatch):
+    # argparse rejects it before main() loads any config
+    monkeypatch.setattr(devbox.cli.sys, "argv", ["devbox"] + argv)
+    with pytest.raises(SystemExit) as e:
+        devbox.cli.main()
+    assert e.value.code == 2
 
 
 def test_cmd_sync_requires_a_flag():

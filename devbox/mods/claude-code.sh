@@ -16,7 +16,7 @@
 #
 # Nothing in the generation provides a `claude`, so the account's PATH order
 # (~/.nix-profile/bin ahead of ~/.local/bin) leaves this the only one, and
-# `devbox sync --mods=claude-code` re-runs it.
+# `devbox sync --mods` re-runs it.
 #
 # Runs as the agent (the default target): this is the account a workspace's
 # agents work in, and the only one that needs Claude Code at all. Each attached

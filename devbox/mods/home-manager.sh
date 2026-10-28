@@ -20,7 +20,7 @@
 #
 # THE FLAKE IS THE PAYLOAD'S. `$DEVBOX_PAYLOAD_DIR/nix` is unpacked per run and
 # deleted afterwards, so there is no copy on the box to edit; the way to
-# re-switch is `devbox sync --mods=home-manager`, which ships it again. It is
+# re-switch is `devbox sync --mods`, which ships it again. It is
 # named with a `path:` prefix because a flake inside a git work tree ignores
 # untracked files and the payload is not a repo - a bare path would silently
 # evaluate the wrong thing on a box where /tmp happened to sit in one. The

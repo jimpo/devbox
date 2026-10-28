@@ -39,14 +39,12 @@
 # privileged alter ego). Which creds an account gets is the `owner` of each
 # `[env]` entry, host-side.
 #
-# Usage: provision-driver.sh [--ensure-users|--ensure-admin|--ensure-agent | <mod-name> ...]
+# Usage: provision-driver.sh [--ensure-users|--ensure-admin|--ensure-agent]
 #   no args        - run the whole playbook (manifest order)
 #   --ensure-*     - run only that half of the user preamble and exit (the CLI
 #                    calls --ensure-agent before writing the agent's [env] file,
 #                    which needs the home directory to exist); --ensure-users
 #                    means both.
-#   mod names      - run only those (fast iteration while writing one mod); each
-#                    must be in the playbook.
 #
 # Runs each mod in order, stops at the first failure and reports which mod, and
 # tees each mod's output to ~/provision/<agent>/<name>.log - one directory per
@@ -415,7 +413,6 @@ while IFS=$'\t' read -r m_name m_runas m_packages; do
   MOD_PACKAGES+=("${m_packages:-}")
 done < "$HERE/manifest"
 
-SELECTED=()
 if [ "$#" -gt 0 ] && [ "${1#--ensure-}" != "$1" ]; then
   case "$1" in
     --ensure-admin) ensure_admin ;;
@@ -424,22 +421,6 @@ if [ "$#" -gt 0 ] && [ "${1#--ensure-}" != "$1" ]; then
     *) fail "unknown option '$1'" ;;
   esac
   exit 0
-elif [ "$#" -gt 0 ]; then
-  # Selective run: every requested name must be in this workspace's playbook.
-  declare -A known=()
-  for i in "${!MOD_NAMES[@]}"; do known["${MOD_NAMES[$i]}"]="$i"; done
-  for want in "$@"; do
-    # `+set` tests key presence, not value: index 0 is a legitimate value that
-    # `-z "${known[$want]:-}"` would misread as "not in the playbook".
-    if [ -z "${known[$want]+set}" ]; then
-      printf 'devbox: unknown mod %q (this workspace runs: %s)\n' \
-        "$want" "${MOD_NAMES[*]}" >&2
-      exit 2
-    fi
-    SELECTED+=("${known[$want]}")
-  done
-else
-  for i in "${!MOD_NAMES[@]}"; do SELECTED+=("$i"); done
 fi
 
 # Always, before any mod: the accounts a mod body is about to drop into.
@@ -447,7 +428,7 @@ fi
 ensure_admin
 ensure_agent
 
-for i in "${SELECTED[@]}"; do
+for i in "${!MOD_NAMES[@]}"; do
   name="${MOD_NAMES[$i]}"
   file="$MODS_DIR/$name.sh"
   if [ ! -f "$file" ]; then

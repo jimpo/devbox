@@ -43,12 +43,12 @@ dir) and `--box NAME` go *before* the subcommand.
 | `devbox box list [--attached]` | All devbox-managed boxes (libvirt on this host + EC2/Lightsail account-wide): name, provider, state, resources; `--attached` also shows which workspaces are on each. `devbox list` is the same command. |
 | `devbox box up\|stop\|status\|destroy NAME` | Start / graceful-shutdown / cloud-init + the box's provision log / tear down (destroy deletes the disk, and names the attached workspaces first). |
 | `devbox box ssh NAME` | SSH in as the privileged user — the box's only sudo shell. |
-| `devbox box sync --mods[=a,b]` | Reconverge the box's own playbook (system state + the privileged account). |
+| `devbox box sync --mods` | Reconverge the box's own playbook (system state + the privileged account). |
 | `devbox create` | Ensure the workspace's box exists, then **attach**: create its account, inject creds, run its mods, push files. Idempotent — re-running reconverges. `--adopt` claims an account devbox has no record of. |
 | `devbox ip` / `ssh [-- args]` / `status` | Print IP / SSH in as this workspace's account / cloud-init progress + this workspace's provision log. |
 | `devbox jj fetch [REPO]` | jj-fetch one checkout's bookmarked work into your local repo (refreshes the SSH alias + jj remote, runs `jj git fetch`). Picks the repo you name, else the one the cwd is inside, else the workspace's only one. |
 | `devbox sync --envvars` | (Re-)write the 0600 `[env]` files — scoped creds/vars (`GITHUB_TOKEN`, API keys) into the shell env of each entry's `owner` account. Full rewrite each run. |
-| `devbox sync --mods[=a,b]` | Run this workspace's provisioning mods over SSH on a live box (reconverge, no rebuild). No list = whole playbook; else just those. |
+| `devbox sync --mods` | Run this workspace's provisioning mods over SSH on a live box (reconverge, no rebuild). Always the whole playbook. |
 | `devbox sync --files` | Push host-local non-VCS files (`[[sync]]`/`[[repos.sync]]`) onto the box via rsync (agent skills, git-excluded files). |
 | `devbox host` | Refresh/print this workspace's SSH alias, used for `jj fetch`. |
 | `devbox herdr [-- args]` | Launch a herdr session on the box as this workspace's account (`herdr --remote <alias>`). Replaces `herdr --remote $(devbox host)`; trailing args pass through. Needs herdr on the **host**. |

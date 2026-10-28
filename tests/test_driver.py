@@ -4,7 +4,7 @@ privileged commands.
 The driver is bash that runs on a booted box as the privileged user, so its real
 effects (useradd, apt, dropping to another account) cannot run in a test. What
 CAN be tested is all the logic around them: manifest parsing, the runas
-dispatch, package-install ordering, selective runs, failure propagation, and the
+dispatch, package-install ordering, failure propagation, and the
 isolation assertions. This module puts fake `sudo`/`useradd`/`id`/`getent`/... on
 PATH ahead of the real ones and asserts on what the driver tried to do.
 
@@ -677,29 +677,6 @@ def test_no_apt_call_when_nothing_declares_packages(box):
 
 
 # ---- selection and failure --------------------------------------------------
-def test_selective_run_runs_only_the_named_mods(box):
-    b = box([_spec("jj"), _spec("dotfiles"), _spec("vim")])
-    assert b.run("vim").returncode == 0
-    assert b.ran() == [("vim", AGENT)]
-
-
-def test_selective_run_accepts_the_first_mod_in_the_playbook(box):
-    # Index 0 is a legitimate manifest position; a truthiness test on the lookup
-    # would reject it as "not in the playbook".
-    b = box([_spec("jj"), _spec("vim")])
-    r = b.run("jj")
-    assert r.returncode == 0, r.stderr
-    assert b.ran() == [("jj", AGENT)]
-
-
-def test_selective_run_rejects_an_unknown_mod(box):
-    b = box([_spec("jj")])
-    r = b.run("nope")
-    assert r.returncode == 2
-    assert "unknown mod" in r.stderr
-    assert b.ran() == []
-
-
 def test_a_failing_mod_stops_the_run(box):
     b = box([_spec("jj"), _spec("boom", extra="exit 1"), _spec("vim")])
     r = b.run()

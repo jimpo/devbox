@@ -91,9 +91,8 @@
 # validates - a module is not a step in the run, so it satisfies a dependency
 # wherever it sits (a name that has a script as well is checked by the
 # script's position, since a mod may need what the script makes). And a converted name is no longer in the driver's manifest,
-# so `devbox sync --mods=<name>` no longer knows it: the way to reconverge a
-# converted mod is `devbox sync --mods=home-manager`, which re-switches the
-# whole generation.
+# so it has no script of its own to run: the way to reconverge a converted mod
+# is `devbox sync --mods`, which re-switches the whole generation.
 #
 # `devbox.mods.<name>.enable` MEANS "the generation provides this mod". devbox
 # renders one flag per resolved module name (options.nix declares them

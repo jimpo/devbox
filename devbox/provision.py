@@ -607,9 +607,8 @@ def validate_playbooks(workspace: WorkspaceConfig) -> None:
     ["box-packages"]` is satisfied by the box having run it - box mods are
     always "earlier" than any attachment, as is anything the attachment's
     generation provides with no script beside it. Validates the FULL configured playbooks:
-    callers must pass the configured workspace even for selective runs (`devbox
-    sync --mods=a`), since deps are about the box's cumulative state, not the
-    selected subset."""
+    callers must pass the configured workspace, since deps are about the
+    box's cumulative state."""
     config_path = workspace.marker.config_path
     box = resolve_playbook(box_playbook(), None, SCOPE_BOX)
     _validate_ordering(box.specs, config_path)
@@ -893,9 +892,8 @@ def build_payload(workspace: WorkspaceConfig, gc: GlobalConfig, admin_user: str)
 
     Validates BOTH configured playbooks' metadata (`runas` targets and
     `requires` ordering) first. This is the single choke point: build_payload
-    always builds the whole manifest (even for a selective `devbox sync
-    --mods=a`, which validates here and then runs only the selected subset), so
-    deps are checked against the box's cumulative state, not the subset."""
+    always builds the whole manifest, so deps are checked against the box's
+    cumulative state."""
     validate_playbooks(workspace)
     attachment = resolve_playbook(workspace_playbook(workspace),
                                   workspace.marker.mods_dir)

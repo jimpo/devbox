@@ -172,7 +172,7 @@ carry botocore's real class names, since that naming is what the matcher keys on
 `tests/test_driver.py` is the exception to "the driver can't be tested": it runs
 the real `provision-driver.sh` with fake `sudo`/`useradd`/`id`/`getent`/`apt-get`
 on PATH, which covers manifest parsing, runas dispatch (including the
-privilege drop's target account and `$HOME`), package-install ordering, selective
+privilege drop's target account and `$HOME`), package-install ordering,
 runs, failure propagation, the isolation assertions, and the whole attach story:
 box runs (empty `DEVBOX_AGENT_USER`) creating no account, ownership markers
 written/refused/adopted (including a legacy `project=` marker still identifying
@@ -244,7 +244,7 @@ check**: `devbox detach` one of them, run `sudo nix-collect-garbage` as the box'
 privileged account (which is what the store's min-free/max-free would eventually
 do by itself), and check that the workspace still attached is unharmed — its
 `home-manager generations` still resolve, `devbox ssh` still finds the tools its
-generation provides, and `devbox sync --mods=home-manager` is still a no-op
+generation provides, and `devbox sync --mods` is still a no-op
 reconverge. Two workspaces share most of their closure, so this is what says that
 dropping one's roots frees only what nothing else roots.
 
@@ -252,7 +252,7 @@ For the home-manager half, on the same box: that `devbox create` ends with the
 `home-manager` mod reporting a switch; that `ssh <box-alias> 'command -v nix'`
 and `ssh <box-alias> 'echo $PATH'` — a NON-interactive session, the one Claude
 Code's Bash tool uses — find nix and list `~/.nix-profile/bin` ahead of
-`~/.local/bin`; that a second `devbox sync --mods=home-manager` is a no-op
+`~/.local/bin`; that a second `devbox sync --mods` is a no-op
 reconverge ("No change so reusing latest profile generation"); that both
 workspaces have their own generation (`home-manager generations` as each agent,
 and `ls -l ~/.nix-profile` pointing into that account's own profile); and that
@@ -307,7 +307,7 @@ For Claude Code, on that same box: `command -v claude` as the agent answers
 writable install directory — the account owns the binary, which is the whole
 reason this is a script mod. `jq -r .permissions.defaultMode
 ~/.claude/settings.json` is `bypassPermissions`, and a second `devbox sync
---mods=claude-code` neither fails nor reverts what `/config` wrote in a live
+--mods` neither fails nor reverts what `/config` wrote in a live
 session. The one that only a real box can show is the update itself: leave a box
 up across a Claude Code release and the agent's `claude --version` moves without
 any devbox command being run. Add a `mods = ["claude-github-mcp",
