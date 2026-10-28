@@ -27,6 +27,7 @@ cross-platform development and benchmarking on cloud VMs.
 ## Install
 
 ```bash
+git clone https://github.com/jimpo/devbox && cd devbox
 uv tool install --editable .
 ```
 
@@ -223,8 +224,8 @@ disk_gb = 100
 pubkey_path = "~/.ssh/id_ed25519.pub"
 
 [jj]                            # default: the host's jj user.name/user.email
-name = "Jim Posen"
-email = "jim.posen@gmail.com"
+name = "Your Name"
+email = "you@example.com"
 
 [env]                           # creds for every box (see Credentials)
 GITHUB_TOKEN = "github_pat_..."
@@ -452,3 +453,20 @@ file's header says what it does.
 - [ARCHITECTURE.md](ARCHITECTURE.md)
 - [DEVELOPMENT.md](DEVELOPMENT.md)
 
+## Status
+
+devbox is a personal tool, published for reference. It is opinionated: the base
+`dotfiles` mod imports the author's own
+[configenv](https://github.com/jimpo/configenv). To turn it off, put an empty
+`dotfiles.nix` (`{ ... }: { }`) in your global or workspace mods directory.
+Issues and pull requests aren't actively monitored.
+
+## License
+
+Copyright (C) 2026 Jim Posen
+
+devbox is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It is distributed WITHOUT ANY WARRANTY; see
+[LICENSE.txt](LICENSE.txt) for the full text.
