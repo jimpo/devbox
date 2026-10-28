@@ -15,7 +15,7 @@ intended to run it as - the single most important thing to get right here.
 
 This is deliberately NOT a claim that the driver is verified: nothing here boots
 a box, so `useradd` flags, sudoers behavior and apt are still hand-verification
-territory (see AGENTS.md).
+territory (see DEVELOPMENT.md).
 """
 import os
 import subprocess

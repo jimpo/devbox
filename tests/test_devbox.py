@@ -1653,7 +1653,7 @@ def test_the_flake_discovers_modules_by_file_presence_not_a_list():
     # rather than importing a fixed list, so a new file - built-in, global, or
     # a workspace's own - needs no second place to register it. (Whether that
     # discovery actually evaluates correctly is a `nix flake check` question,
-    # which this host cannot run - see AGENTS.md.)
+    # which pytest does not run - see DEVELOPMENT.md.)
     flake = (devbox.NIX_DIR / "flake.nix").read_text()
     assert "readDir ./modules" in flake
     code = [line for line in flake.splitlines() if not line.strip().startswith("#")]
