@@ -2730,6 +2730,9 @@ class _FakeCreateProvider:
     def state(self, name):
         return self._state
 
+    def ssh_proxy(self, name):
+        return None
+
     def create(self, spec):
         self.seen["spec"] = spec
         raise _CreateStop
@@ -2843,7 +2846,7 @@ def _box_sync(monkeypatch, pubkey, marker, calls):
     monkeypatch.setattr(devbox.cli, "_ssh_ok", lambda alias: calls.append("ssh_ok") or True)
     monkeypatch.setattr(devbox.cli, "_resolve_box", lambda n, gc: (n, None, provider))
     monkeypatch.setattr(devbox.cli, "_admin_user", lambda p, n: "admin")
-    monkeypatch.setattr(devbox.cli, "_refresh_ssh_aliases", lambda *a: (None, "alias"))
+    monkeypatch.setattr(devbox.cli, "_refresh_ssh_aliases", lambda *a, **kw: (None, "alias"))
     monkeypatch.setattr(devbox.cli, "build_box_payload", lambda admin, gc: [])
     devbox.cli.cmd_box_sync(argparse.Namespace(name="aws-dev", mods=True), gc)
 
@@ -3134,6 +3137,9 @@ def _herdr_env(monkeypatch, execs, which=lambda p: f"/usr/bin/{p}"):
 class _FakeAddr:
     def address(self, name):
         return "10.0.0.5"
+
+    def ssh_proxy(self, name):
+        return None
 
 
 def test_cmd_herdr_execs_against_the_agent_alias(monkeypatch):
@@ -3626,9 +3632,22 @@ def ssh_dir(tmp_path, monkeypatch):
     return tmp_path / "ssh"
 
 
+class _ProxyProvider:
+    def __init__(self, proxy=None):
+        self.proxy = proxy
+
+    def ssh_proxy(self, name):
+        return self.proxy
+
+    def address(self, name):
+        return "10.42.0.7"
+
+    def get(self, name):
+        return None
+
+
 def test_refresh_ssh_aliases_writes_one_stanza_per_file(ssh_dir):
-    aliases = devbox.cli._refresh_ssh_aliases(
-        "binius", "10.0.0.5", "alice", _workspace(workspace="binius"))
+    aliases = devbox.cli._refresh_ssh_aliases(_ProxyProvider(), "binius", "10.0.0.5", "alice", _workspace(workspace="binius"))
     assert aliases == ("devbox-binius", "devbox-binius-admin")
 
     agent = (ssh_dir / "binius.binius.conf").read_text()
@@ -3640,15 +3659,64 @@ def test_refresh_ssh_aliases_writes_one_stanza_per_file(ssh_dir):
     assert f"UserKnownHostsFile {ssh_dir}/known_hosts.binius" in admin
 
 
+def test_alias_files_get_proxycommand_and_hostkeyalias_only_with_a_proxy(ssh_dir):
+    devbox.cli._refresh_ssh_aliases(_ProxyProvider(), "dev", "10.0.0.5", "alice")
+    plain = (ssh_dir / "dev.admin.conf").read_text()
+    assert "ProxyCommand" not in plain and "HostKeyAlias" not in plain
+
+    workspace = _workspace(workspace="web")
+    devbox.cli._refresh_ssh_aliases(_ProxyProvider("virtctl port-forward --stdio=true vm/dev/ws 22"),
+                                    "kube-dev", "10.42.0.7", "alice", workspace)
+    for f in ("kube-dev.admin.conf", "kube-dev.web.conf"):
+        conf = (ssh_dir / f).read_text()
+        assert "    HostName 10.42.0.7\n" in conf
+        assert "    ProxyCommand virtctl port-forward --stdio=true vm/dev/ws 22\n" in conf
+        assert "    HostKeyAlias kube-dev\n" in conf
+
+
+def test_alias_writing_commands_all_use_the_providers_proxy(ssh_dir, monkeypatch):
+    # Every call site gets the ProxyCommand from the provider, so none can drop it.
+    workspace = _workspace(workspace="web")
+    fake = _ProxyProvider("X")
+    monkeypatch.setattr(devbox.cli, "_resolve_target",
+                        lambda args, ws, gc: ("kube-dev", "kubevirt", fake))
+    monkeypatch.setattr(devbox.cli, "_resolve_box", lambda n, gc: (n, "kubevirt", fake))
+    monkeypatch.setattr(devbox.cli.os, "execvp", lambda *a: None)
+    args = argparse.Namespace(name="kube-dev", ssh_args=[])
+    for run in (lambda: devbox.cli.cmd_host(args, None, workspace),
+                lambda: devbox.cli.cmd_ssh(args, None, workspace),
+                lambda: devbox.cli.cmd_box_ssh(args, None)):
+        for f in ssh_dir.glob("*.conf"):
+            f.unlink()
+        run()
+        assert all("    ProxyCommand X\n" in f.read_text() for f in ssh_dir.glob("*.conf"))
+        assert list(ssh_dir.glob("*.conf"))
+
+
+def test_the_base_provider_has_no_ssh_proxy():
+    assert devbox.providers.LibvirtProvider(_global_config(devbox.Path("/x"))).ssh_proxy("a") is None
+
+
+def test_wait_ready_gives_the_address_900s(monkeypatch):
+    seen = []
+    def poll(fn, timeout, **kw):
+        seen.append(timeout)
+        return None
+    monkeypatch.setattr(devbox.cli, "_poll", poll)
+    with pytest.raises(SystemExit):
+        devbox.cli._wait_ready(_FakeAddr(), "dev", "admin")
+    assert seen == [900]
+
+
 def test_refresh_ssh_aliases_keeps_attachments_independent(ssh_dir):
     # The regression that makes sharing a box safe: one file per box would have
     # each workspace's refresh overwrite the last one's account, pointing you at
     # the wrong home without ever erroring.
     first = _workspace(workspace="binius", box="dev", agent_user="biniusbot")
     second = _workspace(workspace="web", box="dev", agent_user="webbot")
-    devbox.cli._refresh_ssh_aliases("dev", "10.0.0.5", "alice", first)
+    devbox.cli._refresh_ssh_aliases(_ProxyProvider(), "dev", "10.0.0.5", "alice", first)
     before = (ssh_dir / "dev.binius.conf").read_text()
-    devbox.cli._refresh_ssh_aliases("dev", "10.0.0.5", "alice", second)
+    devbox.cli._refresh_ssh_aliases(_ProxyProvider(), "dev", "10.0.0.5", "alice", second)
 
     assert (ssh_dir / "dev.binius.conf").read_text() == before   # untouched
     assert "User webbot" in (ssh_dir / "dev.web.conf").read_text()
@@ -3662,8 +3730,8 @@ def test_refresh_ssh_aliases_rewrites_cleanly_on_a_new_address(ssh_dir):
     # Written whole each time, so a re-created box can't leave a stale duplicate
     # stanza behind.
     workspace = _workspace(workspace="binius")
-    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.5", "alice", workspace)
-    devbox.cli._refresh_ssh_aliases("binius", "10.0.0.9", "alice", workspace)
+    devbox.cli._refresh_ssh_aliases(_ProxyProvider(), "binius", "10.0.0.5", "alice", workspace)
+    devbox.cli._refresh_ssh_aliases(_ProxyProvider(), "binius", "10.0.0.9", "alice", workspace)
     conf = (ssh_dir / "binius.binius.conf").read_text()
     assert conf.count("Host devbox-binius\n") == 1
     assert "10.0.0.5" not in conf
@@ -3672,7 +3740,7 @@ def test_refresh_ssh_aliases_rewrites_cleanly_on_a_new_address(ssh_dir):
 def test_truncate_known_hosts_is_scoped_to_one_box(ssh_dir):
     # Creating box B must not invalidate box A's pinned key - which, on a shared
     # box, would be every workspace attached to it.
-    devbox.cli._refresh_ssh_aliases("a", "10.0.0.5", "alice")
+    devbox.cli._refresh_ssh_aliases(_ProxyProvider(), "a", "10.0.0.5", "alice")
     devbox.config.known_hosts_path("a").write_text("10.0.0.5 ssh-ed25519 AAAA\n")
     devbox.cli.truncate_known_hosts("b")
     assert devbox.config.known_hosts_path("a").read_text() != ""

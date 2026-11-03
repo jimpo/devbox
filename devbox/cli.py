@@ -318,11 +318,12 @@ def _wait_ready(provider, name: str, admin_user: str,
     Readiness is checked over the PRIVILEGED alias: a workspace's agent account is
     created later, by the provisioning driver, so its alias cannot connect yet."""
     print("==> waiting for the box to get an address ...")
-    ip = _poll(lambda: provider.address(name), timeout=300)
+    # 900s: a kubevirt box's disk is cloned (CDI) before it first boots.
+    ip = _poll(lambda: provider.address(name), timeout=900)
     if not ip:
         die(f"timed out waiting for '{name}' to get an address; "
             f"check `devbox box status {name}`")
-    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, admin_user, workspace)
+    agent_alias, admin_alias = _refresh_ssh_aliases(provider, name, ip, admin_user, workspace)
 
     print("==> waiting for SSH ...")
     if not _poll(lambda: _ssh_ok(admin_alias), timeout=300):
@@ -435,7 +436,7 @@ def _attached_workspaces(provider, name: str) -> list:
         return []
     admin_alias = _alias_names(name)[1]
     _write_alias_conf(f"{name}.admin.conf", admin_alias, name, ip,
-                      _admin_user(provider, name))
+                      _admin_user(provider, name), provider)
     r = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", admin_alias,
          f"cat {MARKERS_DIR}/* {LEGACY_MARKERS_DIR}/* 2>/dev/null"],
@@ -523,7 +524,7 @@ def cmd_box_ssh(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> N
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    _, admin_alias = _refresh_ssh_aliases(name, ip, _admin_user(provider, name))
+    _, admin_alias = _refresh_ssh_aliases(provider, name, ip, _admin_user(provider, name))
     os.execvp("ssh", ["ssh", admin_alias, *args.ssh_args])
 
 
@@ -534,7 +535,7 @@ def cmd_ssh(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceConf
         die(f"no address for '{name}' yet (still booting?).")
     # This workspace's unprivileged account - that's where its checkouts and
     # tooling live. The box's privileged shell is `devbox box ssh <box>`.
-    agent_alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), workspace)
+    agent_alias, _ = _refresh_ssh_aliases(provider, name, ip, _admin_user(provider, name), workspace)
     os.execvp("ssh", ["ssh", agent_alias, *args.ssh_args])
 
 
@@ -544,7 +545,7 @@ def _tail_provision_log(provider, name: str, log: str) -> None:
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    _, admin_alias = _refresh_ssh_aliases(name, ip, _admin_user(provider, name))
+    _, admin_alias = _refresh_ssh_aliases(provider, name, ip, _admin_user(provider, name))
     subprocess.run([
         "ssh", admin_alias,
         f"cloud-init status --long; echo ---; tail -n 80 ~/{log} 2>/dev/null",
@@ -568,7 +569,7 @@ def _report_failed_units(provider, name: str, workspace: WorkspaceConfig) -> Non
     ip = provider.address(name)
     if not ip:
         return
-    agent_alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name),
+    agent_alias, _ = _refresh_ssh_aliases(provider, name, ip, _admin_user(provider, name),
                                           workspace)
     print("--- failed user services")
     subprocess.run([
@@ -674,7 +675,8 @@ def _alias_names(box: str, workspace: Optional[WorkspaceConfig] = None) -> tuple
     return agent, admin
 
 
-def _write_alias_conf(filename: str, alias: str, box: str, ip: str, user: str) -> None:
+def _write_alias_conf(filename: str, alias: str, box: str, ip: str, user: str,
+                      provider) -> None:
     """One alias, alone in its own file under SSH_DIR.
 
     One stanza per file is what makes attaching safe: a single shared file per
@@ -686,26 +688,31 @@ def _write_alias_conf(filename: str, alias: str, box: str, ip: str, user: str) -
     if not known_hosts.is_file():
         known_hosts.write_text("")
         known_hosts.chmod(0o600)
+    # Behind a proxy `ip` is only informational (a cluster-internal pod IP that
+    # changes on every restart), so the host key is pinned to the box's name.
+    proxy = provider.ssh_proxy(box)
+    via = (f"    ProxyCommand {proxy}\n    HostKeyAlias {box}\n") if proxy else ""
     (SSH_DIR / filename).write_text(
         f"Host {alias}\n"
         f"    HostName {ip}\n"
         f"    User {user}\n"
         f"    UserKnownHostsFile {known_hosts}\n"
         f"    StrictHostKeyChecking accept-new\n"
+        + via
     )
 
 
-def _refresh_ssh_aliases(box: str, ip: str, admin_user: str,
+def _refresh_ssh_aliases(provider, box: str, ip: str, admin_user: str,
                          workspace: Optional[WorkspaceConfig] = None) -> tuple:
     """Write/refresh the SSH aliases for a box (host, user, dedicated
     known-hosts) and return them as (agent_alias, admin_alias); the agent one is
     None when no workspace was given. Provider-agnostic - `ip` is whatever the
     provider resolved (libvirt DHCP lease or EC2 public IP)."""
     agent_alias, admin_alias = _alias_names(box, workspace)
-    _write_alias_conf(f"{box}.admin.conf", admin_alias, box, ip, admin_user)
+    _write_alias_conf(f"{box}.admin.conf", admin_alias, box, ip, admin_user, provider)
     if workspace is not None:
         _write_alias_conf(f"{box}.{workspace.workspace}.conf", agent_alias, box, ip,
-                          workspace.agent_user)
+                          workspace.agent_user, provider)
 
     include_line = f"Include {SSH_DIR}/*.conf"
     if SSH_USER_CONFIG.is_file():
@@ -729,7 +736,7 @@ def cmd_host(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceCon
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
     agent_alias, admin_alias = _refresh_ssh_aliases(
-        name, ip, _admin_user(provider, name), workspace)
+        provider, name, ip, _admin_user(provider, name), workspace)
     # The agent alias is the one `jj fetch` uses and the one worth printing; the
     # admin alias is refreshed alongside it and named for completeness.
     print(agent_alias)
@@ -749,7 +756,7 @@ def cmd_herdr(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceCo
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    agent_alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), workspace)
+    agent_alias, _ = _refresh_ssh_aliases(provider, name, ip, _admin_user(provider, name), workspace)
     if not shutil.which("herdr"):
         die("herdr is not installed on this host (it drives the session from "
             "here, over SSH; the box needs nothing). Install it, or use "
@@ -825,7 +832,7 @@ def cmd_jj_fetch(args: argparse.Namespace, gc: GlobalConfig, workspace: Workspac
     # fetch` runs git-upload-pack as the login user - there is no sudo-ing through
     # that. An existing remote pointing at an older home is re-pointed by
     # _ensure_jj_remote, so old checkouts self-heal.
-    alias, _ = _refresh_ssh_aliases(name, ip, _admin_user(provider, name), workspace)
+    alias, _ = _refresh_ssh_aliases(provider, name, ip, _admin_user(provider, name), workspace)
     remote_url = f"ssh://{alias}/home/{workspace.agent_user}/{repo.dir}"
     _ensure_jj_remote(repo.host, alias, remote_url)
 
@@ -855,7 +862,7 @@ def cmd_sync(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceCon
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
     admin_user = _admin_user(provider, name)
-    agent_alias, admin_alias = _refresh_ssh_aliases(name, ip, admin_user, workspace)
+    agent_alias, admin_alias = _refresh_ssh_aliases(provider, name, ip, admin_user, workspace)
 
     # Order: env -> mods -> files. Mods may need a cred (e.g. repo-bootstrap's
     # private clone); file dsts (e.g. ~/<repo>/.claude/skills) need the repo clone.
@@ -885,7 +892,7 @@ def cmd_box_sync(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> 
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
     admin_user = _admin_user(provider, name)
-    _, admin_alias = _refresh_ssh_aliases(name, ip, admin_user)
+    _, admin_alias = _refresh_ssh_aliases(provider, name, ip, admin_user)
     print("==> waiting for SSH ...")
     if not _poll(lambda: _ssh_ok(admin_alias), timeout=300):
         die(f"timed out waiting for SSH to '{name}'; check `devbox box status {name}`")
@@ -979,7 +986,7 @@ def cmd_detach(args: argparse.Namespace, gc: GlobalConfig, workspace: WorkspaceC
     ip = provider.address(name)
     if not ip:
         die(f"no address for '{name}' yet (still booting?).")
-    _, admin_alias = _refresh_ssh_aliases(name, ip, _admin_user(provider, name))
+    _, admin_alias = _refresh_ssh_aliases(provider, name, ip, _admin_user(provider, name))
 
     if args.purge and not _confirm_destroy(
             f"{workspace.agent_user}@{name}", provider_name, args.yes):
@@ -1101,11 +1108,11 @@ def _add_box_create_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--user", default=None,
                         help=f"the box's privileged account "
                              f"(default: {DEFAULT_ADMIN_USER})")
-    parser.add_argument("--vcpus", type=int, default=None, help="libvirt: vCPUs")
+    parser.add_argument("--vcpus", type=int, default=None, help="vCPUs (libvirt, kubevirt)")
     parser.add_argument("--memory", type=int, default=None, metavar="MIB",
-                        help="libvirt: memory in MiB")
+                        help="memory in MiB (libvirt, kubevirt)")
     parser.add_argument("--disk", type=int, default=None, metavar="GB",
-                        help="disk size in GB (ignored on Lightsail, whose bundle fixes it)")
+                        help="disk size in GB (libvirt, ec2, kubevirt; ignored on Lightsail, whose bundle fixes it)")
     parser.add_argument("--instance-type", default=None, help="EC2: instance type")
     parser.add_argument("--arch", choices=("x86_64", "arm64"), default=None,
                         help="EC2: architecture (default: x86_64)")

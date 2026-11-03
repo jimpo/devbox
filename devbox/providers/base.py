@@ -92,3 +92,8 @@ class Provider(abc.ABC):
         """One instance by canonical name, or None. Filters `list()`; a backend
         with a cheaper single-instance lookup can override."""
         return next((i for i in self.list() if i.name == name), None)
+
+    def ssh_proxy(self, name: str) -> Optional[str]:
+        """An ssh_config `ProxyCommand` value that reaches the box, or None when
+        it is directly reachable at `address()`."""
+        return None
