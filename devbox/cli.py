@@ -333,7 +333,7 @@ def _wait_ready(provider, name: str, admin_user: str,
     print("==> waiting for base cloud-init (user + packages) to finish ...")
     # `cloud-init status --wait` blocks until done: exit 0 = done, 2 = done with
     # recoverable warnings (degraded); anything else is a real failure.
-    r = subprocess.run(["ssh", admin_alias, "cloud-init status --wait"])
+    r = subprocess.run(["ssh", admin_alias, "sudo -n cloud-init status --wait"])
     if r.returncode not in (0, 2):
         die(f"base cloud-init did not finish cleanly on '{name}' "
             f"(exit {r.returncode}); check `devbox box status {name}`")
@@ -549,7 +549,7 @@ def _tail_provision_log(provider, name: str, log: str) -> None:
     _, admin_alias = _refresh_ssh_aliases(provider, name, ip, _admin_user(provider, name))
     subprocess.run([
         "ssh", admin_alias,
-        f"cloud-init status --long; echo ---; tail -n 80 ~/{log} 2>/dev/null",
+        f"sudo -n cloud-init status --long; echo ---; tail -n 80 ~/{log} 2>/dev/null",
     ], check=False)
 
 
