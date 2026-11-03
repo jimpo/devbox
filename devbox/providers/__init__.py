@@ -6,6 +6,7 @@ from ..util import die
 from .awsauth import AwsAuthError, auth_error_message, is_auth_error
 from .base import Instance, InstanceSpec, Provider
 from .ec2 import Ec2Provider
+from .kubevirt import KubevirtProvider
 from .libvirt import LibvirtProvider
 from .lightsail import LightsailProvider
 
@@ -13,6 +14,7 @@ PROVIDER_REGISTRY = {
     "libvirt": LibvirtProvider,
     "ec2": Ec2Provider,
     "aws": LightsailProvider,
+    "kubevirt": KubevirtProvider,
 }
 
 # Providers backed by the shared `[aws]` account creds - none of them can be
@@ -28,6 +30,9 @@ def get_provider(name: str, gc: GlobalConfig) -> Provider:
     if name in AWS_PROVIDERS and gc.aws is None:
         die("[aws] is not configured in the global config (add region/profile "
             "to ~/.config/devbox/config.toml)")
+    if name == "kubevirt" and gc.kubevirt is None:
+        die("[kubevirt] is not configured in the global config (add it to "
+            "~/.config/devbox/config.toml)")
     return cls(gc)
 
 
@@ -39,12 +44,14 @@ def all_providers(gc: GlobalConfig) -> list:
     if gc.aws is not None:
         providers.append(Ec2Provider(gc))
         providers.append(LightsailProvider(gc))
+    if gc.kubevirt is not None:
+        providers.append(KubevirtProvider(gc))
     return providers
 
 
 __all__ = [
     "Provider", "Instance", "InstanceSpec",
-    "LibvirtProvider", "Ec2Provider", "LightsailProvider",
+    "LibvirtProvider", "Ec2Provider", "LightsailProvider", "KubevirtProvider",
     "AWS_PROVIDERS", "PROVIDER_REGISTRY", "get_provider", "all_providers",
     "AwsAuthError", "auth_error_message", "is_auth_error",
 ]

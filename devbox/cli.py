@@ -59,6 +59,7 @@ from .provision import (NIX_PAYLOAD_DIR, build_box_payload, build_payload,
 from .sync import run_envvars, run_sync
 from .providers import (AWS_PROVIDERS, AwsAuthError, InstanceSpec, all_providers,
                         auth_error_message, get_provider, is_auth_error)
+from .providers.kubevirt import KubectlError
 from .util import die
 
 
@@ -614,6 +615,8 @@ def _list_boxes(gc: GlobalConfig) -> tuple:
             continue
         try:
             listed.append((provider, provider.list()))
+        except KubectlError as err:  # the cluster is unreachable
+            unreachable.append((provider.name, str(err)))
         except Exception as err:  # noqa: BLE001 - re-raised unless it's an auth failure
             message = _auth_failure_message(gc, err)
             if message is None:
@@ -1252,7 +1255,7 @@ def _run(args: argparse.Namespace, gc: GlobalConfig, workspace: Optional[Workspa
     to resume, so we say what to run."""
     try:
         args.func(args, gc, workspace)
-    except AwsAuthError as err:
+    except (AwsAuthError, KubectlError) as err:
         die(str(err))
     except Exception as err:  # noqa: BLE001 - re-raised unless it's an auth failure
         if gc.aws is not None and is_auth_error(err):

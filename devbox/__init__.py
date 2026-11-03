@@ -19,7 +19,7 @@ from pathlib import Path  # noqa: F401
 # `devbox.providers.libvirt`, ... are reachable as attributes (some tests
 # monkeypatch module-local names there).
 from . import cli, config, initscript, provision, sync, util  # noqa: F401
-from .providers import awsauth, base, ec2, libvirt, lightsail  # noqa: F401
+from .providers import awsauth, base, ec2, kubevirt, libvirt, lightsail  # noqa: F401
 
 from .cli import main  # noqa: F401
 from .initscript import (INIT_SCRIPT_PATH, render_init_script,  # noqa: F401
@@ -59,7 +59,7 @@ from .config import (ANCHOR_HOME, ANCHOR_REPO, ANCHOR_WORKSPACE,  # noqa: F401
                      resolve_workspace)
 from .sync import RsyncJob, plan_sync, run_envvars, run_sync  # noqa: F401
 from .providers import (AwsAuthError, Ec2Provider, Instance, InstanceSpec,  # noqa: F401
-                        LibvirtProvider, LightsailProvider, Provider,
+                        KubevirtProvider, LibvirtProvider, LightsailProvider, Provider,
                         all_providers, auth_error_message, get_provider,
                         is_auth_error)
 from .providers.awsauth import (credential_problem, ensure_credentials,  # noqa: F401

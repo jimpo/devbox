@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import argparse
 import os
 import re
@@ -5043,3 +5044,240 @@ def test_kernel_mod_finishes_a_swap_after_the_kernel_is_already_gone(tmp_path):
 
 def test_kernel_mod_is_a_no_op_when_converged(tmp_path):
     assert _kernel_sh(tmp_path, "6.18.1-1.amzn2023.x86_64", "kernel6.18") == []
+
+
+# ---- kubevirt provider (kubectl monkeypatched, like virsh) --------------------
+class _FakeKubectl:
+    """Stands in for providers.kubevirt.kubectl: records (args, input) and answers
+    from `replies`, keyed by the verb + resource ("get vm", "get networkpolicy").
+    Unlisted calls succeed with empty output."""
+
+    def __init__(self, **replies):
+        self.calls = []
+        self.replies = replies
+
+    def __call__(self, cfg, *args, input=None, check=True, capture=False):
+        self.calls.append((args, input))
+        if "jsonpath={.metadata.uid}" in args:
+            return devbox.subprocess.CompletedProcess(args, 0, stdout="uid-1\n", stderr="")
+        reply = self.replies.get(" ".join(args[:2]), ("", 0))
+        out, rc = reply if isinstance(reply, tuple) else (reply, 0)
+        if check and rc != 0:
+            raise devbox.providers.kubevirt.KubectlError("kubectl: boom")
+        return devbox.subprocess.CompletedProcess(args, rc, stdout=out, stderr="")
+
+    def applied(self):
+        return [json.loads(i) for a, i in self.calls if a[0] == "apply"]
+
+
+def _kube_gc(**kw):
+    gc = _global_config(devbox.Path("/nonexistent"))
+    gc.kubevirt = devbox.KubevirtConfig(**kw)
+    return gc
+
+
+def _kube_spec(**kw):
+    fields = dict(name="kube-dev", admin_user="admin", provider="kubevirt", disk_gb=100,
+                  user_data="#!/bin/bash\necho hi\n", created_at="2026-11-03T00:00:00Z",
+                  vcpus=4, memory_mib=16384)
+    fields.update(kw)
+    return devbox.InstanceSpec(**fields)
+
+
+def _kube_create(monkeypatch, gc=None, **replies):
+    replies = {"get networkpolicy": ("networkpolicy.networking.k8s.io/egress\n", 0),
+               "get vm": ("", 1),
+               **replies}
+    fake = _FakeKubectl(**replies)
+    monkeypatch.setattr(devbox.providers.kubevirt, "kubectl", fake)
+    return fake, devbox.KubevirtProvider(gc or _kube_gc())
+
+
+def test_kubevirt_create_manifests(monkeypatch):
+    fake, provider = _kube_create(monkeypatch)
+    provider.create(_kube_spec())
+    secret, vm = fake.applied()
+    assert secret["metadata"]["name"] == "dev-userdata"
+    assert secret["stringData"]["userdata"] == "#!/bin/bash\necho hi\n"
+
+    assert vm["metadata"]["name"] == "dev"
+    assert vm["metadata"]["labels"] == {"devbox/managed": "true", "devbox/name": "kube-dev"}
+    assert vm["metadata"]["annotations"] == {"devbox/admin-user": "admin",
+                                             "devbox/created-at": "2026-11-03T00:00:00Z"}
+    assert vm["spec"]["runStrategy"] == "Always"
+    dv = vm["spec"]["dataVolumeTemplates"][0]["spec"]
+    assert dv["source"] == {"http": {"url": devbox.config.DEFAULT_KUBEVIRT_IMAGE_URL}}
+    assert "sourceRef" not in dv
+    assert dv["storage"] == {"resources": {"requests": {"storage": "100Gi"}}}
+    tpl = vm["spec"]["template"]["spec"]
+    assert tpl["domain"]["cpu"] == {"cores": 4}
+    assert tpl["domain"]["memory"] == {"guest": "16384Mi"}
+    assert "resources" not in tpl["domain"]
+    assert tpl["domain"]["devices"]["interfaces"] == [{"name": "default", "masquerade": {}}]
+    assert tpl["networks"] == [{"name": "default", "pod": {}}]
+    assert tpl["dnsPolicy"] == "None"
+    assert tpl["dnsConfig"] == {"nameservers": ["1.1.1.1", "1.0.0.1"]}
+    assert {"name": "cloudinit", "cloudInitNoCloud": {
+        "secretRef": {"name": "dev-userdata"}}} in tpl["volumes"]
+
+    # Secret first, then VM, then the ownerReference patch with the VM's uid.
+    verbs = [a[0] for a, _ in fake.calls if a[0] in ("apply", "patch")]
+    assert verbs == ["apply", "apply", "patch"]
+    patch = next(a for a, _ in fake.calls if a[0] == "patch")
+    owner = json.loads(patch[-1])["metadata"]["ownerReferences"][0]
+    assert owner == {"apiVersion": "kubevirt.io/v1", "kind": "VirtualMachine",
+                     "name": "dev", "uid": "uid-1"}
+
+
+def test_kubevirt_storage_class_only_when_configured():
+    gc = _kube_gc(storage_class="fast", nameservers=["9.9.9.9"], image_url="https://example.com/f46.qcow2")
+    vm = devbox.providers.kubevirt.build_vm(gc.kubevirt, _kube_spec())
+    dv = vm["spec"]["dataVolumeTemplates"][0]["spec"]
+    assert dv["storage"]["storageClassName"] == "fast"
+    assert dv["source"]["http"]["url"] == "https://example.com/f46.qcow2"
+    assert vm["spec"]["template"]["spec"]["dnsConfig"]["nameservers"] == ["9.9.9.9"]
+
+
+def test_kubevirt_create_needs_the_egress_policy(monkeypatch):
+    fake, provider = _kube_create(monkeypatch, **{"get networkpolicy": ("", 0)})
+    with pytest.raises(SystemExit):
+        provider.create(_kube_spec())
+    assert fake.applied() == []
+
+
+def test_kubevirt_create_refuses_a_vm_it_does_not_manage(monkeypatch):
+    vm = json.dumps({"metadata": {"name": "dev", "labels": {}}})
+    fake, provider = _kube_create(monkeypatch, **{"get vm": (vm, 0)})
+    with pytest.raises(SystemExit):
+        provider.create(_kube_spec())
+    assert fake.applied() == []
+
+
+def test_kubevirt_create_refuses_an_existing_box(monkeypatch):
+    vm = json.dumps({"metadata": {"name": "dev", "labels": {"devbox/name": "kube-dev"}}})
+    fake, provider = _kube_create(monkeypatch, **{"get vm": (vm, 0)})
+    with pytest.raises(SystemExit):
+        provider.create(_kube_spec())
+    assert fake.applied() == []
+
+
+def _kube_vm(name="kube-dev", status="Running", cores=4, guest="16384Mi"):
+    return {"metadata": {"name": name.removeprefix("kube-"),
+                         "labels": {"devbox/managed": "true", "devbox/name": name},
+                         "annotations": {"devbox/admin-user": "admin",
+                                         "devbox/created-at": "2026-11-03T00:00:00Z"}},
+            "spec": {"template": {"spec": {"domain": {
+                "cpu": {"cores": cores}, "memory": {"guest": guest}}}}},
+            "status": {"printableStatus": status}}
+
+
+def test_kubevirt_lookup_goes_through_the_name_label(monkeypatch):
+    items = json.dumps({"items": [_kube_vm()]})
+    fake = _FakeKubectl(**{"get vm": items})
+    monkeypatch.setattr(devbox.providers.kubevirt, "kubectl", fake)
+    provider = devbox.KubevirtProvider(_kube_gc())
+    assert provider.state("kube-dev") == "running"
+    assert fake.calls[0][0][:4] == ("get", "vm", "-l", "devbox/name=kube-dev")
+    provider.stop("kube-dev")
+    provider.start("kube-dev")
+    patches = [a for a, _ in fake.calls if a[0] == "patch"]
+    assert [a[2] for a in patches] == ["dev", "dev"]
+    assert [json.loads(a[-1])["spec"]["runStrategy"] for a in patches] == ["Halted", "Always"]
+    provider.destroy("kube-dev")
+    assert [a for a, _ in fake.calls[-2:]] == [
+        ("delete", "vm", "dev", "--cascade=foreground", "--wait"),
+        ("delete", "secret", "dev-userdata", "--ignore-not-found", "--wait")]
+
+
+def test_kubevirt_destroy_says_when_there_is_nothing_to_delete(monkeypatch, capsys):
+    fake = _FakeKubectl(**{"get vm": json.dumps({"items": []})})
+    monkeypatch.setattr(devbox.providers.kubevirt, "kubectl", fake)
+    devbox.KubevirtProvider(_kube_gc()).destroy("kube-dev")
+    assert "not found" in capsys.readouterr().out
+    assert [a[0] for a, _ in fake.calls] == ["get"]
+
+
+def test_kubevirt_state_is_none_without_a_vm(monkeypatch):
+    monkeypatch.setattr(devbox.providers.kubevirt, "kubectl",
+                        _FakeKubectl(**{"get vm": json.dumps({"items": []})}))
+    provider = devbox.KubevirtProvider(_kube_gc())
+    assert provider.state("kube-dev") is None
+    assert provider.address("kube-dev") is None
+
+
+def test_kubevirt_address_is_the_vmi_pod_ip(monkeypatch):
+    fake = _FakeKubectl(**{
+        "get vm": json.dumps({"items": [_kube_vm()]}),
+        "get vmi": json.dumps({"status": {"interfaces": [{"ipAddress": "10.42.0.7"}]}})})
+    monkeypatch.setattr(devbox.providers.kubevirt, "kubectl", fake)
+    assert devbox.KubevirtProvider(_kube_gc()).address("kube-dev") == "10.42.0.7"
+    assert fake.calls[-1][0][:3] == ("get", "vmi", "dev")
+
+
+def test_kubevirt_list_rows(monkeypatch):
+    out = json.dumps({"items": [_kube_vm(), {"metadata": {"name": "x", "labels": {}}}]})
+    monkeypatch.setattr(devbox.providers.kubevirt, "kubectl",
+                        _FakeKubectl(**{"get vm": out}))
+    [row] = devbox.KubevirtProvider(_kube_gc()).list()
+    assert (row.name, row.provider, row.state, row.resources, row.admin_user) == (
+        "kube-dev", "kubevirt", "running", "4 vCPU / 16 GiB", "admin")
+
+
+def test_kubevirt_ssh_proxy_quotes_and_expands_the_kubeconfig(monkeypatch):
+    monkeypatch.setenv("HOME", "/home/a b")
+    provider = devbox.KubevirtProvider(_kube_gc(
+        kubeconfig="~/.kube/devbox.yaml", context="devbox@homelab"))
+    assert provider.ssh_proxy("kube-dev") == (
+        "virtctl --kubeconfig '/home/a b/.kube/devbox.yaml' --context devbox@homelab "
+        "port-forward --stdio=true vm/dev/workspaces 22")
+    assert devbox.KubevirtProvider(_kube_gc()).ssh_proxy("kube-dev") == (
+        "virtctl port-forward --stdio=true vm/dev/workspaces 22")
+
+
+def test_kubectl_failure_carries_kubectls_stderr(monkeypatch):
+    monkeypatch.setattr(devbox.subprocess, "run", lambda cmd, **kw:
+                        devbox.subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no route\n"))
+    with pytest.raises(devbox.providers.kubevirt.KubectlError, match="^kubectl: no route$"):
+        devbox.providers.kubevirt.kubectl(devbox.KubevirtConfig(), "get", "vm", capture=True)
+    r = devbox.providers.kubevirt.kubectl(devbox.KubevirtConfig(), "get", "vm", check=False)
+    assert r.returncode == 1
+
+
+def test_kubevirt_ssh_proxy_escapes_percent_for_ssh():
+    provider = devbox.KubevirtProvider(_kube_gc(kubeconfig="/k%h.yaml", context="c%p"))
+    assert provider.ssh_proxy("kube-dev") == (
+        "virtctl --kubeconfig /k%%h.yaml --context c%%p "
+        "port-forward --stdio=true vm/dev/workspaces 22")
+
+
+def test_list_boxes_warns_when_the_cluster_is_unreachable(monkeypatch, capsys):
+    local = _StubListProvider("libvirt", boxes=[_instance("dev")])
+    kube = _StubListProvider("kubevirt", error=devbox.providers.kubevirt.KubectlError(
+        "kubectl: connection refused"))
+    monkeypatch.setattr(devbox.cli, "all_providers", lambda gc: [local, kube])
+    devbox.cli.cmd_box_list(_list_args(), _ec2_gc())
+    out = capsys.readouterr().out
+    assert "warning: could not list kubevirt boxes: kubectl: connection refused" in out
+    assert "dev" in out and "libvirt" in out
+
+
+def test_kubectl_base_args_omit_unset_kubeconfig_and_context(monkeypatch):
+    seen = []
+    monkeypatch.setattr(devbox.subprocess, "run", lambda cmd, **kw: seen.append(cmd)
+                        or devbox.subprocess.CompletedProcess(cmd, 0, stderr=""))
+    devbox.providers.kubevirt.kubectl(devbox.KubevirtConfig(), "get", "vm")
+    devbox.providers.kubevirt.kubectl(devbox.KubevirtConfig(
+        kubeconfig="/k.yaml", context="c", namespace="ns"), "get", "vm")
+    assert seen == [["kubectl", "-n", "workspaces", "get", "vm"],
+                    ["kubectl", "--kubeconfig", "/k.yaml", "--context", "c", "-n", "ns",
+                     "get", "vm"]]
+
+
+def test_get_provider_kubevirt_needs_its_section(monkeypatch):
+    gc = _global_config(devbox.Path("/nonexistent"))
+    with pytest.raises(SystemExit):
+        devbox.get_provider("kubevirt", gc)
+    assert [p.name for p in devbox.all_providers(gc)] == ["libvirt"]
+    gc.kubevirt = devbox.KubevirtConfig()
+    assert devbox.get_provider("kubevirt", gc).name == "kubevirt"
+    assert [p.name for p in devbox.all_providers(gc)] == ["libvirt", "kubevirt"]
