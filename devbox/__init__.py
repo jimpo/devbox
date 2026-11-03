@@ -51,7 +51,7 @@ from .config import (ANCHOR_HOME, ANCHOR_REPO, ANCHOR_WORKSPACE,  # noqa: F401
                      REPO_MARKER_DIR, REPO_MODES, RESERVED_USERNAMES,
                      USERNAME_RE, WORKSPACE_MARKER_FILE,
                      Ec2BoxConfig, Ec2Config, EnvVar, GlobalConfig,
-                     LightsailBoxConfig, Marker, PREFIXED_PROVIDERS, PROVIDERS,
+                     LightsailBoxConfig, KubevirtConfig, Marker, PREFIX_PROVIDERS, PROVIDERS,
                      RepoSpec, SyncEntry, WorkspaceConfig,
                      compose_instance_name, find_workspace, find_workspace_opt,
                      known_hosts_path,

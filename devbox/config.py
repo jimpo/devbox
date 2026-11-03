@@ -69,14 +69,16 @@ ANCHOR_REPO = "repo"
 
 # Providers a box can be launched on. Validated against the `--provider` flag.
 DEFAULT_PROVIDER = "libvirt"
-PROVIDERS = ("libvirt", "ec2", "aws")
+PROVIDERS = ("libvirt", "ec2", "aws", "kubevirt")
 
 # Providers whose instances carry a "<provider>-" prefix in their canonical
 # name. libvirt (the default) stays bare - local is the common case, and
 # "bare = the libvirt default" is worth keeping. The prefix lets every
 # per-instance command derive the provider from the name alone (offline string
 # routing), instead of an API call per `ssh`/`ip`/... to find the owner.
-PREFIXED_PROVIDERS = tuple(p for p in PROVIDERS if p != DEFAULT_PROVIDER)
+# The prefix is not always the provider's name (kubevirt boxes are `kube-NAME`).
+PROVIDER_PREFIXES = {"ec2": "ec2", "aws": "aws", "kubevirt": "kube"}
+PREFIX_PROVIDERS = {v: k for k, v in PROVIDER_PREFIXES.items()}
 
 # A box has a privileged account (`admin_user`, the SSH target devbox
 # provisions through, sudo-enabled; a box property, set at `devbox box create`)
@@ -158,6 +160,19 @@ DEFAULT_AMI_NAME_FILTER = {
     "arm64": "al2023-ami-2023.*-kernel-*-arm64",
 }
 
+# KubeVirt (the `kubevirt` provider) defaults.
+DEFAULT_KUBEVIRT_NAMESPACE = "workspaces"
+# Each box downloads this itself; nothing verifies it.
+DEFAULT_KUBEVIRT_IMAGE_URL = (
+    "https://dl.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/x86_64/images/"
+    "Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2")
+# Public DNS: the admin's NetworkPolicy blocks the cluster's own resolver.
+DEFAULT_KUBEVIRT_NAMESERVERS = ("1.1.1.1", "1.0.0.1")
+# An RFC 1123 label: the Kubernetes VM name, and the base of the `-userdata` Secret.
+KUBE_NAME_RE = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
+# The `devbox/name` label value is `kube-<bare>`, and label values stop at 63.
+KUBE_NAME_MAX = 58
+
 # Lightsail (the `aws` provider) defaults. Lightsail sells fixed bundles rather
 # than an instance type + EBS size, so the bundle picks CPU/RAM/disk together:
 # the default is the 16 GB / 4 vCPU / 320 GB tier (~$84/mo). Lightsail's Linux
@@ -220,6 +235,19 @@ class AwsConfig:
 
 
 @dataclasses.dataclass
+class KubevirtConfig:
+    """Global `[kubevirt]` section - enables the kubevirt provider. `kubeconfig`
+    and `context` may be omitted, so kubectl uses its defaults."""
+    kubeconfig: Optional[str] = None
+    context: Optional[str] = None
+    namespace: str = DEFAULT_KUBEVIRT_NAMESPACE
+    image_url: str = DEFAULT_KUBEVIRT_IMAGE_URL       # CDI imports it per box
+    storage_class: Optional[str] = None               # None: the cluster default
+    nameservers: list = dataclasses.field(
+        default_factory=lambda: list(DEFAULT_KUBEVIRT_NAMESERVERS))
+
+
+@dataclasses.dataclass
 class Ec2Config:
     """Global `[ec2]` section - EC2-specific launch defaults (the account creds
     live in `[aws]`). Absent section => empty lists / spot off."""
@@ -246,6 +274,7 @@ class GlobalConfig:
     env: dict = dataclasses.field(default_factory=dict)
     aws: Optional[AwsConfig] = None      # shared AWS account creds
     ec2: Optional[Ec2Config] = None      # EC2-specific globals
+    kubevirt: Optional[KubevirtConfig] = None
     # [[sync]]: default host->box file-sync rules (see sync.py), applied ahead of
     # every workspace's own [[sync]] - the $HOME/~/absolute-anchored shape only,
     # since there is no repo to anchor [[repo.sync]] against at this scope.
@@ -268,6 +297,8 @@ class GlobalConfig:
                 "jj": {"name", "email"},
                 "env": _ANY_KEYS,  # arbitrary user-defined credentials/vars
                 "aws": {"region", "profile"},
+                "kubevirt": {"kubeconfig", "context", "namespace", "image_url",
+                             "storage_class", "nameservers"},
                 "ec2": {"default_security_groups", "default_subnets", "spot"},
                 "sync": _ANY_KEYS,  # array-of-tables, validated by _parse_sync_entry
             },
@@ -296,6 +327,7 @@ class GlobalConfig:
             jj_email=jj.get("email"),
             aws=_load_aws_config(data.get("aws"), path),
             ec2=_load_ec2_config(data.get("ec2"), path),
+            kubevirt=_load_kubevirt_config(data.get("kubevirt"), path),
             sync=_resolve_global_sync(data, path),
             base_image_gpg_key=Path(
                 base_image.get("gpg_key", DEFAULT_BASE_IMAGE_GPG_KEY)).expanduser(),
@@ -384,6 +416,24 @@ def _load_aws_config(aws_data: Optional[dict], path: Path) -> Optional[AwsConfig
     if not region:
         die(f"{path}: [aws] requires 'region'")
     return AwsConfig(region=region, profile=aws_data.get("profile"))
+
+
+def _load_kubevirt_config(data: Optional[dict], path: Path) -> Optional[KubevirtConfig]:
+    if data is None:
+        return None
+    ns = data.get("nameservers")
+    if ns is not None and not (isinstance(ns, list) and all(isinstance(n, str) for n in ns)):
+        die(f"{path}: [kubevirt] nameservers must be a list of addresses")
+    if ns == []:
+        die(f"{path}: [kubevirt] nameservers must not be empty (dnsPolicy None needs one)")
+    return KubevirtConfig(
+        kubeconfig=data.get("kubeconfig"),
+        context=data.get("context"),
+        namespace=data.get("namespace", DEFAULT_KUBEVIRT_NAMESPACE),
+        image_url=data.get("image_url", DEFAULT_KUBEVIRT_IMAGE_URL),
+        storage_class=data.get("storage_class"),
+        **({"nameservers": ns} if ns is not None else {}),
+    )
 
 
 def _load_ec2_config(ec2_data: Optional[dict], path: Path) -> Optional[Ec2Config]:
@@ -844,9 +894,9 @@ def _validate_instance_name(name: str, origin: str) -> None:
     provider's, and a name that already carries its own provider prefix would
     have it doubled."""
     head, sep, _ = name.partition("-")
-    if sep and head in PREFIXED_PROVIDERS:
+    if sep and head in PREFIX_PROVIDERS:
         return  # already canonical for that provider
-    if name in PREFIXED_PROVIDERS or any(c.isspace() for c in name) or "/" in name:
+    if name in PREFIX_PROVIDERS or any(c.isspace() for c in name) or "/" in name:
         die(f"{origin}: {name!r} is not a usable box name")
 
 
@@ -892,15 +942,15 @@ def parse_instance_name(name: str) -> tuple:
     (ssh/ip/status/...) pick the right backend offline. Inverse of
     compose_instance_name."""
     head, sep, rest = name.partition("-")
-    if sep and head in PREFIXED_PROVIDERS:
-        return head, rest
+    if sep and head in PREFIX_PROVIDERS:
+        return PREFIX_PROVIDERS[head], rest
     return DEFAULT_PROVIDER, name
 
 
 def compose_instance_name(provider: str, name: str) -> str:
     """The canonical instance name to store at create: bare for libvirt, else
     "<provider>-<name>". Inverse of parse_instance_name."""
-    return name if provider == DEFAULT_PROVIDER else f"{provider}-{name}"
+    return name if provider == DEFAULT_PROVIDER else f"{PROVIDER_PREFIXES[provider]}-{name}"
 
 
 def resolve_instance(args, workspace: WorkspaceConfig) -> str:
@@ -924,8 +974,14 @@ def resolve_box_spec(args, gc: GlobalConfig, bare_name: str) -> BoxSpec:
     _validate_instance_name(bare_name, "box name")
     if parse_instance_name(bare_name)[0] != DEFAULT_PROVIDER:
         die(f"box name '{bare_name}' must not start with a provider prefix "
-            f"('{provider}-' is added automatically); "
+            f"('{PROVIDER_PREFIXES.get(provider, provider)}-' is added automatically); "
             f"pass the name as '{parse_instance_name(bare_name)[1]}'")
+
+    if provider == "kubevirt" and not (
+            KUBE_NAME_RE.fullmatch(bare_name) and len(bare_name) <= KUBE_NAME_MAX):
+        die(f"kubevirt box name {bare_name!r} must be a Kubernetes label: lowercase "
+            f"letters, digits and '-', starting and ending alphanumeric, "
+            f"{KUBE_NAME_MAX} characters at most")
 
     admin_user = args.user or DEFAULT_ADMIN_USER
     if not USERNAME_RE.match(admin_user):

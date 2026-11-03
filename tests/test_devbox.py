@@ -2661,6 +2661,13 @@ def test_parse_instance_name_aws_prefixed():
     assert devbox.parse_instance_name("aws-binius-arm") == ("aws", "binius-arm")
 
 
+def test_kube_prefix_routes_to_kubevirt():
+    # The prefix (`kube`) differs from the provider's name.
+    assert devbox.parse_instance_name("kube-dev") == ("kubevirt", "dev")
+    assert devbox.compose_instance_name("kubevirt", "dev") == "kube-dev"
+    assert devbox.parse_instance_name("kubevirt-dev") == ("libvirt", "kubevirt-dev")
+
+
 def test_parse_instance_name_unknown_prefix_is_libvirt():
     # A hyphen whose left segment isn't a known prefixed provider is just part of
     # a bare libvirt name (e.g. 'gcp-x' before gcp is a real provider).
@@ -2891,6 +2898,17 @@ def test_cmd_create_boots_a_named_box_when_given_box_flags(monkeypatch, pubkey):
         devbox.cli.cmd_create(_create_args(vcpus=8), gc, _workspace(box="shared"))
     assert provider.seen["spec"].name == "shared"
     assert provider.seen["spec"].vcpus == 8
+
+
+def test_cmd_create_takes_the_provider_from_the_box_name(monkeypatch, pubkey):
+    # `box = "kube-dev"` plus box flags must not fall back to libvirt.
+    provider = _FakeCreateProvider()
+    gc = _patch_create(monkeypatch, provider, pubkey)
+    monkeypatch.setattr(devbox.cli, "_resolve_target",
+                        lambda args, ws, gc: ("kube-dev", "kubevirt", provider))
+    with pytest.raises(_CreateStop):
+        devbox.cli.cmd_create(_create_args(vcpus=8), gc, _workspace(box="kube-dev"))
+    assert (provider.seen["spec"].name, provider.seen["spec"].provider) == ("kube-dev", "kubevirt")
 
 
 def test_cmd_create_refuses_an_agent_user_that_is_the_boxs_admin(monkeypatch, pubkey):
@@ -3745,6 +3763,48 @@ def test_global_config_aws_requires_region(tmp_path):
     path.write_text('[aws]\nprofile = "dev"\n')
     with pytest.raises(SystemExit):
         devbox.GlobalConfig.load(path)
+
+
+def test_global_config_kubevirt_defaults_and_overrides(tmp_path):
+    assert devbox.GlobalConfig.load(tmp_path / "missing.toml").kubevirt is None
+    path = tmp_path / "config.toml"
+    path.write_text("[kubevirt]\n")
+    k = devbox.GlobalConfig.load(path).kubevirt
+    assert (k.kubeconfig, k.context, k.storage_class) == (None, None, None)
+    assert (k.namespace, k.image_url) == ("workspaces", devbox.config.DEFAULT_KUBEVIRT_IMAGE_URL)
+    assert k.nameservers == ["1.1.1.1", "1.0.0.1"]
+    path.write_text('[kubevirt]\nkubeconfig = "~/k.yaml"\ncontext = "c"\n'
+                    'namespace = "ws"\nimage_url = "https://example.com/f46.qcow2"\n'
+                    'storage_class = "fast"\nnameservers = ["9.9.9.9"]\n')
+    k = devbox.GlobalConfig.load(path).kubevirt
+    assert (k.kubeconfig, k.context, k.namespace, k.image_url, k.storage_class,
+            k.nameservers) == ("~/k.yaml", "c", "ws", "https://example.com/f46.qcow2", "fast", ["9.9.9.9"])
+
+
+def test_global_config_rejects_empty_kubevirt_nameservers(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text("[kubevirt]\nnameservers = []\n")
+    with pytest.raises(SystemExit):
+        devbox.GlobalConfig.load(cfg)
+
+
+def test_resolve_box_spec_composes_the_kube_name(global_config):
+    box = devbox.resolve_box_spec(_box_args("dev", provider="kubevirt"), global_config, "dev")
+    assert (box.name, box.provider) == ("kube-dev", "kubevirt")
+
+
+@pytest.mark.parametrize("bad", ["Dev", "dev_1", "-dev", "dev-", "a.b", "x" * 59])
+def test_resolve_box_spec_rejects_non_label_kubevirt_names(global_config, bad):
+    with pytest.raises(SystemExit):
+        devbox.resolve_box_spec(_box_args(bad, provider="kubevirt"), global_config, bad)
+
+
+def test_kube_name_rules_apply_only_to_kubevirt(global_config):
+    box = devbox.resolve_box_spec(_box_args("Dev_1"), global_config, "Dev_1")
+    assert box.name == "Dev_1"
+    ok = "x" * 58
+    assert devbox.resolve_box_spec(
+        _box_args(ok, provider="kubevirt"), global_config, ok).name == f"kube-{ok}"
 
 
 # ---- resolve_box_spec (a box's shape, from flags) ----------------------------

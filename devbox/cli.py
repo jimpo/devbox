@@ -232,6 +232,8 @@ def _ensure_box(args: argparse.Namespace, gc: GlobalConfig, workspace: Workspace
         die(f"box '{name}' does not exist. Create it first:\n"
             f"  devbox box create {parse_instance_name(name)[1]}"
             f"{'' if provider_name == DEFAULT_PROVIDER else f' --provider {provider_name}'}")
+    # The name already says where the box lives (`kube-dev` is kubevirt).
+    args.provider = args.provider or provider_name
     box = resolve_box_spec(args, gc, parse_instance_name(name)[1])
     _boot_box(box, gc, provider)
     return name, provider, provider.state(name)
