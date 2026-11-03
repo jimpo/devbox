@@ -97,8 +97,9 @@ DEFAULT_ADMIN_USER = "admin"
 # Usernames the agent account must never take: standard Linux system
 # accounts, the default login user of the cloud images the providers boot
 # (`fedora` on Fedora Cloud, `ec2-user` on Amazon Linux, `ubuntu` on the
-# Ubuntu images older boxes were made from), and DEFAULT_ADMIN_USER, which the box's own privileged account
-# holds. Taking one of these would either collide with an existing
+# Ubuntu images older boxes were made from), and DEFAULT_ADMIN_USER, which the
+# box's own privileged account holds. Taking one of these would either collide
+# with an existing
 # sudo-capable account or fight the distro over a system uid.
 RESERVED_USERNAMES = frozenset({
     "root", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail",
@@ -164,9 +165,10 @@ DEFAULT_AMI_NAME_FILTER = {
 # architecture knob; `devbox box create` can pin a different `bundle` (or a
 # different `blueprint`).
 DEFAULT_LIGHTSAIL_BUNDLE = "xlarge_3_0"        # 16 GB / 4 vCPU / 320 GB
-# The newest Ubuntu LTS blueprint Lightsail offers - older than the 26.04
-# userland the libvirt/ec2 providers boot, which pull Ubuntu cloud images.
-DEFAULT_LIGHTSAIL_BLUEPRINT = "ubuntu_24_04"
+# Amazon Linux 2023, the same distro the ec2 provider boots. TODO: the id is
+# unconfirmed - check `aws lightsail get-blueprints` (no aws CLI where this was
+# written).
+DEFAULT_LIGHTSAIL_BLUEPRINT = "amazon_linux_2023"
 
 
 # Sentinel for a known section whose inner keys are user-defined (`[env]`) or

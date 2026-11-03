@@ -4072,7 +4072,7 @@ def _ls_instance(canonical="aws-foo", bare="foo", state="running",
     if managed is not None:
         tags.append({"key": "devbox:managed", "value": managed})
     inst = {"name": bare, "state": {"code": 16, "name": state},
-            "bundleId": bundle, "blueprintId": "ubuntu_24_04", "tags": tags}
+            "bundleId": bundle, "blueprintId": "amazon_linux_2023", "tags": tags}
     if public_ip:
         inst["publicIpAddress"] = public_ip
     return inst
@@ -4112,7 +4112,7 @@ def test_lightsail_create_default_request_shape():
     params = _create_params(client)
     assert params["instanceNames"] == ["foo-gpu"]        # bare, prefix dropped
     assert params["bundleId"] == "xlarge_3_0"            # 16 GB / 4 vCPU / 320 GB
-    assert params["blueprintId"] == "ubuntu_24_04"
+    assert params["blueprintId"] == "amazon_linux_2023"
     assert params["availabilityZone"] == "us-west-2a"    # <region> + "a"
     assert params["ipAddressType"] == "ipv4"
     # Lightsail takes userData as plain text (EC2 base64s, Lightsail does not).
@@ -4144,7 +4144,7 @@ def test_lightsail_create_without_lightsail_section_uses_defaults():
     devbox.LightsailProvider(_aws_gc(), client=client).create(_ls_spec(lightsail=None))
     params = _create_params(client)
     assert params["bundleId"] == "xlarge_3_0"
-    assert params["blueprintId"] == "ubuntu_24_04"
+    assert params["blueprintId"] == "amazon_linux_2023"
     assert params["availabilityZone"] == "us-west-2a"
 
 

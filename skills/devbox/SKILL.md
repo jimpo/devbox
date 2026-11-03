@@ -91,7 +91,7 @@ the machine. Anything not passed falls back to the global `[defaults]`.
 ```bash
 devbox box create dev --vcpus 8 --memory 32768 --disk 200
 devbox box create dev --provider ec2 --instance-type m9g.xlarge --arch arm64 [--ami ... --spot]
-devbox box create dev --provider aws --bundle xlarge_3_0 [--blueprint ubuntu_24_04 --zone us-east-1b]
+devbox box create dev --provider aws --bundle xlarge_3_0 [--blueprint amazon_linux_2023 --zone us-east-1b]
 ```
 
 - **Lightsail (`--provider aws`) specifics:** a bundle fixes CPU/RAM/disk

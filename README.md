@@ -280,7 +280,7 @@ Hardware is a `devbox box create` flag, never workspace config; devbox errors on
 ```bash
 devbox box create dev --vcpus 8 --memory 32768 --disk 200
 devbox box create dev --provider ec2 --instance-type g5.xlarge --arch x86_64 [--ami ami-... --spot]
-devbox box create dev --provider aws --bundle xlarge_3_0 [--blueprint ubuntu_24_04 --zone us-east-1b]
+devbox box create dev --provider aws --bundle xlarge_3_0 [--blueprint amazon_linux_2023 --zone us-east-1b]
 ```
 
 Cloud box names get a provider prefix — `box create dev --provider ec2` makes
@@ -291,7 +291,7 @@ providers.
 another (the root volume is sized on that image's own root device).
 
 **Lightsail (`--provider aws`)**: a bundle fixes CPU/RAM/disk (`--disk` is
-ignored; default `xlarge_3_0`, 4 vCPU / 16 GB / 320 GB); x86 only; Ubuntu 24.04
+ignored; default `xlarge_3_0`, 4 vCPU / 16 GB / 320 GB); x86 only; Amazon Linux 2023
 blueprint by default; dynamic public IP, re-resolved every command; port 22 open
 by default; no spot.
 
