@@ -13,12 +13,16 @@ cross-platform development and benchmarking on cloud VMs.
 
 ## Requirements
 
-- **libvirt** provider: Debian/Ubuntu with libvirt + qemu, run as a member of
-  the `libvirt` group:
+- **libvirt** provider: libvirt + qemu (the base image is Fedora 44 Cloud), run
+  as a member of the `libvirt` group:
   ```
-  sudo apt install virtinst libvirt-daemon-system qemu-system-x86 ubuntu-cloudimage-keyring
+  sudo dnf install virt-install libvirt-daemon-kvm qemu-kvm gnupg2
   ```
-  The keyring is what devbox verifies the base image's `SHA256SUMS` against.
+  devbox verifies the base image's clearsigned `CHECKSUM` file with `gpgv`
+  against the Fedora release key (`[base_image] gpg_key`, default
+  `/etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-primary` from `fedora-gpg-keys`; on a
+  non-Fedora host, save Fedora's key from <https://fedoraproject.org/fedora.gpg>
+  and point `gpg_key` at it).
 - **ec2** / **aws** providers (optional): AWS credentials (e.g. a named profile)
   with EC2 / Lightsail permissions, and an `[aws]` section in the global config.
 - [`uv`](https://docs.astral.sh/uv/).
@@ -213,7 +217,8 @@ network = "default"
 cache_dir = "/var/tmp/devbox"   # base image cache; not $HOME (qemu must read it)
 
 [base_image]
-url = "https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img"
+url = "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+gpg_key = "/etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-primary"   # verifies its CHECKSUM
 
 [defaults]                      # box create fallbacks
 vcpus = 6

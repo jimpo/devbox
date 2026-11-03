@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -19,13 +20,6 @@ from typing import Optional
 from ..config import GlobalConfig
 from ..util import die
 from .base import Instance, InstanceSpec, Provider
-
-# Canonical's cloud-image signing key, installed by the `ubuntu-cloudimage-keyring`
-# apt package. Used to verify the SHA256SUMS file fetched alongside the base
-# image, instead of pinning a checksum in devbox itself: the `release` build at
-# a given URL is mutable (Canonical overwrites it in place on respins), so a
-# hand-pinned hash inevitably goes stale.
-CLOUDIMAGE_KEYRING_PATH = Path("/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg")
 
 # libvirt domain <metadata> stamp: how `devbox list` tells its own domains apart
 # from every other domain on the host (the equivalent of cfleet's EC2 tags).
@@ -138,39 +132,54 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def fetch_verified_checksum(image_url: str) -> str:
-    """Fetch SHA256SUMS + SHA256SUMS.gpg from alongside `image_url`, verify the
-    signature against Canonical's cloud-image signing key, and return the
-    checksum for the image's filename."""
-    if not shutil.which("gpgv"):
-        die("'gpgv' not found. Install: sudo apt install gnupg")
-    if not CLOUDIMAGE_KEYRING_PATH.is_file():
-        die(f"{CLOUDIMAGE_KEYRING_PATH} not found. Install: sudo apt install ubuntu-cloudimage-keyring")
+def checksum_filename(image_filename: str) -> str:
+    """The clearsigned CHECKSUM file Fedora publishes beside a release image:
+    Fedora-Cloud-Base-<Variant>-<ver>-<build>.<arch>.qcow2 ->
+    Fedora-Cloud-<ver>-<build>-<arch>-CHECKSUM."""
+    m = re.fullmatch(r"Fedora-Cloud-Base-.+-(\d+)-([\d.]+)\.(\w+)\.qcow2", image_filename)
+    if not m:
+        die(f"cannot derive the CHECKSUM file name from '{image_filename}' (expected "
+            f"Fedora-Cloud-Base-<Variant>-<ver>-<build>.<arch>.qcow2)")
+    return f"Fedora-Cloud-{m[1]}-{m[2]}-{m[3]}-CHECKSUM"
+
+
+def fetch_verified_checksum(image_url: str, gpg_key: Path) -> str:
+    """Fetch the clearsigned CHECKSUM file from alongside `image_url`, verify it
+    against the Fedora release key `gpg_key` (ASCII-armored, as
+    fedora-gpg-keys ships it), and return the SHA256 for the image's filename.
+    Release images are immutable (the build number is in the name), so a cached
+    image never goes stale under a respin."""
+    for binary in ("gpg", "gpgv"):
+        if not shutil.which(binary):
+            die(f"'{binary}' not found. Install: sudo dnf install gnupg2")
+    if not gpg_key.is_file():
+        die(f"{gpg_key} not found. Install: sudo dnf install fedora-gpg-keys, "
+            f"or set [base_image] gpg_key")
 
     filename = Path(image_url).name
-    sums_url = urllib.parse.urljoin(image_url, "SHA256SUMS")
-    sig_url = urllib.parse.urljoin(image_url, "SHA256SUMS.gpg")
+    sums_url = urllib.parse.urljoin(image_url, checksum_filename(filename))
     with urllib.request.urlopen(sums_url) as resp:
         sums = resp.read()
-    with urllib.request.urlopen(sig_url) as resp:
-        sig = resp.read()
 
     with tempfile.TemporaryDirectory(prefix="devbox-checksums-") as tmpdir:
-        sums_path = Path(tmpdir) / "SHA256SUMS"
-        sig_path = Path(tmpdir) / "SHA256SUMS.gpg"
+        sums_path = Path(tmpdir) / "CHECKSUM"
+        keyring = Path(tmpdir) / "keyring.gpg"
         sums_path.write_bytes(sums)
-        sig_path.write_bytes(sig)
-        r = subprocess.run(
-            ["gpgv", "--keyring", str(CLOUDIMAGE_KEYRING_PATH), str(sig_path), str(sums_path)],
-            capture_output=True, text=True,
-        )
+        # gpgv reads a binary keyring, not the armored key file.
+        r = subprocess.run(["gpg", "--dearmor", "--output", str(keyring), str(gpg_key)],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            # --output -: the signed text only. Anything outside the clearsigned
+            # block is unsigned, so parse gpgv's output, never the raw download.
+            r = subprocess.run(["gpgv", "--keyring", str(keyring), "--output", "-", str(sums_path)],
+                               capture_output=True, text=True)
         if r.returncode != 0:
             die(f"GPG verification of {sums_url} failed:\n{r.stderr}")
 
-    for line in sums.decode().splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[1].lstrip("*") == filename:
-            return parts[0]
+    for line in r.stdout.splitlines():
+        m = re.fullmatch(r"SHA256 \((.+)\) = ([0-9a-f]{64})", line.strip())
+        if m and m[1] == filename:
+            return m[2]
     die(f"{filename} not listed in {sums_url}")
 
 
@@ -221,7 +230,7 @@ class LibvirtProvider(Provider):
     def create(self, spec: InstanceSpec) -> None:
         for binary in ("virt-install", "virsh"):
             if not shutil.which(binary):
-                die(f"'{binary}' not found. Install: sudo apt install virtinst libvirt-daemon-system qemu-system-x86")
+                die(f"'{binary}' not found. Install: sudo dnf install virt-install libvirt-daemon-kvm qemu-kvm gnupg2")
 
         # Global-uniqueness of the instance name. The union of providers is just
         # libvirt today, so an existing domain of this name (devbox-managed or
@@ -252,7 +261,7 @@ class LibvirtProvider(Provider):
                 "--memory", str(spec.memory_mib),
                 "--vcpus", str(spec.vcpus),
                 "--cpu", "host-passthrough",
-                "--os-variant", "detect=on,name=ubuntu24.04",
+                "--os-variant", "detect=on,name=fedora-unknown",
                 "--disk", f"size={spec.disk_gb},backing_store={img},format=qcow2",
                 "--cloud-init", f"user-data={tmp_path}",
                 "--network", f"network={self.gc.network}",
@@ -270,7 +279,7 @@ class LibvirtProvider(Provider):
     def _ensure_base_image(self) -> Path:
         """The shared, cached, GPG-verified base cloud image (one per host,
         reused across workspaces)."""
-        expected_sha256 = fetch_verified_checksum(self.gc.base_image_url)
+        expected_sha256 = fetch_verified_checksum(self.gc.base_image_url, self.gc.base_image_gpg_key)
         self.gc.cache_dir.mkdir(parents=True, exist_ok=True)
         self.gc.cache_dir.chmod(0o755)
         img = self.gc.cache_dir / Path(self.gc.base_image_url).name

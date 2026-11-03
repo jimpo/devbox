@@ -30,6 +30,7 @@ def test_global_config_defaults_when_missing(tmp_path):
     assert gc.network == devbox.DEFAULT_NETWORK
     assert gc.cache_dir == devbox.Path(devbox.DEFAULT_CACHE_DIR)
     assert gc.base_image_url == devbox.DEFAULT_BASE_IMAGE_URL
+    assert gc.base_image_gpg_key == devbox.Path(devbox.DEFAULT_BASE_IMAGE_GPG_KEY)
     assert gc.vcpus == devbox.DEFAULT_VCPUS
     assert gc.memory_mib == devbox.DEFAULT_MEMORY_MIB
     assert gc.disk_gb == devbox.DEFAULT_DISK_GB
@@ -48,6 +49,7 @@ cache_dir = "/tmp/custom-cache"
 
 [base_image]
 url = "https://example.com/image.img"
+gpg_key = "/tmp/key.asc"
 
 [defaults]
 vcpus = 2
@@ -70,6 +72,7 @@ SOME_API_KEY = "sk-123"
     assert gc.network == "custom-net"
     assert gc.cache_dir == devbox.Path("/tmp/custom-cache")
     assert gc.base_image_url == "https://example.com/image.img"
+    assert gc.base_image_gpg_key == devbox.Path("/tmp/key.asc")
     assert gc.vcpus == 2
     assert gc.memory_mib == 4096
     assert gc.disk_gb == 20
@@ -2913,70 +2916,84 @@ def test_libvirt_provider_state_and_address_delegate(monkeypatch):
 
 
 # ---- fetch_verified_checksum -----------------------------------------------
-def test_fetch_verified_checksum_missing_gpgv(monkeypatch):
-    monkeypatch.setattr(devbox.shutil, "which", lambda name: None)
-    with pytest.raises(SystemExit):
-        devbox.fetch_verified_checksum("https://example.com/dir/image.img")
+IMG_URL = "https://example.com/dir/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+HASH = "deadbeef" * 8
 
 
-def test_fetch_verified_checksum_missing_keyring(monkeypatch, tmp_path):
-    monkeypatch.setattr(devbox.shutil, "which", lambda name: "/usr/bin/gpgv")
-    monkeypatch.setattr(devbox.providers.libvirt, "CLOUDIMAGE_KEYRING_PATH", tmp_path / "missing.gpg")
+def test_checksum_filename_is_derived_from_the_image_name():
+    assert (devbox.checksum_filename("Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2")
+            == "Fedora-Cloud-44-1.7-x86_64-CHECKSUM")
+    assert (devbox.checksum_filename("Fedora-Cloud-Base-UEFI-UKI-44-1.7.x86_64.qcow2")
+            == "Fedora-Cloud-44-1.7-x86_64-CHECKSUM")
+    assert (devbox.checksum_filename("Fedora-Cloud-Base-AmazonEC2-44-1.7.aarch64.qcow2")
+            == "Fedora-Cloud-44-1.7-aarch64-CHECKSUM")
     with pytest.raises(SystemExit):
-        devbox.fetch_verified_checksum("https://example.com/dir/image.img")
+        devbox.checksum_filename("ubuntu-26.04-server-cloudimg-amd64.img")
+
+
+def _checksum_env(monkeypatch, tmp_path, body, run_code=0, which=lambda name: "/usr/bin/x",
+                  stdout=None, calls=None):
+    key = tmp_path / "key.asc"
+    key.write_text("fake-key")
+    urls = []
+    monkeypatch.setattr(devbox.shutil, "which", which)
+    monkeypatch.setattr(devbox.urllib.request, "urlopen",
+                        lambda url: urls.append(url) or _FakeResponse(body))
+    def run(*a, **k):
+        if calls is not None:
+            calls.append(a[0])
+        out = body.decode() if stdout is None else stdout
+        return subprocess.CompletedProcess(a, run_code, out, "bad signature")
+    monkeypatch.setattr(devbox.subprocess, "run", run)
+    return key, urls
+
+
+def test_fetch_verified_checksum_missing_gpg_tools(monkeypatch, tmp_path):
+    key, _ = _checksum_env(monkeypatch, tmp_path, b"", which=lambda name: None)
+    with pytest.raises(SystemExit):
+        devbox.fetch_verified_checksum(IMG_URL, key)
+
+
+def test_fetch_verified_checksum_missing_key(monkeypatch, tmp_path):
+    _checksum_env(monkeypatch, tmp_path, b"")
+    with pytest.raises(SystemExit):
+        devbox.fetch_verified_checksum(IMG_URL, tmp_path / "missing.asc")
 
 
 def test_fetch_verified_checksum_success(monkeypatch, tmp_path):
-    keyring = tmp_path / "keyring.gpg"
-    keyring.write_bytes(b"fake-keyring")
-    monkeypatch.setattr(devbox.shutil, "which", lambda name: "/usr/bin/gpgv")
-    monkeypatch.setattr(devbox.providers.libvirt, "CLOUDIMAGE_KEYRING_PATH", keyring)
-
-    sums = (
-        b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa *other-file.img\n"
-        b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef *image.img\n"
+    body = (
+        b"-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\n"
+        b"# Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2: 123 bytes\n"
+        b"SHA256 (other.qcow2) = " + b"a" * 64 + b"\n"
+        b"SHA256 (Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2) = " + HASH.encode() + b"\n"
+        b"-----BEGIN PGP SIGNATURE-----\n\nxyz\n-----END PGP SIGNATURE-----\n"
     )
+    key, urls = _checksum_env(monkeypatch, tmp_path, body)
+    assert devbox.fetch_verified_checksum(IMG_URL, key) == HASH
+    assert urls == ["https://example.com/dir/Fedora-Cloud-44-1.7-x86_64-CHECKSUM"]
 
-    def fake_urlopen(url):
-        return _FakeResponse(b"fake-signature" if url.endswith("SHA256SUMS.gpg") else sums)
 
-    monkeypatch.setattr(devbox.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(
-        devbox.subprocess, "run",
-        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""),
-    )
-
-    checksum = devbox.fetch_verified_checksum("https://example.com/dir/image.img")
-    assert checksum == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+def test_fetch_verified_checksum_parses_gpgv_output_not_the_raw_body(monkeypatch, tmp_path):
+    name = "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+    body = f"SHA256 ({name}) = {'0' * 64}\n-----BEGIN PGP SIGNED MESSAGE-----\n".encode()
+    calls = []
+    key, _ = _checksum_env(monkeypatch, tmp_path, body, stdout=f"SHA256 ({name}) = {HASH}\n",
+                           calls=calls)
+    assert devbox.fetch_verified_checksum(IMG_URL, key) == HASH
+    gpgv = next(c for c in calls if c[0] == "gpgv")
+    assert gpgv[gpgv.index("--output") + 1] == "-"
 
 
 def test_fetch_verified_checksum_gpg_verification_fails(monkeypatch, tmp_path):
-    keyring = tmp_path / "keyring.gpg"
-    keyring.write_bytes(b"fake-keyring")
-    monkeypatch.setattr(devbox.shutil, "which", lambda name: "/usr/bin/gpgv")
-    monkeypatch.setattr(devbox.providers.libvirt, "CLOUDIMAGE_KEYRING_PATH", keyring)
-    monkeypatch.setattr(devbox.urllib.request, "urlopen", lambda url: _FakeResponse(b"data"))
-    monkeypatch.setattr(
-        devbox.subprocess, "run",
-        lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "bad signature"),
-    )
+    key, _ = _checksum_env(monkeypatch, tmp_path, b"data", run_code=1)
     with pytest.raises(SystemExit):
-        devbox.fetch_verified_checksum("https://example.com/dir/image.img")
+        devbox.fetch_verified_checksum(IMG_URL, key)
 
 
 def test_fetch_verified_checksum_filename_not_listed(monkeypatch, tmp_path):
-    keyring = tmp_path / "keyring.gpg"
-    keyring.write_bytes(b"fake-keyring")
-    monkeypatch.setattr(devbox.shutil, "which", lambda name: "/usr/bin/gpgv")
-    monkeypatch.setattr(devbox.providers.libvirt, "CLOUDIMAGE_KEYRING_PATH", keyring)
-    sums = b"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef *other-file.img\n"
-    monkeypatch.setattr(devbox.urllib.request, "urlopen", lambda url: _FakeResponse(sums))
-    monkeypatch.setattr(
-        devbox.subprocess, "run",
-        lambda *a, **k: subprocess.CompletedProcess(a, 0, "", ""),
-    )
+    key, _ = _checksum_env(monkeypatch, tmp_path, f"SHA256 (other.qcow2) = {HASH}\n".encode())
     with pytest.raises(SystemExit):
-        devbox.fetch_verified_checksum("https://example.com/dir/image.img")
+        devbox.fetch_verified_checksum(IMG_URL, key)
 
 
 # ---- jj fetch ---------------------------------------------------------------

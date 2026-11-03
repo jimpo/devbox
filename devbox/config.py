@@ -131,9 +131,12 @@ DEFAULT_LIBVIRT_URI = "qemu:///system"
 DEFAULT_NETWORK = "default"
 DEFAULT_CACHE_DIR = "/var/tmp/devbox"
 DEFAULT_BASE_IMAGE_URL = (
-    "https://cloud-images.ubuntu.com/releases/26.04/release/"
-    "ubuntu-26.04-server-cloudimg-amd64.img"
+    "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/"
+    "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
 )
+# The Fedora release key the image's CHECKSUM file is verified against
+# (shipped by `fedora-gpg-keys`; override for another release or host).
+DEFAULT_BASE_IMAGE_GPG_KEY = "/etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-primary"
 DEFAULT_VCPUS = 6
 DEFAULT_MEMORY_MIB = 12288
 # A box hosts several workspaces, each with its own checkouts and build trees,
@@ -246,6 +249,7 @@ class GlobalConfig:
     # every workspace's own [[sync]] - the $HOME/~/absolute-anchored shape only,
     # since there is no repo to anchor [[repo.sync]] against at this scope.
     sync: list = dataclasses.field(default_factory=list)
+    base_image_gpg_key: Path = Path(DEFAULT_BASE_IMAGE_GPG_KEY)
 
     @classmethod
     def load(cls, path: Path = GLOBAL_CONFIG_PATH) -> "GlobalConfig":
@@ -257,7 +261,7 @@ class GlobalConfig:
             data,
             known_top={"libvirt_uri", "network", "cache_dir"},
             known_sections={
-                "base_image": {"url"},
+                "base_image": {"url", "gpg_key"},
                 "defaults": {"vcpus", "memory_mib", "disk_gb"},
                 "ssh": {"pubkey_path"},
                 "jj": {"name", "email"},
@@ -292,6 +296,8 @@ class GlobalConfig:
             aws=_load_aws_config(data.get("aws"), path),
             ec2=_load_ec2_config(data.get("ec2"), path),
             sync=_resolve_global_sync(data, path),
+            base_image_gpg_key=Path(
+                base_image.get("gpg_key", DEFAULT_BASE_IMAGE_GPG_KEY)).expanduser(),
         )
 
     def read_ssh_pubkey(self) -> str:

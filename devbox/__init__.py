@@ -43,7 +43,7 @@ from .provision import (BOX_BASE_MODS, BUILTIN_MODS_DIR, CHECK_CONTEXT,  # noqa:
                         validate_playbooks, workspace_playbook)
 from .config import (ANCHOR_HOME, ANCHOR_REPO, ANCHOR_WORKSPACE,  # noqa: F401
                      AwsConfig, BoxSpec, DEFAULT_ADMIN_USER,
-                     DEFAULT_BASE_IMAGE_URL,
+                     DEFAULT_BASE_IMAGE_GPG_KEY, DEFAULT_BASE_IMAGE_URL,
                      DEFAULT_CACHE_DIR, DEFAULT_DISK_GB, DEFAULT_LIBVIRT_URI,
                      DEFAULT_LIGHTSAIL_BLUEPRINT, DEFAULT_LIGHTSAIL_BUNDLE,
                      DEFAULT_MEMORY_MIB, DEFAULT_NETWORK, DEFAULT_PROVIDER,
@@ -64,7 +64,7 @@ from .providers import (AwsAuthError, Ec2Provider, Instance, InstanceSpec,  # no
                         is_auth_error)
 from .providers.awsauth import (credential_problem, ensure_credentials,  # noqa: F401
                                 login_command, make_client, prompt_login)
-from .providers.libvirt import (CLOUDIMAGE_KEYRING_PATH, _format_resources,  # noqa: F401
+from .providers.libvirt import (_format_resources, checksum_filename,  # noqa: F401
                                 build_metadata_xml, fetch_verified_checksum, read_domain_instance)
 from .cli import _format_age  # noqa: F401
 from .util import die, warn  # noqa: F401
