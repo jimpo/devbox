@@ -287,6 +287,9 @@ Cloud box names get a provider prefix — `box create dev --provider ec2` makes
 `ec2-dev`, which is what a workspace's `box =` holds. Names are unique across
 providers.
 
+**EC2** boots the newest Amazon Linux 2023 AMI for `--arch`; `--ami` pins
+another (the root volume is sized on that image's own root device).
+
 **Lightsail (`--provider aws`)**: a bundle fixes CPU/RAM/disk (`--disk` is
 ignored; default `xlarge_3_0`, 4 vCPU / 16 GB / 320 GB); x86 only; Ubuntu 24.04
 blueprint by default; dynamic public IP, re-resolved every command; port 22 open

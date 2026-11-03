@@ -3759,8 +3759,10 @@ class _FakeEC2:
         self.calls = []
         self._describe_instances = describe_instances or {"Reservations": []}
         self._images = images if images is not None else [
-            {"ImageId": "ami-old", "CreationDate": "2024-01-01T00:00:00.000Z"},
-            {"ImageId": "ami-new", "CreationDate": "2024-06-01T00:00:00.000Z"},
+            {"ImageId": "ami-old", "CreationDate": "2024-01-01T00:00:00.000Z",
+             "RootDeviceName": "/dev/sda1"},
+            {"ImageId": "ami-new", "CreationDate": "2024-06-01T00:00:00.000Z",
+             "RootDeviceName": "/dev/xvda"},
         ]
         self._run_side_effect = run_side_effect
 
@@ -3894,7 +3896,11 @@ def test_ec2_create_on_demand_request_shape():
     assert params["UserData"] == "#cloud-config\n"
     assert params["SecurityGroupIds"] == ["sg-1"]
     assert "InstanceMarketOptions" not in params  # on-demand
-    ebs = params["BlockDeviceMappings"][0]["Ebs"]
+    # The mapping names the chosen image's own root device (AL2023: /dev/xvda),
+    # or the size would attach a second volume instead of resizing the root.
+    mapping = params["BlockDeviceMappings"][0]
+    assert mapping["DeviceName"] == "/dev/xvda"
+    ebs = mapping["Ebs"]
     assert ebs["VolumeSize"] == 64 and ebs["VolumeType"] == "gp3"
     tags = {t["Key"]: t["Value"] for t in params["TagSpecifications"][0]["Tags"]}
     assert tags["devbox:managed"] == "true"
@@ -3925,13 +3931,26 @@ def test_ec2_create_spot_adds_market_options():
     assert params["InstanceMarketOptions"]["SpotOptions"]["SpotInstanceType"] == "persistent"
 
 
-def test_ec2_create_explicit_ami_skips_lookup():
-    client = _FakeEC2()
+def test_ec2_create_explicit_ami_skips_the_filter_lookup():
+    client = _FakeEC2(images=[{"ImageId": "ami-pinned", "RootDeviceName": "/dev/xvda"}])
     provider = devbox.Ec2Provider(_ec2_gc(), client=client)
     provider.create(_ec2_spec(ami="ami-pinned"))
-    assert not any(op == "describe_images" for (op, _) in client.calls)
+    # Only a lookup by id (for the root device name), never the name filter.
+    assert [kw for (op, kw) in client.calls if op == "describe_images"] == [
+        {"ImageIds": ["ami-pinned"]}]
     params = [kw for (op, kw) in client.calls if op == "run_instances"][0]
     assert params["ImageId"] == "ami-pinned"
+    assert params["BlockDeviceMappings"][0]["DeviceName"] == "/dev/xvda"
+
+
+def test_ec2_resolve_ami_uses_the_amazon_linux_filter():
+    client = _FakeEC2()
+    provider = devbox.Ec2Provider(_ec2_gc(), client=client)
+    cfg = devbox.Ec2BoxConfig(instance_type="m7g.large", architecture="arm64")
+    assert provider._resolve_ami(cfg) == ("ami-new", "/dev/xvda")
+    kw = [kw for (op, kw) in client.calls if op == "describe_images"][0]
+    assert kw["Owners"] == ["amazon"]
+    assert kw["Filters"][0]["Values"] == ["al2023-ami-2023.*-kernel-*-arm64"]
 
 
 def test_ec2_create_no_ami_found_dies():

@@ -145,24 +145,29 @@ class Ec2Provider(Provider):
         return inst
 
     # ---- AMI lookup ---------------------------------------------------------
-    def _resolve_ami(self, cfg: Ec2BoxConfig) -> str:
+    def _resolve_ami(self, cfg: Ec2BoxConfig) -> tuple:
+        """(ImageId, RootDeviceName). The root device name is the image's own
+        (/dev/xvda on Amazon Linux, /dev/sda1 on Ubuntu): the EBS mapping has to
+        name it, or the size lands on a second volume instead of the root."""
         if cfg.ami:
-            return cfg.ami
-        name_filter = cfg.ami_name_filter or DEFAULT_AMI_NAME_FILTER[cfg.architecture]
-        resp = self.ec2.describe_images(
-            Owners=[cfg.ami_owner],
-            Filters=[
-                {"Name": "name", "Values": [name_filter]},
-                {"Name": "architecture", "Values": [cfg.architecture]},
-                {"Name": "state", "Values": ["available"]},
-            ],
-        )
+            resp = self.ec2.describe_images(ImageIds=[cfg.ami])
+            what = f"id={cfg.ami}"
+        else:
+            name_filter = cfg.ami_name_filter or DEFAULT_AMI_NAME_FILTER[cfg.architecture]
+            resp = self.ec2.describe_images(
+                Owners=[cfg.ami_owner],
+                Filters=[
+                    {"Name": "name", "Values": [name_filter]},
+                    {"Name": "architecture", "Values": [cfg.architecture]},
+                    {"Name": "state", "Values": ["available"]},
+                ],
+            )
+            what = f"name={name_filter!r} arch={cfg.architecture} owner={cfg.ami_owner}"
         images = resp.get("Images", [])
         if not images:
-            die(f"no AMI found matching name={name_filter!r} arch={cfg.architecture} "
-                f"owner={cfg.ami_owner}")
+            die(f"no AMI found matching {what}")
         images.sort(key=lambda i: i.get("CreationDate", ""), reverse=True)
-        return images[0]["ImageId"]
+        return images[0]["ImageId"], images[0]["RootDeviceName"]
 
     # ---- create -------------------------------------------------------------
     def create(self, spec: InstanceSpec) -> None:
@@ -174,7 +179,7 @@ class Ec2Provider(Provider):
         if self._find(spec.name) is not None:
             die(f"instance '{spec.name}' already exists; run `devbox destroy` first")
 
-        ami = self._resolve_ami(cfg)
+        ami, root_device = self._resolve_ami(cfg)
         use_spot = cfg.spot if cfg.spot is not None else self.defaults.spot
 
         # The console-display Name drops the redundant provider prefix (the
@@ -189,7 +194,7 @@ class Ec2Provider(Provider):
             # boto3 base64-encodes UserData for run_instances.
             "UserData": spec.user_data,
             "BlockDeviceMappings": [{
-                "DeviceName": "/dev/sda1",
+                "DeviceName": root_device,
                 "Ebs": {"VolumeSize": spec.disk_gb, "VolumeType": "gp3", "DeleteOnTermination": True},
             }],
             "TagSpecifications": [{

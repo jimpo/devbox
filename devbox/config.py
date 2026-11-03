@@ -148,12 +148,13 @@ DEFAULT_MEMORY_MIB = 12288
 DEFAULT_DISK_GB = 100
 DEFAULT_SSH_PUBKEY_PATH = "~/.ssh/id_ed25519.pub"
 
-# EC2 AMI defaults (Canonical's Ubuntu cloud images). The global [ec2] section
-# can override the name glob / owner, or a box can pin an explicit `ami`.
-DEFAULT_AMI_OWNER = "099720109477"  # Canonical
+# EC2 AMI defaults (Amazon Linux 2023). The `2023.` position in the glob
+# excludes the -minimal-, -ecs- and -eks- variants. The global [ec2] section can
+# override the name glob / owner, or a box can pin an explicit `ami`.
+DEFAULT_AMI_OWNER = "amazon"
 DEFAULT_AMI_NAME_FILTER = {
-    "x86_64": "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-*",
-    "arm64": "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-arm64-server-*",
+    "x86_64": "al2023-ami-2023.*-kernel-*-x86_64",
+    "arm64": "al2023-ami-2023.*-kernel-*-arm64",
 }
 
 # Lightsail (the `aws` provider) defaults. Lightsail sells fixed bundles rather
