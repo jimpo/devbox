@@ -135,7 +135,8 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # the system packages (`box-packages`, a list and no body: the login zsh,
 # the privileged account's vim, rsync for `devbox sync`, and the handful a mod
 # body or a native build needs before any generation exists) and the nix
-# daemon. The privileged account gets no configuration beyond that and no
+# daemon. (`kernel` moves Amazon Linux 2023 boxes to kernel 6.18 and is a no-op
+# elsewhere.) The privileged account gets no configuration beyond that and no
 # generation of its own: it is the box's
 # debugging entry point (`devbox ssh --admin`) and deliberately stays
 # independent of anything that could itself need fixing - stock distro bash,
@@ -148,7 +149,7 @@ GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 # is a trusted user of it.
 # Fixed and built-in: there is no box config file, so a box grows beyond this
 # only when an attached workspace contributes a `runas = ["root"]` mod.
-BOX_BASE_MODS = ("box-packages", "nix")
+BOX_BASE_MODS = ("box-packages", "kernel", "nix")
 
 # The workspace playbook: what one attachment needs inside its own account.
 # Ordering constraints are encoded here: jj must precede repo-bootstrap (which

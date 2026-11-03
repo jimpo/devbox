@@ -106,7 +106,10 @@ Each mod sources the `~/.config/devbox/env` of the account that owns its creds
 (the target's, or the privileged account's for a `root` mod).
 
 **Box playbook**: `box-packages` (a package list, no body: login `zsh`, the
-privileged account's `vim-enhanced`, `rsync`, build basics) and `nix`, the multi-user
+privileged account's `vim-enhanced`, `rsync`, build basics), `kernel` (Amazon Linux 2023
+only: installs kernel 6.18 and sets it the default, then after a host-driven reboot
+removes the old kernel; `box create` reboots on `/run/devbox-reboot-required` and re-runs
+the mods, `box sync` only says a reboot is needed since agents may be running) and `nix`, the multi-user
 store: Fedora's own `nix`/`nix-daemon` packages, or on Amazon Linux 2023 the
 upstream installer pinned by version. The store is the machine's, shared by every
 attachment. `trusted-users` holds only the privileged account, since a trusted

@@ -2457,6 +2457,7 @@ def test_dotfiles_is_agent_only_and_the_box_playbook_stays_apt_only(isolated_mod
         # since the mod has no body left to do anything else in.
         "box-packages\troot\tzsh,vim-enhanced,git,ca-certificates,rsync,unzip,"
         "gcc,gcc-c++,make,pkgconf-pkg-config",
+        "kernel\troot\t",
         "nix\troot\txz",
     ]
     assert "dotfiles" not in devbox.BOX_BASE_MODS
@@ -2762,6 +2763,103 @@ def test_cmd_box_create_on_an_existing_box_is_a_no_op(monkeypatch, pubkey, capsy
     devbox.cli.cmd_box_create(_box_args("dev"), gc)     # no _CreateStop raised
     assert "already exists" in capsys.readouterr().out
     assert provider.seen == {}
+
+
+REBOOT = ["ssh", "alias", "sudo", "systemd-run", "--on-active=2", "systemctl", "reboot"]
+
+
+def _boot_ssh(monkeypatch, pubkey, marker, calls, boot_ids=("old", "old", "new"), marker_after=None):
+    """Fake the whole of _boot_box's SSH side; `marker` is the reboot-required check
+    (`marker_after` overrides it once the mods have run twice)."""
+    provider = _FakeCreateProvider(name="aws")
+    provider.create = lambda spec: None
+    provider.address = lambda name: "1.2.3.4"
+    gc = _patch_create(monkeypatch, provider, pubkey)
+    boot_ids = iter(boot_ids)
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if argv[-1].endswith("boot_id"):
+            return _cp(argv, out=next(boot_ids))
+        if argv[-2:] == ["-e", "/run/devbox-reboot-required"]:
+            present = marker_after if marker_after is not None and calls.count("mods") > 1 else marker
+            return _cp(argv, code=0 if present else 1)
+        return _cp(argv)
+
+    monkeypatch.setattr(devbox.cli.subprocess, "run", run)
+    monkeypatch.setattr(devbox.cli, "_wait_ready", lambda *a: "alias")
+    monkeypatch.setattr(devbox.cli, "truncate_known_hosts", lambda n: None)
+    monkeypatch.setattr(devbox.cli, "build_tarball", lambda p: b"")
+    monkeypatch.setattr(devbox.cli, "_run_mods", lambda *a, **k: calls.append("mods"))
+    monkeypatch.setattr(devbox.cli.time, "sleep", lambda s: None)
+    return provider, gc
+
+
+def test_boot_box_reboots_and_reruns_the_mods_when_the_marker_is_there(monkeypatch, pubkey):
+    calls = []
+    provider, gc = _boot_ssh(monkeypatch, pubkey, True, calls, marker_after=False)
+    devbox.cli.cmd_box_create(_box_args("dev", provider="aws"), gc)
+    assert REBOOT in calls
+    assert calls.count("mods") == 2
+    assert calls.index("mods") < calls.index(REBOOT)
+    # once before the reboot, then until the new boot shows (old, new)
+    assert sum(c[-1].endswith("boot_id") for c in calls if c != "mods") == 3
+
+
+def test_boot_box_does_not_reboot_without_the_marker(monkeypatch, pubkey):
+    calls = []
+    provider, gc = _boot_ssh(monkeypatch, pubkey, False, calls)
+    devbox.cli.cmd_box_create(_box_args("dev", provider="aws"), gc)
+    assert REBOOT not in calls
+    assert calls.count("mods") == 1
+
+
+def test_boot_box_dies_when_the_first_boot_id_is_empty(monkeypatch, pubkey):
+    calls = []
+    provider, gc = _boot_ssh(monkeypatch, pubkey, True, calls, boot_ids=("",))
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_box_create(_box_args("dev", provider="aws"), gc)
+    assert REBOOT not in calls
+
+
+def test_boot_box_dies_when_the_marker_survives_the_reboot(monkeypatch, pubkey, capsys):
+    calls = []
+    provider, gc = _boot_ssh(monkeypatch, pubkey, True, calls)
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_box_create(_box_args("dev", provider="aws"), gc)
+    assert calls.count("mods") == 2
+    assert "uname -r" in capsys.readouterr().err
+
+
+def _box_sync(monkeypatch, pubkey, marker, calls):
+    provider, gc = _boot_ssh(monkeypatch, pubkey, marker, calls)
+    monkeypatch.setattr(devbox.cli, "_ssh_ok", lambda alias: calls.append("ssh_ok") or True)
+    monkeypatch.setattr(devbox.cli, "_resolve_box", lambda n, gc: (n, None, provider))
+    monkeypatch.setattr(devbox.cli, "_admin_user", lambda p, n: "admin")
+    monkeypatch.setattr(devbox.cli, "_refresh_ssh_aliases", lambda *a: (None, "alias"))
+    monkeypatch.setattr(devbox.cli, "build_box_payload", lambda admin, gc: [])
+    devbox.cli.cmd_box_sync(argparse.Namespace(name="aws-dev", mods=True), gc)
+
+
+def test_cmd_box_sync_with_the_marker_prints_the_reboot_notice(monkeypatch, pubkey, capsys):
+    calls = []
+    _box_sync(monkeypatch, pubkey, True, calls)
+    out = capsys.readouterr().out
+    assert out.endswith(
+        "  devbox box ssh aws-dev -- sudo systemctl reboot\n"
+        "  devbox box sync --mods aws-dev\n")
+    assert "done." not in out
+    assert REBOOT not in calls
+    assert calls.index("ssh_ok") < calls.index("mods") < calls.index(
+        ["ssh", "alias", "test", "-e", "/run/devbox-reboot-required"])
+
+
+def test_cmd_box_sync_without_the_marker_just_finishes(monkeypatch, pubkey, capsys):
+    calls = []
+    _box_sync(monkeypatch, pubkey, False, calls)
+    out = capsys.readouterr().out
+    assert out.endswith("done.\n")
+    assert "reboot" not in out
 
 
 def test_cmd_create_boots_the_workspaces_own_box_when_it_is_missing(monkeypatch, pubkey):
@@ -4777,3 +4875,43 @@ def test_cmd_box_list_attached_reuses_the_listing(monkeypatch, capsys):
     devbox.cli.cmd_box_list(_list_args(attached=True), _ec2_gc())
     assert local.list_calls == 1 and stale.list_calls == 1
     assert "web" in capsys.readouterr().out
+
+
+# ---- mods/kernel.sh, run against stub uname/rpm/dnf/grubby/touch ---------------
+def _kernel_sh(tmp_path, uname, installed):
+    bin = tmp_path / "bin"
+    bin.mkdir()
+    for name, body in {
+        "uname": 'echo "$FAKE_UNAME"',
+        "rpm": 'case "$*" in *--qf*) echo 6.18.1-1.amzn2023.x86_64; exit 0;; esac\n'
+               'case " $FAKE_RPM " in *" ${@: -1} "*) exit 0;; esac; exit 1',
+    }.items():
+        (bin / name).write_text(f"#!/usr/bin/env bash\n{body}\n")
+    for name in ("dnf", "grubby", "touch"):
+        (bin / name).write_text(f'#!/usr/bin/env bash\necho "{name} $*" >> "$FAKE_LOG"\n')
+    for f in bin.iterdir():
+        f.chmod(0o755)
+    osr = tmp_path / "os-release"
+    osr.write_text('ID="amzn"\n')
+    log = tmp_path / "log"
+    subprocess.run(["bash", str(devbox.cli.Path(devbox.__file__).parent / "mods/kernel.sh")],
+                   check=True, env={**os.environ, "PATH": f"{bin}:{os.environ['PATH']}",
+                                    "DEVBOX_OS_RELEASE": str(osr), "FAKE_LOG": str(log),
+                                    "FAKE_UNAME": uname, "FAKE_RPM": installed})
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def test_kernel_mod_installs_then_marks_a_reboot(tmp_path):
+    log = _kernel_sh(tmp_path, "6.1.1-1.amzn2023.x86_64", "kernel")
+    assert log == ["dnf install -y kernel6.18",
+                   "grubby --set-default /boot/vmlinuz-6.18.1-1.amzn2023.x86_64",
+                   "touch /run/devbox-reboot-required"]
+
+
+def test_kernel_mod_finishes_a_swap_after_the_kernel_is_already_gone(tmp_path):
+    log = _kernel_sh(tmp_path, "6.18.1-1.amzn2023.x86_64", "kernel6.18 perf kernel-headers")
+    assert log == ["dnf -y swap kernel-headers kernel6.18-headers", "dnf -y swap perf perf6.18"]
+
+
+def test_kernel_mod_is_a_no_op_when_converged(tmp_path):
+    assert _kernel_sh(tmp_path, "6.18.1-1.amzn2023.x86_64", "kernel6.18") == []

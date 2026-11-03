@@ -166,6 +166,39 @@ def _boot_box(box: BoxSpec, gc: GlobalConfig, provider) -> None:
     admin_alias = _wait_ready(provider, box.name, box.admin_user)
     print("==> provisioning the box (running its mods over SSH) ...")
     _run_mods(admin_alias, tarball, log=provision_log())
+    if _reboot_pending(admin_alias):
+        print("==> rebooting the box to finish the kernel upgrade ...")
+        _reboot(admin_alias)
+        print("==> re-running the box mods after the reboot ...")
+        _run_mods(admin_alias, tarball, log=provision_log())
+        if _reboot_pending(admin_alias):
+            die(f"'{box.name}' did not come up on the target kernel after rebooting; "
+                f"check `devbox box ssh {box.name} -- uname -r`")
+
+
+def _reboot_pending(alias: str) -> bool:
+    """Whether a box mod asked for a reboot (the kernel mod's marker, in tmpfs)."""
+    r = subprocess.run(["ssh", alias, "test", "-e", "/run/devbox-reboot-required"])
+    return r.returncode == 0
+
+
+def _reboot(alias: str) -> None:
+    """Reboot the box and wait for it to come back on a new boot."""
+    def boot_id() -> str:
+        r = subprocess.run(["ssh", alias, "cat", "/proc/sys/kernel/random/boot_id"],
+                           capture_output=True, text=True)
+        return r.stdout.strip()
+
+    old = boot_id()
+    if not old:
+        die(f"could not read boot_id on '{alias}' before rebooting")
+    # Scheduled, so ssh returns before the connection drops.
+    r = subprocess.run(["ssh", alias, "sudo", "systemd-run", "--on-active=2",
+                        "systemctl", "reboot"])
+    if r.returncode != 0:
+        die(f"could not schedule a reboot on '{alias}'")
+    if not _poll(lambda: _ssh_ok(alias) and boot_id() not in ("", old), timeout=300):
+        die(f"timed out waiting for '{alias}' to come back from its reboot")
 
 
 def cmd_box_create(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
@@ -851,9 +884,19 @@ def cmd_box_sync(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> 
         die(f"no address for '{name}' yet (still booting?).")
     admin_user = _admin_user(provider, name)
     _, admin_alias = _refresh_ssh_aliases(name, ip, admin_user)
+    print("==> waiting for SSH ...")
+    if not _poll(lambda: _ssh_ok(admin_alias), timeout=300):
+        die(f"timed out waiting for SSH to '{name}'; check `devbox box status {name}`")
     print(f"==> provisioning box '{name}' over SSH ...")
     _run_mods(admin_alias, build_tarball(build_box_payload(admin_user, gc)),
               log=provision_log())
+    if _reboot_pending(admin_alias):
+        # No reboot here: attached workspaces may have agents running.
+        print(f"\nbox '{name}' needs a reboot to finish the kernel upgrade. "
+              f"When no agents are running:\n"
+              f"  devbox box ssh {name} -- sudo systemctl reboot\n"
+              f"  devbox box sync --mods {name}")
+        return
     print("done.")
 
 

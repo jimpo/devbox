@@ -59,7 +59,8 @@ Conventions:
 - Monkeypatch names where they're used (`devbox.providers.libvirt.virsh`,
   `devbox.provision.GLOBAL_MODS_DIR`). Patch shared stdlib through the
   re-exported `devbox.subprocess`/`devbox.shutil`/`devbox.urllib`.
-- `DEVBOX_WORKSPACES_DIR`, `DEVBOX_LEGACY_MARKERS_DIR` and `NIX_STATE_DIR` exist
+- `DEVBOX_WORKSPACES_DIR`, `DEVBOX_LEGACY_MARKERS_DIR`, `NIX_STATE_DIR` and
+  `DEVBOX_OS_RELEASE` (kernel mod) exist
   only so the tests can redirect the driver's root-owned paths.
 - `tests/conftest.py` just puts the repo root on `sys.path`.
 
@@ -96,6 +97,11 @@ repos.
 - **Shared closure**: detach one, `sudo nix-collect-garbage` as admin, then the
   other's `home-manager generations` still resolve, its tools are on PATH, and
   `devbox sync --mods` is a no-op.
+
+**Kernel** — on an AL2023 box (`box create --provider aws`), `uname -r` is 6.18
+after `box create`, `rpm -q kernel` finds nothing and a second `box sync --mods`
+is a no-op. On a pre-existing 6.1 box, `box sync --mods` prints the reboot
+notice; follow it with `box stop`/`box up`/`box sync --mods`.
 
 **Generation**
 - `create` ends with `home-manager` reporting a switch; running it twice changes

@@ -293,7 +293,7 @@ another (the root volume is sized on that image's own root device).
 **Lightsail (`--provider aws`)**: a bundle fixes CPU/RAM/disk (`--disk` is
 ignored; default `xlarge_3_0`, 4 vCPU / 16 GB / 320 GB); x86 only; Amazon Linux 2023
 blueprint by default; dynamic public IP, re-resolved every command; port 22 open
-by default; no spot.
+by default; no spot. Amazon Linux 2023 boxes are moved to kernel 6.18 with one reboot during `box create`.
 
 ### Credentials (`[env]`)
 
@@ -365,7 +365,7 @@ Everything after first boot is a **mod**: a home-manager module (preferred), an
 idempotent bash script, or both, under one name.
 
 ```
-box playbook:        box-packages → nix
+box playbook:        box-packages → kernel → nix
 workspace playbook:  home-manager → github-auth → jj → dotfiles → neovim →
                      claude-code → cargo-binstall → repo-bootstrap
                      + your mods = [...]

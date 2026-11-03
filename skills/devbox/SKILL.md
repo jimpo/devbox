@@ -177,7 +177,7 @@ src = ".claude/skills"
 
 ### Mods (provisioning)
 
-There are two built-in playbooks: the **box** one (`box-packages → nix`),
+There are two built-in playbooks: the **box** one (`box-packages → kernel → nix`),
 which runs once per box as root, and the **workspace** one (`home-manager →
 github-auth → jj → dotfiles → neovim → claude-code → cargo-binstall →
 repo-bootstrap`), which runs once per attachment in that
