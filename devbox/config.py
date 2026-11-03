@@ -165,9 +165,7 @@ DEFAULT_AMI_NAME_FILTER = {
 # architecture knob; `devbox box create` can pin a different `bundle` (or a
 # different `blueprint`).
 DEFAULT_LIGHTSAIL_BUNDLE = "xlarge_3_0"        # 16 GB / 4 vCPU / 320 GB
-# Amazon Linux 2023, the same distro the ec2 provider boots. TODO: the id is
-# unconfirmed - check `aws lightsail get-blueprints` (no aws CLI where this was
-# written).
+# Amazon Linux 2023, the same distro the ec2 provider boots.
 DEFAULT_LIGHTSAIL_BLUEPRINT = "amazon_linux_2023"
 
 
