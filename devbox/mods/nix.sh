@@ -76,7 +76,6 @@ if command -v nix >/dev/null 2>&1 && daemon_present; then
 elif [ "$ID" = fedora ]; then
   echo "==> installing nix from Fedora's packages"
   dnf install -y nix nix-daemon
-  systemctl enable --now nix-daemon.socket
 elif [ -e /nix ]; then
   # A half-installed store: the installer refuses to write over an existing
   # /nix, and guessing which half is missing is worse than saying so.
@@ -91,6 +90,15 @@ else
   curl -fsSL -o "$work/install-nix" \
     "https://releases.nixos.org/nix/nix-${NIX_VERSION}/install"
   sh "$work/install-nix" --daemon --yes --no-channel-add
+fi
+
+if [ "$ID" = fedora ]; then
+  # The service, not nix-daemon.socket, as Fedora's docs say: the daemon then
+  # creates its own socket. Socket activation has systemd (init_t) create it in
+  # /nix/var/nix/daemon-socket, which Fedora labels default_t, and SELinux
+  # enforcing denies that. Every pass, not only at install, so a box that took
+  # the socket route heals.
+  systemctl enable --now nix-daemon.service
 fi
 
 # The build-users group the installer made (its own default is `nixbld`), read
