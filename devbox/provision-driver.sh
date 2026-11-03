@@ -58,6 +58,8 @@ MODS_DIR="$HERE/mods"
 
 fail() { echo "devbox: $*" >&2; exit 1; }
 
+command -v dnf >/dev/null || fail "this box predates the switch to Fedora/Amazon Linux (JIM-303); recreate it with devbox box destroy + box create"
+
 # Provisioning context for the mods (DEVBOX_*), safe to trace. Carries the
 # usernames and the host's public key, which the preamble authorizes for the
 # agent account. No secrets - that is what lets the payload be agent-readable.
@@ -120,7 +122,7 @@ install_bash_env() {
   # parent the default root ownership, and an agent that cannot write ~/.local
   # cannot install anything into it.
   sudo install -d -o "$user" -g "$group" -m 0755 "$home/.local" "$home/.local/bin"
-  # install(1) on Ubuntu (uutils coreutils) fails to overwrite an existing file
+  # install(1) from uutils coreutils (Ubuntu) fails to overwrite an existing file
   # when the source is /dev/stdin, so clear the destination first. install still
   # creates it with the final mode, so it is never briefly world-readable.
   sudo rm -f "$home/.bash_env"
@@ -132,8 +134,10 @@ case ":$PATH:" in
   *) export PATH="$HOME/.local/bin:$PATH" ;;
 esac
 # The box-wide multi-user store: NIX_PROFILES, NIX_SSL_CERT_FILE and the daemon
-# profile's bin. Its own guard makes a second sourcing a no-op. Both spellings,
-# because which one the installer writes has changed across nix releases.
+# profile's bin (the upstream installer's; Fedora's RPM puts nix in /usr/bin and
+# may ship neither file). Its own guard makes a second sourcing a no-op. Both
+# spellings, because which one the installer writes has changed across nix
+# releases.
 if [ -r /etc/profile.d/nix.sh ]; then
   . /etc/profile.d/nix.sh
 elif [ -r /etc/profile.d/nix-daemon.sh ]; then
@@ -258,14 +262,14 @@ ensure_agent() {
   sudo passwd --lock "$agent" >/dev/null || fail "could not lock the password for '$agent'"
 
   # Assert the isolation actually holds rather than assuming it. A partial sudo
-  # grant is not a lesser version of this - `apt-get install ./x.deb` runs
-  # maintainer scripts as root - so any hard-privileged group is fatal.
+  # grant is not a lesser version of this - `dnf install ./x.rpm` runs
+  # scriptlets as root - so any hard-privileged group is fatal.
   groups="$(id -nG "$agent" 2>/dev/null || true)"
   for g in "${HARD_PRIVILEGED_GROUPS[@]}"; do
     case " $groups " in
       *" $g "*) fail "agent user '$agent' is in the '$g' group, which is root-equivalent;
   the point of the split is that agents run without privilege. Remove it with
-  'sudo deluser $agent $g', or pick a different agent_user." ;;
+  'sudo gpasswd -d $agent $g', or pick a different agent_user." ;;
     esac
   done
   # The listing is the answer, not the exit status: sudo-rs (Ubuntu's default
@@ -295,6 +299,10 @@ ensure_agent() {
     # Idempotent: re-running must not duplicate the key.
     if ! sudo grep -qxF "$DEVBOX_SSH_PUBKEY" "$home/.ssh/authorized_keys"; then
       printf '%s\n' "$DEVBOX_SSH_PUBKEY" | sudo tee -a "$home/.ssh/authorized_keys" >/dev/null
+    fi
+    # SELinux (enforcing on Fedora): a mislabelled .ssh locks the agent out.
+    if command -v restorecon >/dev/null 2>&1; then
+      sudo restorecon -R "$home/.ssh" || echo "devbox: note: restorecon failed" >&2
     fi
   fi
 
@@ -333,24 +341,14 @@ ensure_agent() {
   done
 }
 
-# ---- apt (mods cannot install their own packages) ---------------------------
-APT_UPDATED=0
-
-apt_ensure_updated() {
-  [ "$APT_UPDATED" -eq 0 ] || return 0
-  sudo apt-get -o DPkg::Lock::Timeout=600 update -qq \
-    || fail "apt-get update failed"
-  APT_UPDATED=1
-}
-
+# ---- packages (mods cannot install their own) ------------------------------
+# dnf refreshes expired metadata itself and waits for its own lock.
 install_packages() {
   local list="$1" pkgs
   [ -n "$list" ] || return 0
   IFS=',' read -r -a pkgs <<< "$list"
-  apt_ensure_updated
   echo "==> installing packages: ${pkgs[*]}"
-  sudo env DEBIAN_FRONTEND=noninteractive \
-    apt-get -o DPkg::Lock::Timeout=600 install -y "${pkgs[@]}"
+  sudo dnf install -y "${pkgs[@]}"
 }
 
 # ---- mod execution ----------------------------------------------------------

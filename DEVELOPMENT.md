@@ -48,7 +48,7 @@ from a wheel.
 - **CLI**: `cmd_nix_check`, `cmd_herdr`, `_ensure_jj_remote`, `_list_boxes`, with
   `subprocess`/`os.execvp` faked.
 - **The driver** (`tests/test_driver.py`): runs the real `provision-driver.sh` with
-  fake `sudo`/`useradd`/`id`/`getent`/`apt-get` on PATH. The fake `sudo` executes
+  fake `sudo`/`useradd`/`id`/`getent`/`dnf` on PATH. The fake `sudo` executes
   for real, so control flow is genuine and only privilege is simulated. It covers
   manifest parsing, runas dispatch, ownership markers, lingering, `~/.bash_env`,
   per-attachment logs, two workspaces sharing one box, and `cli._detach_script`'s
@@ -80,7 +80,7 @@ Assembles a payload flake in a temp dir (the skeleton, a placeholder
 ## Manual verification
 
 Not testable here: real `virsh`/`virt-install`/boto3 calls, `useradd` flags,
-sudoers, apt, the nix install, `home-manager switch`, and how the mods behave on
+sudoers, dnf, SELinux labels, the nix install, `home-manager switch`, and how the mods behave on
 a real box. For those, read the calls carefully, `bash -n` and shellcheck the
 scripts, and exercise by hand:
 
@@ -103,6 +103,12 @@ repos.
 - `ssh <agent-alias> 'echo $PATH'` (non-interactive) lists `~/.nix-profile/bin`
   before `~/.local/bin`, and `'echo $SOME_ENV_KEY'` returns an `[env]` value.
 - The privileged account has no generation: stock bash, unconfigured vim.
+
+**Base image** (Fedora 44 / Amazon Linux 2023)
+- `getenforce` is unchanged by `create`, and `ausearch -m avc -ts boot` is empty
+  or explained (watch `/etc/devbox/bash_env`, `/nix` and the agent's user units).
+- `nix-daemon.socket` is enabled, `nix` is on PATH, and `/etc/nix/nix.conf`'s
+  `build-users-group` names a group that exists.
 
 **Per mod**
 - `jj`: `jj config get user.name` is the workspace identity; a

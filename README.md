@@ -127,7 +127,7 @@ and a name can have both:
   and can be reapplied safely. **Prefer them.**
 - **Script mods** (`<name>.sh`) are idempotent bash scripts the provisioning
   driver runs. They are the escape hatch for what a package in the store can't
-  do: apt packages, system state (`runas = ["root"]`), or a tool that has to
+  do: RPM packages, system state (`runas = ["root"]`), or a tool that has to
   update itself in the account's home, like the Claude Code and Codex installers.
 
 Both kinds live in the workspace's mods directory (or a global or built-in one),
@@ -150,7 +150,7 @@ exfiltration. The cost: **the agent cannot install system packages**; add them
 to a mod's `packages` and run `devbox sync --mods`. The trade-offs of sharing a
 box are in [ARCHITECTURE.md](ARCHITECTURE.md#accounts-and-isolation).
 
-> **Never grant the agent partial sudo.** `sudo apt-get`, `sudo systemctl`,
+> **Never grant the agent partial sudo.** `sudo dnf`, `sudo systemctl`,
 > `sudo pip` or membership in `docker`/`lxd` are each root. The driver refuses
 > to continue if the agent has acquired any of them.
 
@@ -387,7 +387,7 @@ are optional:
 # /// mod
 # requires = ["jj", "github-auth"]   # must appear earlier; validated, never reordered
 # runas = ["admin", "agent"]         # default ["agent"]; also "root"
-# packages = ["jq", "unzip"]         # apt-installed by the driver before the body
+# packages = ["jq", "unzip"]         # RPM names, dnf-installed before the body
 # ///
 ```
 
@@ -442,7 +442,7 @@ Packages and config files come from the store. The activation hook covers what
 a store can't hold, here the toolchain rustup manages in `~/.rustup`. If the
 build also needs system libraries, add a small script mod with the same name
 next to it, for example `rust.sh` holding only
-`# /// mod` / `# packages = ["clang", "libssl-dev"]` / `# ///`.
+`# /// mod` / `# packages = ["clang", "openssl-devel"]` / `# ///`.
 
 `devbox sync --mods` applies it to a live box. The opt-in built-ins are `codex`,
 `nodejs`, `uv`, `cloudflared`, `claude-github-mcp` and `claude-linear-mcp`; each

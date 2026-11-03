@@ -86,7 +86,7 @@ nix against it; there is no other way to evaluate a module off a box.
 way `manifest` and `repos` are, and carries no creds - /nix/store is
 world-readable and shared by every attachment on the box. The flake is
 agent-only: a box run ships none of it, and the privileged account stays on
-apt.
+the distro's packages.
 """
 from __future__ import annotations
 
@@ -132,14 +132,14 @@ NIX_WORKSPACE_FILE = "workspace.nix"
 GLOBAL_MODS_DIR = GLOBAL_CONFIG_PATH.parent / "mods"
 
 # The box playbook: what a machine needs once, regardless of who lives on it -
-# the system apt packages (`box-packages`, a list and no body: the login zsh,
+# the system packages (`box-packages`, a list and no body: the login zsh,
 # the privileged account's vim, rsync for `devbox sync`, and the handful a mod
 # body or a native build needs before any generation exists) and the nix
 # daemon. The privileged account gets no configuration beyond that and no
 # generation of its own: it is the box's
 # debugging entry point (`devbox ssh --admin`) and deliberately stays
-# independent of anything that could itself need fixing - stock apt bash,
-# unconfigured apt vim, no oh-my-zsh, no git credential helper.
+# independent of anything that could itself need fixing - stock distro bash,
+# unconfigured distro vim, no oh-my-zsh, no git credential helper.
 # `nvim` and every agent's configured vim/git come from that attachment's
 # home-manager generation instead, so they live in that agent's profile and
 # nowhere else.
@@ -334,7 +334,7 @@ def find_mod_script(name: str, mods_dir: Optional[Path],
 # answers to the name first and wins, exactly as it does for any other name.
 RETIRED_MODS = {
     "dotfiles-packages":
-        "`box-packages`, the box's system apt list, now that the shared configs "
+        "`box-packages`, the box's system package list, now that the shared configs "
         "and the packages they expect are the agent's `dotfiles` module",
     "cloudflared-tunnel":
         "`cloudflared`, which now installs the binary and runs the tunnel as a "
@@ -885,7 +885,7 @@ def build_payload(workspace: WorkspaceConfig, gc: GlobalConfig, admin_user: str)
 
     The flake travels with an attachment and not with a box, because
     home-manager describes one account's home: a box run has no account to
-    switch, and the privileged one is deliberately left on apt. Which half of
+    switch, and the privileged one is deliberately left on the distro's packages. Which half of
     the payload a playbook name lands in - a `mods/<name>.sh` the driver runs or
     a flag on a module the generation carries, or both - is resolve_playbook's
     decision.

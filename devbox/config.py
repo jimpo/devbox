@@ -90,21 +90,21 @@ USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 # What `devbox box create` names the privileged account when --user says
 # nothing. It is a fixed, generic name because that account is a fixed, generic
-# thing: the machine's rescue login (stock apt bash, unconfigured vim, no
+# thing: the machine's rescue login (stock distro bash, unconfigured vim, no
 # dotfiles, no git auth), not anybody's personal environment.
 DEFAULT_ADMIN_USER = "admin"
 
-# Usernames the agent account must never take: standard Debian/Ubuntu system
+# Usernames the agent account must never take: standard Linux system
 # accounts, the default login user of the cloud images the providers boot
-# (`ubuntu` on Ubuntu cloud images and Lightsail blueprints, `ec2-user` on
-# Amazon Linux), and DEFAULT_ADMIN_USER, which the box's own privileged account
+# (`fedora` on Fedora Cloud, `ec2-user` on Amazon Linux, `ubuntu` on the
+# Ubuntu images older boxes were made from), and DEFAULT_ADMIN_USER, which the box's own privileged account
 # holds. Taking one of these would either collide with an existing
 # sudo-capable account or fight the distro over a system uid.
 RESERVED_USERNAMES = frozenset({
     "root", "daemon", "bin", "sys", "sync", "games", "man", "lp", "mail",
     "news", "uucp", "proxy", "www-data", "backup", "list", "irc", "gnats",
     "nobody", "systemd-network", "systemd-resolve", "messagebus", "sshd",
-    "ubuntu", "admin", "ec2-user",
+    "ubuntu", "fedora", "admin", "ec2-user",
 })
 
 # The accounts an `[env]` entry can belong to. There is no "root" owner: a

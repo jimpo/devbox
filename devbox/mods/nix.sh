@@ -2,7 +2,7 @@
 #
 # /// mod
 # runas = ["root"]
-# packages = ["xz-utils"]
+# packages = ["xz"]
 # ///
 #
 # mod: nix - the nix package manager in multi-user (daemon) mode, box-wide.
@@ -14,14 +14,17 @@
 # could then neither write nor safely read. That is also why this is a box mod:
 # the store and the daemon are the machine's, not an attachment's.
 #
-# THE UPSTREAM INSTALLER, pinned by version. `https://nixos.org/nix/install`
+# FEDORA USES ITS OWN PACKAGES (`nix` + `nix-daemon`), which work under its
+# enforcing SELinux. AL2023 has no nix package, so it takes the upstream
+# installer below.
+#
+# THE UPSTREAM INSTALLER (AL2023), pinned by version. `https://nixos.org/nix/install`
 # redirects to a rolling release, so the pinned `releases.nixos.org/nix/nix-X.Y.Z`
 # URL is what makes two boxes created a month apart get the same nix - the same
 # reason the `jj` mod pins its release. The pinned script carries the SHA-256 of
 # the binary tarball it downloads and checks it, so nothing here has to. It is
-# the installer nix itself ships, and this box is plain Ubuntu with systemd,
-# which is that installer's primary target: none of the extra ground a
-# third-party installer covers (WSL, SELinux, no-systemd, macOS) applies here.
+# the installer nix itself ships; its SELinux check only aborts on Enforcing,
+# and AL2023 ships permissive.
 # Bump NIX_VERSION by hand; see https://nixos.org/download/ .
 #
 # `--yes` is what makes it unattended: the driver runs over SSH with no TTY, and
@@ -46,7 +49,7 @@
 # current environment. A workspace's own closure goes when its profile goes (an
 # explicit `nix-collect-garbage` then frees it), or when the box is recreated.
 #
-# Idempotency: the installer runs only when /nix or the daemon is missing;
+# Idempotency: the install runs only when nix or the daemon is missing;
 # nix.conf is rewritten on every run and the daemon restarted only when the
 # file's content changed.
 #
@@ -59,13 +62,21 @@ NIX_VERSION="2.35.2"
 
 # Already root (runas: root), so no privilege escalation here - a mod body has
 # none anyway.
+# Where the upstream installer puts nix (Fedora's RPM uses /usr/bin).
+export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+. /etc/os-release
+
 daemon_present() {
   systemctl is-enabled --quiet nix-daemon.socket 2>/dev/null \
     || systemctl is-active --quiet nix-daemon.service 2>/dev/null
 }
 
-if [ -x /nix/var/nix/profiles/default/bin/nix ] && daemon_present; then
-  echo "nix: /nix and nix-daemon are already present; skipping the installer"
+if command -v nix >/dev/null 2>&1 && daemon_present; then
+  echo "nix: nix and nix-daemon are already present; skipping the install"
+elif [ "$ID" = fedora ]; then
+  echo "==> installing nix from Fedora's packages"
+  dnf install -y nix nix-daemon
+  systemctl enable --now nix-daemon.socket
 elif [ -e /nix ]; then
   # A half-installed store: the installer refuses to write over an existing
   # /nix, and guessing which half is missing is worse than saying so.
@@ -92,6 +103,12 @@ build_group="${build_group:-nixbld}"
 # written here. min-free/max-free are byte counts (5 GiB / 20 GiB): the daemon
 # starts collecting when free space falls below the first and stops at the
 # second.
+extra=""
+if [ "$ID" = fedora ]; then
+  # What Fedora's nix RPM ships in its own nix.conf, lost to the rewrite.
+  extra="ssl-cert-file = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+max-jobs = auto"
+fi
 conf="$(mktemp)"
 cat > "$conf" <<EOF
 # Managed by devbox (mods/nix.sh); rewritten on every box provisioning run.
@@ -100,6 +117,7 @@ experimental-features = nix-command flakes
 trusted-users = root $DEVBOX_ADMIN_USER
 min-free = 5368709120
 max-free = 21474836480
+${extra}
 EOF
 
 if ! cmp -s "$conf" /etc/nix/nix.conf; then
@@ -110,9 +128,8 @@ if ! cmp -s "$conf" /etc/nix/nix.conf; then
 fi
 rm -f "$conf"
 
-nix_bin=/nix/var/nix/profiles/default/bin/nix
-[ -x "$nix_bin" ] || {
-  echo "nix: $nix_bin is missing after the install" >&2
+command -v nix >/dev/null 2>&1 || {
+  echo "nix: nix is not on PATH after the install" >&2
   exit 1
 }
-"$nix_bin" --version
+nix --version

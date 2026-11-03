@@ -292,9 +292,9 @@ def test_resolve_workspace_cannot_check_agent_user_against_the_box_here(
     assert devbox.resolve_workspace(tmp_path, global_config).agent_user == "alice"
 
 
-@pytest.mark.parametrize("name", ["root", "ubuntu", "ec2-user", "nobody"])
+@pytest.mark.parametrize("name", ["root", "ubuntu", "fedora", "ec2-user", "nobody"])
 def test_resolve_workspace_agent_user_reserved_dies(tmp_path, global_config, name):
-    # `ubuntu` is the cloud images' own sudo-capable default user.
+    # `fedora`/`ubuntu` are the cloud images' own sudo-capable default user.
     _write_marker(tmp_path, f'workspace = "p"\nagent_user = "{name}"\n')
     with pytest.raises(SystemExit):
         devbox.resolve_workspace(tmp_path, global_config)
@@ -766,25 +766,29 @@ def test_render_init_script_creates_the_user_before_installing_packages(pubkey):
     # SSH access must not be gated on the (slow, network-dependent) package
     # step: a failure there still leaves a reachable, debuggable box.
     rendered = devbox.render_init_script(_box(), _global_config(pubkey))
-    assert rendered.index("useradd") < rendered.index("apt-get")
-    assert rendered.index("authorized_keys") < rendered.index("apt-get")
+    assert rendered.index("useradd") < rendered.index("dnf install")
+    assert rendered.index("authorized_keys") < rendered.index("dnf install")
 
 
 def test_render_init_script_installs_the_base_packages(pubkey):
     rendered = devbox.render_init_script(_box(), _global_config(pubkey))
-    for pkg in ("zsh", "vim", "python3", "curl", "git", "git-lfs",
-                "ca-certificates", "gh", "rsync", "build-essential", "pkg-config"):
+    for pkg in ("zsh", "vim-enhanced", "python3", "git", "git-lfs",
+                "ca-certificates", "rsync", "gcc", "gcc-c++", "make",
+                "pkgconf-pkg-config"):
         assert f"\n  {pkg} " in rendered or f"\n  {pkg}\n" in rendered
-    assert 'apt-get -o DPkg::Lock::Timeout=600 install -y "${DEVBOX_PACKAGES[@]}"' in rendered
-    assert "apt-get upgrade" not in rendered  # matched the old package_upgrade: false
+    assert 'retry dnf install -y "${DEVBOX_PACKAGES[@]}"' in rendered
+    assert "dnf upgrade" not in rendered  # first boot never upgrades the distro
+    # curl-minimal is preinstalled and `dnf install curl` conflicts with it.
+    assert "\n  curl" not in rendered
 
 
-def test_render_init_script_adds_the_github_cli_repo_before_installing(pubkey):
-    # `gh` is not in the 24.04 archive (the Lightsail blueprint) and a missing
-    # package would abort first boot under `set -e`.
+def test_render_init_script_has_no_sudo_group_and_relabels_ssh(pubkey):
+    # Neither Fedora nor AL2023 has a `sudo` group (sudoers.d grants access),
+    # and a mislabelled ~/.ssh locks a box out under enforcing SELinux.
     rendered = devbox.render_init_script(_box(), _global_config(pubkey))
-    assert "https://cli.github.com/packages" in rendered
-    assert rendered.index("cli.github.com") < rendered.index("install -y")
+    assert "--groups sudo" not in rendered
+    assert "cli.github.com" not in rendered
+    assert 'restorecon -R "$DEVBOX_HOME/.ssh"' in rendered
 
 
 def test_render_init_script_wires_bash_env_through_a_shared_stub(pubkey):
@@ -853,7 +857,7 @@ def test_render_init_script_creates_a_group_of_the_accounts_name(tmp_path, pubke
 
 
 def test_render_init_script_joins_an_existing_group_of_the_accounts_name(tmp_path, pubkey):
-    # Ubuntu's cloud images ship an `admin` group, and `admin` is the default
+    # Some cloud images ship an `admin` group, and `admin` is the default
     # account name: `--user-group` refuses to create a group that exists, which
     # aborted first boot before the account (and its SSH key) existed.
     argv = _run_init_script_useradd(tmp_path, pubkey, "admin", group_exists=True)
@@ -1931,7 +1935,7 @@ def test_claude_code_installs_the_binary_that_updates_itself(isolated_mods, pubk
     # Nothing switches the auto-updater off, which is the whole point of the
     # account owning the binary.
     assert "DISABLE_AUTOUPDATER" not in _script_source("claude-code")
-    # The settings merge needs jq, which the driver apt-installs as the
+    # The settings merge needs jq, which the driver dnf-installs as the
     # privileged user before this body runs.
     assert _metadata("claude-code")["packages"] == ["jq"]
     payload = _payload_map(_workspace(), _global_config(pubkey))
@@ -2425,7 +2429,7 @@ def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
 
 def test_shipped_mods_never_call_sudo(isolated_mods):
     # A mod body runs as an account without sudo. `sudo` in a mod is a bug now:
-    # apt goes through `packages`, and real privilege through `runas = ["root"]`.
+    # packages go through `packages`, and real privilege through `runas = ["root"]`.
     specs = [*devbox.resolve_playbook(devbox.box_playbook(), None,
                                       devbox.SCOPE_BOX).specs,
              *devbox.resolve_playbook(devbox.workspace_playbook(_workspace()),
@@ -2439,18 +2443,18 @@ def test_shipped_mods_never_call_sudo(isolated_mods):
 
 
 def test_dotfiles_is_agent_only_and_the_box_playbook_stays_apt_only(isolated_mods):
-    # The privileged account gets no configenv dotfiles - it stays on stock apt
+    # The privileged account gets no configenv dotfiles - it stays on stock distro
     # bash/vim, independent of any per-account setup that could itself need
     # fixing. The shared configs are a module, and a module is one agent's
     # generation, so the box playbook consults none of it.
     box = devbox.resolve_playbook(devbox.box_playbook(), None,
                                   devbox.SCOPE_BOX)
     assert devbox.render_manifest(box.specs, devbox.SCOPE_BOX).splitlines() == [
-        # The apt list: once, as root, per box - and a `packages` column now,
+        # The package list: once, as root, per box - and a `packages` column now,
         # since the mod has no body left to do anything else in.
-        "box-packages\troot\tzsh,vim,git,curl,ca-certificates,rsync,unzip,"
-        "build-essential,pkg-config",
-        "nix\troot\txz-utils",
+        "box-packages\troot\tzsh,vim-enhanced,git,ca-certificates,rsync,unzip,"
+        "gcc,gcc-c++,make,pkgconf-pkg-config",
+        "nix\troot\txz",
     ]
     assert "dotfiles" not in devbox.BOX_BASE_MODS
     assert box.modules == []
@@ -2458,7 +2462,7 @@ def test_dotfiles_is_agent_only_and_the_box_playbook_stays_apt_only(isolated_mod
 
 def test_box_packages_is_a_list_and_nothing_else():
     # The whole mod is its `packages` entry: no clone, no install.sh, no line
-    # that is not a comment. The driver apt-installs the list itself, before
+    # that is not a comment. The driver dnf-installs the list itself, before
     # running a body that has nothing in it.
     script = devbox.BUILTIN_MODS_DIR / "box-packages.sh"
     code = [line for line in script.read_text().splitlines()
@@ -2480,8 +2484,9 @@ def test_box_packages_keeps_only_what_has_to_be_the_machines():
     # installer or a native build reaches for before any generation exists.
     packages = devbox.parse_mod_metadata(
         (devbox.BUILTIN_MODS_DIR / "box-packages.sh").read_text())["packages"]
-    assert set(packages) == {"zsh", "vim", "git", "curl", "ca-certificates",
-                             "rsync", "unzip", "build-essential", "pkg-config"}
+    assert set(packages) == {"zsh", "vim-enhanced", "git", "ca-certificates",
+                             "rsync", "unzip", "gcc", "gcc-c++", "make",
+                             "pkgconf-pkg-config"}
     # The dropped ones are the generation's now, and the privileged account is
     # deliberately unconfigured and needs none of them.
     for gone in ("emacs", "fonts-inconsolata", "tmux", "direnv", "fzf",

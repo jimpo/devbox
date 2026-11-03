@@ -142,7 +142,7 @@ def _check_name_unique(gc: GlobalConfig, name: str) -> None:
 # ---- box lifecycle --------------------------------------------------------------
 def _boot_box(box: BoxSpec, gc: GlobalConfig, provider) -> None:
     """Launch a box and run its own playbook. The box playbook needs no workspace:
-    it is the apt package set the shared configs expect plus the nix store every
+    it is the system package set the shared configs expect plus the nix store every
     attachment shares, on a machine whose privileged account is the box's
     debugging entry point."""
     _check_name_unique(gc, box.name)

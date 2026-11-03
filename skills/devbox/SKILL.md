@@ -198,7 +198,7 @@ built-in covers (`Cargo.toml` → a rust mod):
    #!/usr/bin/env bash
    #
    # /// mod
-   # packages = ["clang", "libssl-dev"]
+   # packages = ["clang", "openssl-devel"]
    # ///
    #
    set -euo pipefail
@@ -215,7 +215,7 @@ key, a bad value or a duplicate block before any boot/SSH. Don't use the old
 `# packages: jq` header lines — a fenced block is the only form devbox reads now.
 
 **A mod body has no sudo.** It runs as the workspace's unprivileged account, so
-`sudo` in a mod is a bug. Declare apt packages with `packages` (the driver
+`sudo` in a mod is a bug. Declare RPM packages with `packages` (the driver
 installs them as the privileged user beforehand), and use `runas = ["root"]` for
 the rare step that genuinely needs privilege. `runas` defaults to `["agent"]` and
 also accepts `admin`; a mod naming more than one target runs once per target.

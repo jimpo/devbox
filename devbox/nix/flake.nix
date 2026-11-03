@@ -15,10 +15,10 @@
 # and runs nix against it; that is the only way to evaluate a module without a
 # box.
 #
-# HOME-MANAGER IS AGENT-ONLY. The box's privileged account keeps its apt zsh
+# HOME-MANAGER IS AGENT-ONLY. The box's privileged account keeps its distro zsh
 # and vim, because that account is the machine's debugging entry point
 # (`devbox box ssh`) and has to work whatever state a workspace's nix
-# generation is in. The box playbook is bash + apt.
+# generation is in. The box playbook is bash + dnf.
 #
 # THE FLAKE IS REFERRED TO AS `path:`, not as a bare path: a flake that sits
 # inside a git work tree is evaluated from git and ignores untracked files, and

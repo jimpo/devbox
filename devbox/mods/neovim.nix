@@ -4,7 +4,7 @@
 #
 # THE ADMIN HAS NO nvim. Home-manager is agent-only, so `nvim` now exists in an
 # attachment's profile and nowhere else; the box's privileged account keeps the
-# apt `vim` the init script installs, which is what `devbox box ssh` uses.
+# `vim` the init script installs, which is what `devbox box ssh` uses.
 #
 # `dotfiles` OWNS ~/.config/nvim. That module links configenv's whole `nvim`
 # directory there, so `sideloadInitLua` keeps this one off the same path: the

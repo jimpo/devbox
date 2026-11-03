@@ -35,9 +35,9 @@
 # which resolves to configenv's default.nix.
 #
 # AGENT-ONLY, like the whole generation: the box's privileged account keeps
-# stock apt bash and unconfigured vim, deliberately independent of any
+# stock bash and unconfigured vim, deliberately independent of any
 # per-account setup that could itself need fixing (see flake.nix's
-# "home-manager is agent-only" note). Nothing of this is apt any more: the
+# "home-manager is agent-only" note). Nothing of this comes from the OS packages: the
 # packages the configs expect come from configenv's own module, in the agent's
 # profile, and the box's `box-packages` list holds only what has to be the
 # machine's.

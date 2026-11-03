@@ -12,7 +12,7 @@
 #
 # AGENT-SCOPED (the default runas), deliberately. The box's privileged account
 # is not managed by home-manager: it is the machine's debugging entry point
-# (`devbox box ssh`) and keeps the apt zsh/vim the init script installed, so it
+# (`devbox box ssh`) and keeps the system zsh/vim the init script installed, so it
 # works whatever state an attachment's generation is in. `nix` itself is the
 # box mod that owns /nix and the daemon; this mod only uses them, which is what
 # `requires = ["nix"]` says - satisfied across the playbook boundary, since the
@@ -69,9 +69,9 @@ flake="${DEVBOX_PAYLOAD_DIR:?home-manager mod: DEVBOX_PAYLOAD_DIR is not set}/ni
   exit 1
 }
 
-# The multi-user install puts nix here. ~/.bash_env sources the installer's
-# /etc/profile.d script, which normally has done this already; fall back so
-# this mod does not depend on that having happened.
+# Fedora's RPM puts nix in /usr/bin; the upstream multi-user install (AL2023)
+# puts it here. ~/.bash_env sources the installer's /etc/profile.d script, which
+# normally has done this already; fall back so this mod does not depend on that.
 if ! command -v nix >/dev/null 2>&1; then
   export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 fi

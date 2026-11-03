@@ -69,29 +69,27 @@ DEVBOX_PACKAGES=(
   zsh              # the agent account's login shell (the driver sets it when
                    # creating one); the privileged account stays on bash -
                    # see step 5 below
-  vim
+  vim-enhanced
   python3          # used by the `jimpo` oh-my-zsh theme's prompt_pwd
-  curl
   git
   git-lfs          # gitconfig declares the lfs clean/smudge filters
   ca-certificates
-  gh               # GitHub CLI; also git's HTTPS credential helper
   rsync            # receiver for `devbox sync` (host->box file push)
-  # The agent account has no sudo, so it cannot apt-install its way out of a
+  # The agent account has no sudo, so it cannot dnf-install its way out of a
   # missing build dependency mid-task the way the old single sudo-capable user
   # could - it takes a `packages` entry on a mod and a `devbox sync --mods`.
   # Carry the two that virtually every native build wants. Anything beyond this
   # belongs in a mod: first boot is slow enough, and it is slow for every box.
-  build-essential
-  pkg-config
+  gcc
+  gcc-c++
+  make
+  pkgconf-pkg-config
 )
-
-export DEBIAN_FRONTEND=noninteractive
 
 log() { printf 'devbox-init: %s\n' "$*"; }
 
-# Retry a network-facing command with a linear backoff. A first-boot box races
-# apt-daily/unattended-upgrades and cold mirrors; without this, one transient
+# Retry a network-facing command with a linear backoff. A first-boot box meets
+# cold mirrors; without this, one transient
 # failure would abort the whole init under `set -e`.
 retry() {
   local attempt=1 max=5
@@ -114,9 +112,9 @@ if ! id -u "$DEVBOX_USER" >/dev/null 2>&1; then
   # HOME_MODE 0750, not the distro default 0755: the unprivileged agent account
   # (created later by the driver) must not be able to read this user's home,
   # which is the side of the box that holds privilege.
-  # A group of the account's own name may already exist - Ubuntu's cloud images
-  # ship `admin`, its legacy sudo group, which is exactly the default account
-  # name - and `--user-group` refuses to create one that does. Join it instead:
+  # A group of the account's own name may already exist (some cloud images ship
+  # `admin`, a legacy sudo group, which is exactly the default account name),
+  # and `--user-group` refuses to create one that does. Join it instead:
   # this account gets passwordless sudo below anyway, so membership grants it
   # nothing new.
   if getent group "$DEVBOX_USER" >/dev/null; then
@@ -125,7 +123,7 @@ if ! id -u "$DEVBOX_USER" >/dev/null 2>&1; then
     group_opt=(--user-group)
   fi
   useradd --create-home --home-dir "$DEVBOX_HOME" "${group_opt[@]}" \
-          --key HOME_MODE=0750 --groups sudo --shell /bin/bash "$DEVBOX_USER"
+          --key HOME_MODE=0750 --shell /bin/bash "$DEVBOX_USER"
 fi
 # No password login, ever (key-only), matching the cloud image's own users.
 passwd --lock "$DEVBOX_USER" >/dev/null
@@ -141,6 +139,11 @@ chown "$DEVBOX_USER:$DEVBOX_GROUP" "$DEVBOX_HOME/.ssh/authorized_keys"
 # Idempotent: re-running must not duplicate the key.
 if ! grep -qxF "$DEVBOX_SSH_PUBKEY" "$DEVBOX_HOME/.ssh/authorized_keys"; then
   printf '%s\n' "$DEVBOX_SSH_PUBKEY" >> "$DEVBOX_HOME/.ssh/authorized_keys"
+fi
+# SELinux (enforcing on Fedora): a mislabelled .ssh locks the box out. After the
+# key is written, and non-fatal, so a relabel failure never leaves it empty.
+if command -v restorecon >/dev/null 2>&1; then
+  restorecon -R "$DEVBOX_HOME/.ssh" || log "restorecon failed"
 fi
 
 log "granting passwordless sudo"
@@ -190,23 +193,10 @@ if ! grep -qxF "$BASH_ENV_LINE" /etc/environment; then
 fi
 
 # ---- 4. base packages -------------------------------------------------------
-# `gh` is not in every Ubuntu release's archive (notably 24.04, the newest LTS
-# blueprint Lightsail offers), and a missing package would abort first boot
-# under `set -e`. The official GitHub CLI apt repo resolves it on every release
-# devbox boots. curl + ca-certificates are preinstalled on Ubuntu cloud images.
-log "adding the GitHub CLI apt repository"
-install -m 0755 -d /etc/apt/keyrings
-retry curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-  -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
-chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-printf 'deb [arch=%s signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' \
-  "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/github-cli.list
-
 # Only the baseline the mods lean on - never a full distro upgrade (first boot
 # is slow enough already; upgrading is the box owner's business).
 log "installing base packages: ${DEVBOX_PACKAGES[*]}"
-retry apt-get -o DPkg::Lock::Timeout=600 update
-retry apt-get -o DPkg::Lock::Timeout=600 install -y "${DEVBOX_PACKAGES[@]}"
+retry dnf install -y "${DEVBOX_PACKAGES[@]}"
 
 # ---- 5. login shell ---------------------------------------------------------
 # The privileged account stays on the /bin/bash step 1 created it with,

@@ -2,7 +2,7 @@
 privileged commands.
 
 The driver is bash that runs on a booted box as the privileged user, so its real
-effects (useradd, apt, dropping to another account) cannot run in a test. What
+effects (useradd, dnf, dropping to another account) cannot run in a test. What
 CAN be tested is all the logic around them: manifest parsing, the runas
 dispatch, package-install ordering, failure propagation, and the
 isolation assertions. This module puts fake `sudo`/`useradd`/`id`/`getent`/... on
@@ -14,7 +14,7 @@ exports FAKE_RUNAS, which lets a fake mod record which account the driver
 intended to run it as - the single most important thing to get right here.
 
 This is deliberately NOT a claim that the driver is verified: nothing here boots
-a box, so `useradd` flags, sudoers behavior and apt are still hand-verification
+a box, so `useradd` flags, sudoers behavior and dnf are still hand-verification
 territory (see DEVELOPMENT.md).
 """
 import os
@@ -88,8 +88,11 @@ case " $* " in *" -r "*) rm -rf "$FAKE_HOMES/$user" ;; esac
     "pkill": r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_LOG/pkill.log"
 """,
-    "apt-get": r"""#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$FAKE_LOG/apt-get.log"
+    "dnf": r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG/dnf.log"
+""",
+    "restorecon": r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_LOG/restorecon.log"
 """,
     "getent": r"""#!/usr/bin/env bash
 printf '%s:x:1000:1000::%s/%s:/bin/bash\n' "$2" "$FAKE_HOMES" "$2"
@@ -403,6 +406,14 @@ def test_preamble_refuses_when_the_agent_is_in_a_root_equivalent_group(box):
     r = b.run(FAKE_GROUPS=f"{AGENT} sudo")
     assert r.returncode != 0
     assert "root-equivalent" in r.stderr
+    assert f"sudo gpasswd -d {AGENT} sudo" in r.stderr
+
+
+def test_ensure_agent_relabels_its_ssh_dir(box):
+    b = box([_spec("jj")])
+    r = b.run("--ensure-agent", DEVBOX_SSH_PUBKEY="ssh-ed25519 AAAA test")
+    assert r.returncode == 0, r.stderr
+    assert b.log("restorecon").strip() == f"-R {b.homes / AGENT}/.ssh"
 
 
 def test_preamble_warns_about_a_stale_checkout_in_the_admin_home(box):
@@ -658,22 +669,14 @@ def test_packages_are_installed_before_the_mod_body(box):
     b = box([_spec("claude-code", packages=["jq", "unzip"])])
     r = b.run()
     assert r.returncode == 0, r.stderr
-    apt = b.log("apt-get")
-    assert "install -y jq unzip" in apt
-    assert "update" in apt                       # index refreshed first
+    assert b.log("dnf").splitlines() == ["install -y jq unzip"]
     assert r.stdout.index("installing packages") < r.stdout.index("claude-code ran as")
 
 
-def test_apt_update_runs_once_across_several_mods(box):
-    b = box([_spec("a", packages=["jq"]), _spec("b", packages=["ripgrep"])])
-    assert b.run().returncode == 0
-    assert len([l for l in b.log("apt-get").splitlines() if "update" in l]) == 1
-
-
-def test_no_apt_call_when_nothing_declares_packages(box):
+def test_no_dnf_call_when_nothing_declares_packages(box):
     b = box([_spec("jj"), _spec("vim")])
     assert b.run().returncode == 0
-    assert b.log("apt-get") == ""
+    assert b.log("dnf") == ""
 
 
 # ---- selection and failure --------------------------------------------------

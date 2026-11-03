@@ -45,14 +45,15 @@ is the only user-data all three accept: cloud-init runs it on libvirt (NoCloud
 seed) and EC2, and Lightsail runs it natively but does not understand
 `#cloud-config`. It takes a `BoxSpec`, not a workspace. As root, it:
 
-1. creates the privileged user with NOPASSWD sudo and your SSH key — first, so
-   SSH never depends on apt succeeding;
+1. creates the privileged user with NOPASSWD sudo and your SSH key (then relabels
+   `.ssh` with `restorecon` where SELinux is enforcing, non-fatally) — first, so
+   SSH never depends on dnf succeeding;
 2. sets the hostname (plus `preserve_hostname`);
 3. points `/etc/environment` at `BASH_ENV=/etc/devbox/bash_env`, a shared stub
    that sources `$HOME/.bash_env` (pam_env doesn't expand `$HOME`, and one
    system-wide path can't be per-user);
-4. installs baseline apt packages (the GitHub CLI apt repo first, since `gh`
-   isn't in every Ubuntu archive);
+4. installs the baseline RPM packages with `dnf` (no `gh`: the agent's
+   `github-auth` generation provides it);
 5. leaves the privileged account's shell as `/bin/bash`.
 
 It creates **no** workspace account: user-data runs once, so such an account
@@ -92,8 +93,8 @@ or skipped:
   ahead of `~/.local/bin`, so a stale binary from a since-converted mod can't
   shadow the generation.
 
-Then for each mod: apt-install its `packages` as the privileged user (index
-refreshed once; `DPkg::Lock::Timeout=600`), and run the body via `sudo -u` per
+Then for each mod: dnf-install its `packages` as the privileged user (dnf
+refreshes its own metadata and waits for its own lock), and run the body via `sudo -u` per
 target. Context and creds are re-sourced inside the target shell, never passed
 on `sudo`'s argv. The run stops at the first failure, naming the mod and account.
 Logs are per attachment so concurrent workspaces don't clobber each other, but
@@ -104,9 +105,10 @@ driver dropping to the agent: the payload has to be readable by that account.
 Each mod sources the `~/.config/devbox/env` of the account that owns its creds
 (the target's, or the privileged account's for a `root` mod).
 
-**Box playbook**: `box-packages` (an apt list, no body: login `zsh`, the
-privileged account's `vim`, `rsync`, build basics) and `nix`, the multi-user
-store pinned by installer version. The store is the machine's, shared by every
+**Box playbook**: `box-packages` (a package list, no body: login `zsh`, the
+privileged account's `vim-enhanced`, `rsync`, build basics) and `nix`, the multi-user
+store: Fedora's own `nix`/`nix-daemon` packages, or on Amazon Linux 2023 the
+upstream installer pinned by version. The store is the machine's, shared by every
 attachment. `trusted-users` holds only the privileged account, since a trusted
 user could push paths another workspace's agent would run. There's no GC timer;
 the daemon's `min-free`/`max-free` reclaim space under pressure.
@@ -193,7 +195,7 @@ known_hosts, truncated when that box is created.
 Homes are `0750` with a per-user group; env files are `0600`. The privileged side
 can read everything and is the trusted side. What sharing a box costs:
 
-- **One apt namespace.** A `packages` entry or root mod from one workspace changes
+- **One package namespace.** A `packages` entry or root mod from one workspace changes
   what every workspace builds against. Per-workspace toolchains belong in `$HOME`.
 - **Every attached workspace's tokens are on one machine.** A kernel escape yields
   all of them. Prefer repo-scoped PATs in a workspace's own `[env]`.
