@@ -41,7 +41,7 @@ from a wheel.
   `id`/`getent`.
 - **Sync and SSH**: rsync planning for all three anchors, `include` expansion, SSH
   alias files, `_select_repo`.
-- **Providers**: libvirt against a monkeypatched `virsh`; `Ec2Provider` and
+- **Providers**: libvirt against a monkeypatched `virsh`; `KubevirtProvider` against a monkeypatched `kubectl`; `Ec2Provider` and
   `LightsailProvider` with an injected fake `client=`; `awsauth` against a fake
   session. The exception fakes carry botocore's real class names, since the
   matcher keys on them.

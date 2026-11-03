@@ -5,11 +5,12 @@ cross-platform development and benchmarking on cloud VMs.
 
 `devbox` provides a CLI for managing these workspaces and VM instances and a declarative configuration system. Workspace configuration relies heavily on [Nix Home Manager](https://nix-community.github.io/home-manager/). This tool ships with an agent skill (`skills/devbox/`) to assist with configuration and usage.
 
-`devbox` currently supports three VM providers:
+`devbox` currently supports four VM providers:
 
 - **libvirt** (local VMs),
-- **ec2** (AWS EC2), and
-- **aws** (AWS Lightsail — flat-rate bundles, simpler than EC2).
+- **ec2** (AWS EC2),
+- **aws** (AWS Lightsail — flat-rate bundles, simpler than EC2), and
+- **kubevirt** (KubeVirt VMs on a Kubernetes cluster, named `kube-NAME`).
 
 ## Requirements
 
@@ -25,6 +26,35 @@ cross-platform development and benchmarking on cloud VMs.
   and point `gpg_key` at it).
 - **ec2** / **aws** providers (optional): AWS credentials (e.g. a named profile)
   with EC2 / Lightsail permissions, and an `[aws]` section in the global config.
+- **kubevirt** provider (optional): `kubectl` and `virtctl` on the host, the
+  scoped `devbox` kubeconfig, and a cluster with KubeVirt + CDI, nodes with
+  `/dev/kvm`, an RWO storage class and a CNI that enforces NetworkPolicy. The
+  cluster admin sets up, in the namespace (default `workspaces`), with the admin
+  kubeconfig:
+  - a **NetworkPolicy** (`podSelector: {}`) labelled `devbox/egress=enforced`:
+    egress to `0.0.0.0/0` except `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+    `100.64.0.0/10` and `169.254.0.0/16`, cluster DNS included; ingress denied
+    (`virtctl port-forward` goes through the API server). devbox refuses to
+    create a box without it, and cannot write it itself;
+  - an **`importer-dns` NetworkPolicy** letting pods labelled
+    `cdi.kubevirt.io: importer` reach CoreDNS. The importer pods download the
+    image through the namespace's public-internet egress rule above; no other
+    rule is needed;
+  - a **ServiceAccount + Role + RoleBinding `devbox`** and a kubeconfig for it,
+    namespace-scoped, with exactly what devbox calls:
+    `virtualmachines` (API group `kubevirt.io`: create/get/list/patch/delete/watch;
+    watch is for `delete --wait`), `virtualmachineinstances` (`kubevirt.io`: get),
+    `virtualmachines/portforward` (`subresources.kubevirt.io`: get), `secrets`
+    (core group `""`: create/get/patch/delete) and `networkpolicies`
+    (`networking.k8s.io`: list, **not** write). If the cluster refuses VM creation
+    for lack of DataVolume permission, add `datavolumes` (`cdi.kubevirt.io`)
+    create/get;
+  - a **ResourceQuota** capping `requests.cpu`, `requests.memory` and
+    `requests.storage`, so a runaway `box create` can't starve other services.
+
+  The base image (`image_url`, Fedora 45 Cloud) is downloaded by each box's CDI
+  importer and **is not verified** on this provider, unlike libvirt's
+  GPG-checked image.
 - [`uv`](https://docs.astral.sh/uv/).
 - `jj` and `rsync` on the host, for `devbox jj fetch` and `devbox sync --files`.
 
@@ -72,7 +102,7 @@ down.
 **Sharing one box between workspaces:**
 
 ```bash
-devbox box create dev --vcpus 8 --memory 32768    # or --provider ec2/aws
+devbox box create dev --vcpus 8 --memory 32768    # or --provider ec2/aws/kubevirt
 # in each workspace's marker:  box = "dev"
 cd ~/src/binius && devbox create                  # attaches as user `binius`
 cd ~/src/web    && devbox create                  # attaches as user `web`
@@ -167,7 +197,7 @@ An existing account with no devbox ownership record is refused; claim it with
 
 | Command | Behavior |
 |---|---|
-| `devbox box create NAME [flags]` | Launch a box (bare name for libvirt, `<provider>-NAME` for `--provider ec2\|aws`) and run the box playbook. Idempotent. Flags: `--provider --user --vcpus --memory --disk --instance-type --arch --ami --spot/--on-demand --bundle --blueprint --zone`. |
+| `devbox box create NAME [flags]` | Launch a box (bare name for libvirt, `<prefix>-NAME` for `--provider ec2\|aws\|kubevirt`) and run the box playbook. Idempotent. Flags: `--provider --user --vcpus --memory --disk --instance-type --arch --ami --spot/--on-demand --bundle --blueprint --zone`. |
 | `devbox box list [--attached]` (= `devbox list`) | All devbox boxes across providers. `--attached` adds a WORKSPACES column (one SSH per box). |
 | `devbox box up NAME` / `box stop NAME` | Start / gracefully shut down. |
 | `devbox box ssh NAME [-- args]` | SSH in as the privileged user — the box's only sudo shell. |
@@ -239,6 +269,14 @@ GITHUB_TOKEN = "github_pat_..."
 region = "us-east-1"
 profile = "dev"
 
+[kubevirt]                      # enables the kubevirt provider; every key optional
+kubeconfig = "~/.kube/devbox-homelab.yaml"   # default: kubectl's own
+context = "devbox@homelab"                   # default: kubectl's current context
+namespace = "workspaces"
+image_url = "https://dl.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2"   # downloaded per box, unverified
+# storage_class = "..."         # default: the cluster default
+# nameservers = ["1.1.1.1", "1.0.0.1"]   # public DNS; the policy blocks CoreDNS
+
 [ec2]                           # optional EC2 defaults
 default_security_groups = ["sg-..."]
 default_subnets = ["subnet-a", "subnet-b"]   # tried in order
@@ -281,14 +319,25 @@ Hardware is a `devbox box create` flag, never workspace config; devbox errors on
 devbox box create dev --vcpus 8 --memory 32768 --disk 200
 devbox box create dev --provider ec2 --instance-type g5.xlarge --arch x86_64 [--ami ami-... --spot]
 devbox box create dev --provider aws --bundle xlarge_3_0 [--blueprint amazon_linux_2023 --zone us-east-1b]
+devbox box create dev --provider kubevirt --vcpus 4 --memory 16384 --disk 100   # kube-dev
 ```
 
 Cloud box names get a provider prefix — `box create dev --provider ec2` makes
-`ec2-dev`, which is what a workspace's `box =` holds. Names are unique across
+`ec2-dev` (kubevirt's prefix is `kube-`), which is what a workspace's `box =` holds. Names are unique across
 providers.
+The `ec2-`, `aws-` and `kube-` prefixes are reserved: a libvirt box or workspace
+named `kube-*` (or `ec2-*`, `aws-*`) routes to that provider, not libvirt.
 
 **EC2** boots the newest Amazon Linux 2023 AMI for `--arch`; `--ami` pins
 another (the root volume is sized on that image's own root device).
+
+**KubeVirt (`--provider kubevirt`)** boxes are a `VirtualMachine` whose disk
+persists (`stop`/`up` keep it); `--vcpus/--memory/--disk` size it. The name must
+be a lowercase DNS label (at most 58 characters, so that the label value `kube-NAME` fits in 63). The disk is imported from
+`image_url` before first boot, so the first `box create` waits up to 15 minutes
+for an address. SSH goes through `virtctl port-forward` as a `ProxyCommand` in
+the alias file; `devbox ip` prints the cluster-internal pod IP. The Kubernetes
+objects use the bare name (`kube-dev` is VM `dev`).
 
 **Lightsail (`--provider aws`)**: a bundle fixes CPU/RAM/disk (`--disk` is
 ignored; default `xlarge_3_0`, 4 vCPU / 16 GB / 320 GB); x86 only; Amazon Linux 2023

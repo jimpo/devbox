@@ -1,14 +1,15 @@
 ---
 name: devbox
-description: devbox is a dev-sandbox VM manager for local libvirt VMs and AWS EC2 / Lightsail instances, provisioned by composable idempotent "mods". Several workspaces can share one VM, each in its own unprivileged account. Covers what it is, its command set, and how to configure a workspace (`devbox.toml` / `.devbox/config.toml`: box, repos, mods) plus the global `~/.config/devbox/config.toml`. Use when asked to set up devbox for a workspace, create/manage a dev sandbox VM, or when devbox subcommands (box create/create/ssh/sync/jj fetch/…) come up.
+description: devbox is a dev-sandbox VM manager for local libvirt VMs, AWS EC2 / Lightsail instances and KubeVirt VMs, provisioned by composable idempotent "mods". Several workspaces can share one VM, each in its own unprivileged account. Covers what it is, its command set, and how to configure a workspace (`devbox.toml` / `.devbox/config.toml`: box, repos, mods) plus the global `~/.config/devbox/config.toml`. Use when asked to set up devbox for a workspace, create/manage a dev sandbox VM, or when devbox subcommands (box create/create/ssh/sync/jj fetch/…) come up.
 allowed-tools: Bash(devbox *), Bash(jj *), Bash(git *), Bash(gh *), Read, Write, Edit, AskUserQuestion
 ---
 
 # devbox
 
-A dev-sandbox VM manager for three providers — **libvirt** (local
-VMs), **ec2** (AWS EC2), and **aws** (AWS Lightsail — flat-rate bundles, no
-security groups to configure). All boxes share one cached base image, and every
+A dev-sandbox VM manager for four providers — **libvirt** (local
+VMs), **ec2** (AWS EC2), **aws** (AWS Lightsail — flat-rate bundles, no
+security groups to configure), and **kubevirt** (`kube-NAME` VMs on a
+Kubernetes cluster). Every
 workspace gets the same base
 playbook of idempotent provisioning **mods** (jj, dotfiles, Claude Code, GitHub
 auth, repo bootstrap) that devbox owns, adding only what's different
@@ -79,6 +80,8 @@ bare name to `box create`.
   **both** the `ec2` and `aws` (Lightsail) providers. `[ec2]` (optional
   `default_security_groups`, `default_subnets`, `spot`) holds the EC2-specific
   defaults. Omit all of it for a libvirt-only host.
+- `[kubevirt]` (all optional: `kubeconfig`, `context`, `namespace` = `workspaces`,
+  `image_url`, `storage_class`, `nameservers`) — enables the `kubevirt` provider.
 - `[defaults]` (vcpus/memory_mib/disk_gb — what `box create` falls back to),
   `[ssh] pubkey_path`, `[base_image] url` — all defaulted.
 
@@ -100,6 +103,14 @@ devbox box create dev --provider aws --bundle xlarge_3_0 [--blueprint amazon_lin
   static IP — `devbox ip`/`ssh` re-resolve it, so it may change across
   `stop`/`up`); **port 22 is open by default** (no security groups); and
   `--spot`/`--on-demand` are EC2-only and do nothing here.
+- **KubeVirt (`--provider kubevirt`) specifics:** `box create dev --provider
+  kubevirt` makes `kube-dev` (the name must be a lowercase DNS label). `--vcpus`,
+  `--memory` and `--disk` apply. The cluster admin owns the namespace,
+  NetworkPolicy, RBAC and quota; devbox needs the `devbox/egress=enforced`
+  NetworkPolicy to exist and refuses to create otherwise. SSH goes through a
+  `virtctl port-forward` ProxyCommand in the alias file; `devbox ip` prints the
+  cluster-internal pod IP. The base image is downloaded per box and **not
+  verified**. The first boot waits for that download (up to 15 minutes).
 - Recreating a destroyed box means retyping the flags. Accepted trade-off.
 
 ### Per-workspace — the marker file (**not committed**)

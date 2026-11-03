@@ -24,10 +24,24 @@ machine's generic rescue login, not a person's. `admin` stays in
 `agent_user` is validated against `USERNAME_RE`/`RESERVED_USERNAMES` at config
 load; "differs from the box's privileged account" can only be checked at attach.
 
-**Names route to providers.** A canonical box name is `<provider>-<name>` for
-cloud providers and bare for libvirt, so every command finds the backend by
+**Names route to providers.** A canonical box name is `<prefix>-<name>` for
+cloud providers (`PROVIDER_PREFIXES`: `ec2`, `aws`, and `kube` for kubevirt) and
+bare for libvirt (so the prefixes are reserved: a libvirt box or workspace named
+`kube-*` routes to kubevirt), so every command finds the backend by
 parsing the name, with no API call. The AWS-side name drops the redundant prefix;
 the `devbox:name` tag keeps the canonical one.
+
+**KubeVirt: cluster admin vs devbox.** The admin sets up the namespace, a
+namespace-wide egress NetworkPolicy (labelled `devbox/egress=enforced`), a
+ServiceAccount/Role/kubeconfig scoped to the namespace, a ResourceQuota, and a
+NetworkPolicy letting CDI importer pods reach CoreDNS. Devbox creates and
+destroys only per-box objects: the VM, its DataVolume and the user-data Secret
+(owned by the VM, so deleted with it). Its credential deliberately has no write
+access to NetworkPolicies: if it could, a devbox bug, or an agent that got hold
+of the kubeconfig, could lift the egress restriction on every box. So `create`
+only checks the policy exists and fails closed. The Kubernetes names use the
+bare name (`kube-dev` is VM `dev`); the `devbox/name` label carries the
+canonical one and every lookup goes through it.
 
 **Two marker spellings, one `Marker`.** `find_workspace` returns the root, config
 path, mods dir and the `root_is_repo` bit together, so no caller re-derives
@@ -239,11 +253,15 @@ discard paths the box's other workspaces are about to reuse.
   skeleton.
 - `sync.py` — `run_sync` and `run_envvars`.
 - `providers/` — the backend seam. `base.py` (`Provider`, `InstanceSpec`,
-  `Instance`); `libvirt.py`, `ec2.py`, `lightsail.py` (the `aws` provider). Only
+  `Instance`); `libvirt.py`, `ec2.py`, `lightsail.py` (the `aws` provider), `kubevirt.py`
+  (`kubectl` subprocesses, monkeypatched in tests like `virsh`). Only
   `create`/`start`/`stop`/`destroy`/`state`/`address`/`list` are per-backend;
   everything above is shared. `awsauth.py`'s `make_client` checks credentials
   before the first API call and offers `aws sso login`. `AWS_PROVIDERS` are used
-  only when `[aws]` is configured.
+  only when `[aws]` is configured; `kubevirt` only when `[kubevirt]` is.
+  `Provider.ssh_proxy` (default None) lets a provider supply a `ProxyCommand`;
+  the alias files then also get `HostKeyAlias <box>`, since the pod IP changes
+  on every restart.
 - `cli.py` — argparse and handlers. `cmd_box_*` act on a machine by name;
   everything else on this workspace's account. `_run` turns AWS auth failures
   into one-line errors; `_list_boxes` reports an unreachable provider as a
