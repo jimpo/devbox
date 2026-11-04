@@ -37,17 +37,6 @@
 #   curl -s https://api.github.com/repos/NixOS/nixpkgs/branches/nixos-26.05
 #   curl -s https://api.github.com/repos/nix-community/home-manager/branches/release-26.05
 #
-# `nixpkgs-unstable` is a SECOND nixpkgs pin, bumped independently of that
-# pair:
-#
-#   curl -s https://api.github.com/repos/NixOS/nixpkgs/branches/nixos-unstable
-#
-# It exists for `cloudflared` alone: pinned for a newer cloudflared than
-# 26.05's (2026.5.2) as a security fix. Bump the unstable rev when a fixed
-# version lands there. Drop it once 26.05 carries the fixed version: delete the
-# input, the `pkgs-unstable` specialArg, and revert `mods/cloudflared.nix` to
-# `pkgs.cloudflared`. `home-manager` keeps following the stable `nixpkgs`.
-#
 # `mods/home-manager.sh` pins its `nix run` of the home-manager CLI to the same
 # rev as the input below; bump both together.
 #
@@ -180,9 +169,7 @@
   description = "devbox agent home environment";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/5dfba6236110080a54247d6460bc2ff5dda939cc";
-    # Commit-pinned, for cloudflared only (see the header).
-    nixpkgs-unstable.url = "github:NixOS/nixpkgs/31ecbaca1bdefa45dffc409f0250bd8039ea0010";
+    nixpkgs.url = "github:NixOS/nixpkgs/7dcdd87373d72e7a2173e4db02e20d3d7f495cfd";
     home-manager = {
       url = "github:nix-community/home-manager/65258d5c65a250189fde2e35f490d15e064c4c62";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -200,7 +187,7 @@
     };
   };
 
-  outputs = { nixpkgs, nixpkgs-unstable, home-manager, configenv, ... }:
+  outputs = { nixpkgs, home-manager, configenv, ... }:
     let
       inherit (nixpkgs) lib;
 
@@ -226,12 +213,9 @@
       mkAgent = system: home-manager.lib.homeManagerConfiguration {
         pkgs = nixpkgs.legacyPackages.${system};
         # A module reaches an input through its own argument list. `configenv`
-        # is a module a mod imports; `pkgs-unstable` is the pinned unstable
-        # package set, for the one package that needs it (cloudflared).
-        extraSpecialArgs = {
-          inherit configenv;
-          pkgs-unstable = nixpkgs-unstable.legacyPackages.${system};
-        };
+        # is the only one worth handing over: it is a module a mod imports,
+        # not a package set.
+        extraSpecialArgs = { inherit configenv; };
         modules = [
           # The option surface, and the rendered workspace values.
           ./options.nix

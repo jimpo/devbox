@@ -171,8 +171,7 @@ nix sees, so it can't be evaluated in place (`devbox nix check` assembles one).
   shipped module**: true when this attachment's playbook names it, false otherwise
   (a missing attribute is an evaluation error, not a false). Strings are escaped
   for nix.
-- nixpkgs and home-manager are pinned to exact revs; `nixpkgs-unstable` is a
-  separate pin used only for `cloudflared`. `configenv` (dotfiles) is a
+- nixpkgs and home-manager are pinned to exact revs. `configenv` (dotfiles) is a
   **non-flake** input on a rolling branch, so there is **no `flake.lock`**: a lock
   would freeze configenv, and the exact revs make nix's on-box lock deterministic
   for the rest. `home-manager.sh` passes `--refresh` to re-resolve the branch.
