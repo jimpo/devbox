@@ -275,7 +275,6 @@ context = "devbox@homelab"                   # default: kubectl's current contex
 namespace = "workspaces"
 image_url = "https://dl.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2"   # downloaded per box, unverified
 # storage_class = "..."         # default: the cluster default
-# nameservers = ["1.1.1.1", "1.0.0.1"]   # public DNS; the policy blocks CoreDNS
 
 [ec2]                           # optional EC2 defaults
 default_security_groups = ["sg-..."]

@@ -166,8 +166,6 @@ DEFAULT_KUBEVIRT_NAMESPACE = "workspaces"
 DEFAULT_KUBEVIRT_IMAGE_URL = (
     "https://dl.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/x86_64/images/"
     "Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2")
-# Public DNS: the admin's NetworkPolicy blocks the cluster's own resolver.
-DEFAULT_KUBEVIRT_NAMESERVERS = ("1.1.1.1", "1.0.0.1")
 # An RFC 1123 label: the Kubernetes VM name, and the base of the `-userdata` Secret.
 KUBE_NAME_RE = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
 # The `devbox/name` label value is `kube-<bare>`, and label values stop at 63.
@@ -243,8 +241,6 @@ class KubevirtConfig:
     namespace: str = DEFAULT_KUBEVIRT_NAMESPACE
     image_url: str = DEFAULT_KUBEVIRT_IMAGE_URL       # CDI imports it per box
     storage_class: Optional[str] = None               # None: the cluster default
-    nameservers: list = dataclasses.field(
-        default_factory=lambda: list(DEFAULT_KUBEVIRT_NAMESERVERS))
 
 
 @dataclasses.dataclass
@@ -298,7 +294,7 @@ class GlobalConfig:
                 "env": _ANY_KEYS,  # arbitrary user-defined credentials/vars
                 "aws": {"region", "profile"},
                 "kubevirt": {"kubeconfig", "context", "namespace", "image_url",
-                             "storage_class", "nameservers"},
+                             "storage_class"},
                 "ec2": {"default_security_groups", "default_subnets", "spot"},
                 "sync": _ANY_KEYS,  # array-of-tables, validated by _parse_sync_entry
             },
@@ -421,18 +417,12 @@ def _load_aws_config(aws_data: Optional[dict], path: Path) -> Optional[AwsConfig
 def _load_kubevirt_config(data: Optional[dict], path: Path) -> Optional[KubevirtConfig]:
     if data is None:
         return None
-    ns = data.get("nameservers")
-    if ns is not None and not (isinstance(ns, list) and all(isinstance(n, str) for n in ns)):
-        die(f"{path}: [kubevirt] nameservers must be a list of addresses")
-    if ns == []:
-        die(f"{path}: [kubevirt] nameservers must not be empty (dnsPolicy None needs one)")
     return KubevirtConfig(
         kubeconfig=data.get("kubeconfig"),
         context=data.get("context"),
         namespace=data.get("namespace", DEFAULT_KUBEVIRT_NAMESPACE),
         image_url=data.get("image_url", DEFAULT_KUBEVIRT_IMAGE_URL),
         storage_class=data.get("storage_class"),
-        **({"nameservers": ns} if ns is not None else {}),
     )
 
 

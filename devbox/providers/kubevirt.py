@@ -93,8 +93,6 @@ def build_vm(cfg: KubevirtConfig, spec: InstanceSpec) -> dict:
                     },
                 },
                 "networks": [{"name": "default", "pod": {}}],
-                "dnsPolicy": "None",
-                "dnsConfig": {"nameservers": list(cfg.nameservers)},
                 "volumes": [
                     {"name": "root", "dataVolume": {"name": f"{bare}-root"}},
                     {"name": "cloudinit", "cloudInitNoCloud": {

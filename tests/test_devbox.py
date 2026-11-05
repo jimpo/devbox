@@ -3826,20 +3826,12 @@ def test_global_config_kubevirt_defaults_and_overrides(tmp_path):
     k = devbox.GlobalConfig.load(path).kubevirt
     assert (k.kubeconfig, k.context, k.storage_class) == (None, None, None)
     assert (k.namespace, k.image_url) == ("workspaces", devbox.config.DEFAULT_KUBEVIRT_IMAGE_URL)
-    assert k.nameservers == ["1.1.1.1", "1.0.0.1"]
     path.write_text('[kubevirt]\nkubeconfig = "~/k.yaml"\ncontext = "c"\n'
                     'namespace = "ws"\nimage_url = "https://example.com/f46.qcow2"\n'
-                    'storage_class = "fast"\nnameservers = ["9.9.9.9"]\n')
+                    'storage_class = "fast"\n')
     k = devbox.GlobalConfig.load(path).kubevirt
-    assert (k.kubeconfig, k.context, k.namespace, k.image_url, k.storage_class,
-            k.nameservers) == ("~/k.yaml", "c", "ws", "https://example.com/f46.qcow2", "fast", ["9.9.9.9"])
-
-
-def test_global_config_rejects_empty_kubevirt_nameservers(tmp_path):
-    cfg = tmp_path / "config.toml"
-    cfg.write_text("[kubevirt]\nnameservers = []\n")
-    with pytest.raises(SystemExit):
-        devbox.GlobalConfig.load(cfg)
+    assert (k.kubeconfig, k.context, k.namespace, k.image_url, k.storage_class
+            ) == ("~/k.yaml", "c", "ws", "https://example.com/f46.qcow2", "fast")
 
 
 def test_resolve_box_spec_composes_the_kube_name(global_config):
@@ -5100,8 +5092,7 @@ def test_kubevirt_create_manifests(monkeypatch):
     assert "resources" not in tpl["domain"]
     assert tpl["domain"]["devices"]["interfaces"] == [{"name": "default", "masquerade": {}}]
     assert tpl["networks"] == [{"name": "default", "pod": {}}]
-    assert tpl["dnsPolicy"] == "None"
-    assert tpl["dnsConfig"] == {"nameservers": ["1.1.1.1", "1.0.0.1"]}
+    assert "dnsPolicy" not in tpl
     assert {"name": "cloudinit", "cloudInitNoCloud": {
         "secretRef": {"name": "dev-userdata"}}} in tpl["volumes"]
 
@@ -5115,12 +5106,11 @@ def test_kubevirt_create_manifests(monkeypatch):
 
 
 def test_kubevirt_storage_class_only_when_configured():
-    gc = _kube_gc(storage_class="fast", nameservers=["9.9.9.9"], image_url="https://example.com/f46.qcow2")
+    gc = _kube_gc(storage_class="fast", image_url="https://example.com/f46.qcow2")
     vm = devbox.providers.kubevirt.build_vm(gc.kubevirt, _kube_spec())
     dv = vm["spec"]["dataVolumeTemplates"][0]["spec"]
     assert dv["storage"]["storageClassName"] == "fast"
     assert dv["source"]["http"]["url"] == "https://example.com/f46.qcow2"
-    assert vm["spec"]["template"]["spec"]["dnsConfig"]["nameservers"] == ["9.9.9.9"]
 
 
 def test_kubevirt_create_needs_the_egress_policy(monkeypatch):

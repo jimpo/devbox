@@ -81,7 +81,7 @@ bare name to `box create`.
   `default_security_groups`, `default_subnets`, `spot`) holds the EC2-specific
   defaults. Omit all of it for a libvirt-only host.
 - `[kubevirt]` (all optional: `kubeconfig`, `context`, `namespace` = `workspaces`,
-  `image_url`, `storage_class`, `nameservers`) — enables the `kubevirt` provider.
+  `image_url`, `storage_class`) — enables the `kubevirt` provider.
 - `[defaults]` (vcpus/memory_mib/disk_gb — what `box create` falls back to),
   `[ssh] pubkey_path`, `[base_image] url` — all defaulted.
 
