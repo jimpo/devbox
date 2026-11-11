@@ -5,10 +5,8 @@
 # ///
 #
 # mod: home-manager - switch this account to the generation the payload's flake
-# describes. The agent's declarative half: everything a converted mod used to
-# install imperatively is a `<name>.nix` beside the scripts instead, which
-# devbox assembles into the payload's flake, and one `home-manager switch`
-# reconciles the whole set.
+# describes: the workspace's default.nix and what it imports, assembled by
+# devbox into the payload's flake. One `home-manager switch` reconciles it.
 #
 # AGENT-SCOPED (the default runas), deliberately. The box's privileged account
 # is not managed by home-manager: it is the machine's debugging entry point

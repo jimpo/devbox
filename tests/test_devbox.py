@@ -939,8 +939,9 @@ def test_render_init_script_prefix_up_to_the_guard_is_posix_sh(pubkey, tmp_path)
 @pytest.fixture
 def isolated_mods(monkeypatch):
     # Resolve mods against the real built-ins + driver, but keep a developer's
-    # own ~/.config/devbox/mods - which holds both halves - out of the test.
+    # own ~/.config/devbox/{mods,modules} out of the test.
     monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR", devbox.Path("/nonexistent-global-mods"))
+    monkeypatch.setattr(devbox.provision, "GLOBAL_MODULES_DIR", devbox.Path("/nonexistent-global-modules"))
 
 
 def _payload_map(workspace, gc, admin_user="alice"):
@@ -948,12 +949,8 @@ def _payload_map(workspace, gc, admin_user="alice"):
 
 
 def _bash_base_mods():
-    """The bash half of the workspace base playbook, in playbook order: the
-    names the driver still runs, and so the manifest lines a plain attachment
-    has. A converted mod keeps its place in WORKSPACE_BASE_MODS and the
-    generation provides it, so it has no line."""
-    return [n for n in devbox.WORKSPACE_BASE_MODS
-            if devbox.find_mod_script(n, None) is not None]
+    """The workspace base playbook, every name of which is a script."""
+    return list(devbox.WORKSPACE_BASE_MODS)
 
 
 def test_build_payload_has_driver_manifest_context_and_mods(isolated_mods, pubkey):
@@ -1068,7 +1065,7 @@ def _nix_context(agent="agentbot", jj_name="Alice Example",
 def test_render_workspace_nix_is_an_attribute_set_of_this_attachments_values():
     # The same job render_manifest does for the driver: the shipped flake is
     # static, and this one rendered file is what makes it this attachment's.
-    rendered = devbox.render_workspace_nix(_nix_context(), {"jj": True})
+    rendered = devbox.render_workspace_nix(_nix_context())
     assert 'agentUser = "agentbot";' in rendered
     # The account's home, which is where every mod and every sync rule lands.
     assert 'homeDirectory = "/home/agentbot";' in rendered
@@ -1082,63 +1079,25 @@ def test_render_workspace_nix_escapes_strings():
     # Nix's own escapes, not shell's: a value with a quote, a backslash or an
     # antiquotation in it has to survive as itself instead of becoming syntax.
     rendered = devbox.render_workspace_nix(
-        _nix_context(jj_name=r'A "B" \ ${C}', jj_email="a\tb\nc"), {})
+        _nix_context(jj_name=r'A "B" \ ${C}', jj_email="a\tb\nc"))
     assert r'jjName = "A \"B\" \\ \${C}";' in rendered
     assert r'jjEmail = "a\tb\nc";' in rendered
 
 
-def test_nix_string_and_attr_name_quote_only_what_nix_needs():
+def test_nix_string_quotes_plainly():
     assert devbox.nix_string("plain") == '"plain"'
-    # Nix identifiers admit '-', so every mod name devbox ships reads bare.
-    assert devbox.nix_attr_name("repo-bootstrap") == "repo-bootstrap"
-    # A keyword or anything else is quoted rather than left to be a parse error.
-    assert devbox.nix_attr_name("with") == '"with"'
-    assert devbox.nix_attr_name("2fa") == '"2fa"'
-    assert devbox.nix_attr_name("a b") == '"a b"'
-
-
-def test_render_workspace_nix_renders_a_flag_for_every_shipped_module():
-    # Filenames do not translate to the module system; options do. EVERY module
-    # the flake ships gets a flag, true or false, so a module can read its own
-    # `config.devbox.mods.<name>.enable` without the attribute being missing -
-    # which in nix is an evaluation error, not a false.
-    rendered = devbox.render_workspace_nix(
-        _nix_context(), {"jj": True, "repo-bootstrap": False, "uv": True})
-    assert "  mods = {\n" in rendered
-    # Alphabetical, since an attribute set is unordered and a rendered file
-    # should diff cleanly.
-    assert ("  mods = {\n"
-            "    jj.enable = true;\n"
-            "    repo-bootstrap.enable = false;\n"
-            "    uv.enable = true;\n"
-            "  };\n") in rendered
-
-
-def test_render_workspace_nix_empty_mods_is_still_an_attribute_set():
-    assert "mods = { };" in devbox.render_workspace_nix(_nix_context(), {})
 
 
 def test_build_payload_ships_the_flake_next_to_the_mods(isolated_mods, pubkey):
     payload = _payload_map(_workspace(), _global_config(pubkey))
-    assert payload["nix/flake.nix"].content == \
-        (devbox.NIX_DIR / "flake.nix").read_text()
-    assert payload["nix/options.nix"].content == \
-        (devbox.NIX_DIR / "options.nix").read_text()
-    # Every shipped .nix file travels, so adding a module is one new file and no
-    # second place to register it.
-    for path in devbox.NIX_DIR.rglob("*.nix"):
-        rel = path.relative_to(devbox.NIX_DIR).as_posix()
-        assert f"nix/{rel}" in payload
-    for name in devbox.nix_module_names():
-        assert f"nix/modules/{name}.nix" in payload
-    # ... and the one rendered file, carrying this attachment's values.
-    workspace_nix = payload["nix/workspace.nix"].content
-    assert 'agentUser = "agentbot";' in workspace_nix
-    # A bash mod is not a module: it runs from the manifest and gets no flag.
-    for name in devbox.WORKSPACE_BASE_MODS:
-        if name not in devbox.nix_module_names():
-            assert f"\n    {devbox.nix_attr_name(name)}.enable = " \
-                not in workspace_nix
+    for name in ("flake.nix", "options.nix", "zshenv.nix"):
+        assert payload[f"nix/{name}"].content == (devbox.NIX_DIR / name).read_text()
+    for path in devbox.BUILTIN_MODULES_DIR.glob("*.nix"):
+        assert f"nix/devbox-modules/{path.name}" in payload
+    assert 'agentUser = "agentbot";' in payload["nix/workspace.nix"].content
+    assert "checkAll = false;" in payload["nix/workspace.nix"].content
+    # No default.nix beside the config: the flake falls back to the base profile.
+    assert not any(p.startswith("nix/workspace/") for p in payload)
 
 
 def test_build_box_payload_ships_no_flake(isolated_mods, pubkey):
@@ -1149,300 +1108,107 @@ def test_build_box_payload_ships_no_flake(isolated_mods, pubkey):
     assert not any(p.startswith("nix/") for p in payload)
 
 
+def test_neovim_is_in_the_base_profile_and_carries_the_tree_sitter_cli():
+    assert "./neovim.nix" in (devbox.BUILTIN_MODULES_DIR / "default.nix").read_text()
+    assert devbox.find_mod_script("neovim", None) is None
+    module = (devbox.BUILTIN_MODULES_DIR / "neovim.nix").read_text()
+    assert "programs.neovim" in module
+    assert "pkgs.tree-sitter" in module
+    # `dotfiles` owns ~/.config/nvim, so the generation must not claim init.lua.
+    assert "sideloadInitLua = true;" in module
+
+
 def test_home_manager_is_an_agent_mod_that_needs_the_boxs_nix(isolated_mods):
-    # The declarative half of an attachment: agent-scoped (the box's privileged
-    # account is deliberately left on apt), and it uses the store the box mod
-    # owns - a dependency satisfied across the playbook boundary.
-    assert "home-manager" in devbox.WORKSPACE_BASE_MODS
+    assert devbox.WORKSPACE_BASE_MODS[0] == "home-manager"
     assert "home-manager" not in devbox.BOX_BASE_MODS
-    spec = {s.name: s for s in
-            devbox.resolve_playbook(devbox.workspace_playbook(_workspace()),
-                                    None).specs}["home-manager"]
+    spec = {s.name: s for s in devbox.load_mod_specs(
+        devbox.workspace_playbook(_workspace()), None)}["home-manager"]
     assert spec.runas == ["agent"]
     assert spec.requires == ["nix"]
     text = spec.path.read_text()
     # `path:` and not a bare path: a flake in a git work tree ignores untracked
     # files, and the payload is not a repo.
     assert 'path:$flake#agent-$system' in text
-    # The switch writes nothing into the payload, which belongs to the
-    # privileged account: the flake's pins already make resolution
-    # deterministic, so there is no lock file to record. It is home-manager's
-    # flag, so it follows the `--`, not `nix run`.
-    switch = [line for line in text.splitlines()
-              if line.startswith("nix run ")][0]
+    # home-manager's flag, so it follows the `--`, not `nix run`.
+    switch = [line for line in text.splitlines() if line.startswith("nix run ")][0]
     assert switch.index(" -- ") < switch.index("--no-write-lock-file")
 
 
-def test_neovim_is_the_agents_and_carries_the_tree_sitter_cli(isolated_mods,
-                                                              pubkey):
-    # nvim comes from the generation, so it exists in an attachment's profile
-    # and nowhere else: the box playbook installs no editor but the apt `vim`,
-    # and the tree-sitter CLI the nvim config builds parsers with rides in the
-    # same module rather than in a root mod writing /usr/local.
-    assert "neovim" in devbox.WORKSPACE_BASE_MODS
-    assert "neovim" in devbox.nix_module_names()
-    assert devbox.find_mod_script("neovim", None) is None
-    assert "tree-sitter-cli" not in devbox.box_playbook()
-    assert "tree-sitter-cli" not in devbox.WORKSPACE_BASE_MODS
-    assert devbox.find_mod_script("tree-sitter-cli", None) is None
-    module = (devbox.BUILTIN_MODS_DIR / "neovim.nix").read_text()
-    assert "programs.neovim" in module
-    assert "pkgs.tree-sitter" in module
-    # `dotfiles` owns ~/.config/nvim, so the generation must not claim
-    # init.lua: it sideloads its own lua through a wrapper argument instead.
-    assert "sideloadInitLua = true;" in module
-    payload = _payload_map(_workspace(), _global_config(pubkey))
-    assert "mods/neovim.sh" not in payload
-    assert "neovim.enable = true;" in payload["nix/workspace.nix"].content
-
-
-# ---- resolution: a playbook name is a bash script OR a nix module -----------
-@pytest.fixture
-def converted(tmp_path, monkeypatch):
-    """Convert mods the way a conversion ticket does: in a copy of the built-in
-    mods directory, delete each one's `<name>.sh` and write a `<name>.nix`
-    beside where it was, leaving the playbook lists untouched. One directory,
-    because that is where both halves of a built-in live."""
-    def convert(*names):
-        mods = tmp_path / "builtin-mods"
-        devbox.shutil.copytree(devbox.BUILTIN_MODS_DIR, mods)
-        for name in names:
-            (mods / f"{name}.sh").unlink(missing_ok=True)
-            (mods / f"{name}.nix").write_text("{ }\n")
-        monkeypatch.setattr(devbox.provision, "BUILTIN_MODS_DIR", mods)
-        monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR",
-                            devbox.Path("/nonexistent-global-mods"))
-        return mods
-    return convert
-
-
-def test_a_converted_base_mod_resolves_to_the_generation(converted, pubkey):
-    # The conversion ticket's end state for a mod in WORKSPACE_BASE_MODS: the
-    # name stays in the playbook and resolves to the module instead.
-    converted("jj")
-    playbook = devbox.resolve_playbook(
-        devbox.workspace_playbook(_workspace()), None)
-    assert "jj" in playbook.modules
-    # No ModSpec and no manifest line: the driver never hears about it.
-    assert "jj" not in [s.name for s in playbook.specs]
-    payload = _payload_map(_workspace(), _global_config(pubkey))
-    assert "mods/jj.sh" not in payload
-    assert "jj" not in [line.split("\t")[0]
-                        for line in payload["manifest"].content.splitlines()]
-    # The generation provides it, and the module that does ships and is on.
-    assert payload["nix/modules/jj.nix"].content == "{ }\n"
-    assert "jj.enable = true;" in payload["nix/workspace.nix"].content
-
-
-def test_a_converted_mod_still_satisfies_a_requires(converted):
-    # `repo-bootstrap` requires jj. A module is not a step in the run, so it
-    # satisfies the dependency wherever it sits - the generation carrying it is
-    # switched by `home-manager`, first in the base playbook.
-    converted("jj")
-    devbox.validate_playbooks(_workspace())
-
-
-def test_a_converted_opt_in_mod_keeps_a_workspaces_config_working(converted, pubkey,
-                                                                 tmp_path):
-    # `claude-linear-mcp` is not in either base list, so a workspace names it in
-    # its own `mods`. A conversion leaves that config untouched: the name
-    # resolves to the generation instead of to a script.
-    converted("claude-linear-mcp")
+# ---- the workspace's default.nix and the global modules directory ----------
+def test_a_workspace_default_nix_ships_with_its_sibling_nix_files_only(
+        isolated_mods, pubkey, tmp_path):
     marker_dir = tmp_path / "ws"
-    marker_dir.mkdir()
-    workspace = _workspace(marker_dir=marker_dir, mods=["claude-linear-mcp"])
-    assert "claude-linear-mcp" in devbox.resolve_playbook(
-        devbox.workspace_playbook(workspace),
-        workspace.marker.mods_dir).modules
-    payload = _payload_map(workspace, _global_config(pubkey))
-    assert "mods/claude-linear-mcp.sh" not in payload
-    assert "claude-linear-mcp.enable = true;" in payload["nix/workspace.nix"].content
+    devbox_dir = marker_dir / ".devbox"
+    devbox_dir.mkdir(parents=True)
+    (devbox_dir / "default.nix").write_text("{ ... }: { imports = [ ./extra.nix ]; }\n")
+    (devbox_dir / "extra.nix").write_text("{ ... }: { }\n")
+    (devbox_dir / "secrets.env").write_text("TOKEN=s3cret\n")
+    payload = _payload_map(_workspace(marker_dir=marker_dir), _global_config(pubkey))
+    assert sorted(p for p in payload if p.startswith("nix/workspace/")) == [
+        "nix/workspace/default.nix", "nix/workspace/extra.nix"]
+    assert not any("s3cret" in pf.content for pf in payload.values())
 
 
-def test_a_module_the_playbook_never_names_is_shipped_but_off(converted, pubkey,
+def test_a_devbox_toml_workspace_default_nix_sits_at_the_root(isolated_mods, pubkey,
                                                               tmp_path):
-    # Every module gets a flag whether or not this workspace asked for it: a
-    # missing attribute is an evaluation error in nix, not a false.
-    converted("claude-linear-mcp")
+    (tmp_path / "default.nix").write_text("{ ... }: { }\n")
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "frontend" / "flake.nix").write_text("{ }\n")   # a repo's, not ours
+    payload = _payload_map(_workspace(marker_dir=tmp_path, root_is_repo=False),
+                           _global_config(pubkey))
+    assert sorted(p for p in payload if p.startswith("nix/workspace/")) == [
+        "nix/workspace/default.nix"]
+
+
+def test_without_a_default_nix_siblings_do_not_ship(isolated_mods, pubkey, tmp_path):
+    (tmp_path / "stray.nix").write_text("{ }\n")
+    payload = _payload_map(_workspace(marker_dir=tmp_path, root_is_repo=False),
+                           _global_config(pubkey))
+    assert not any(p.startswith("nix/workspace/") for p in payload)
+
+
+def test_the_global_modules_directory_ships_whole(monkeypatch, isolated_mods,
+                                                  pubkey, tmp_path):
+    global_modules = tmp_path / "modules"
+    (global_modules / "rust").mkdir(parents=True)
+    (global_modules / "rust" / "default.nix").write_text("{ ... }: { }\n")
+    (global_modules / "rust" / "cargo.toml").write_text("[x]\n")
+    (global_modules / "sccache.nix").write_text("{ ... }: { }\n")
+    monkeypatch.setattr(devbox.provision, "GLOBAL_MODULES_DIR", global_modules)
     payload = _payload_map(_workspace(), _global_config(pubkey))
-    assert "nix/modules/claude-linear-mcp.nix" in payload
-    assert "claude-linear-mcp.enable = false;" in payload["nix/workspace.nix"].content
+    assert sorted(p for p in payload if p.startswith("nix/my-modules/")) == [
+        "nix/my-modules/rust/cargo.toml", "nix/my-modules/rust/default.nix",
+        "nix/my-modules/sccache.nix"]
 
 
-def test_a_workspace_script_runs_beside_a_converted_module(converted, pubkey,
-                                                           tmp_path):
-    # A script does not shadow a module. A workspace that ships its own jj.sh
-    # gets that script as a step in the run AND the built-in jj module in the
-    # generation: each half resolves on its own.
-    converted("jj")
-    marker_dir = tmp_path / "ws"
-    (marker_dir / ".devbox" / "mods").mkdir(parents=True)
-    (marker_dir / ".devbox" / "mods" / "jj.sh").write_text(
-        "#!/usr/bin/env bash\necho my own jj\n")
-    workspace = _workspace(marker_dir=marker_dir)
-    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
-                                       workspace.marker.mods_dir)
-    assert "jj" in playbook.modules
-    assert "jj" in [s.name for s in playbook.specs]
-    payload = _payload_map(workspace, _global_config(pubkey))
-    assert payload["mods/jj.sh"].content.endswith("echo my own jj\n")
-    assert "jj" in [line.split("\t")[0]
-                    for line in payload["manifest"].content.splitlines()]
-    assert payload["nix/modules/jj.nix"].content == "{ }\n"
-    assert "jj.enable = true;" in payload["nix/workspace.nix"].content
-
-
-def test_a_workspace_module_is_what_replaces_a_built_in_module(converted, pubkey,
-                                                               tmp_path):
-    # Each suffix shadows its own. To turn a built-in module off, a workspace
-    # ships an empty `<name>.nix`: that file is the one the generation gets,
-    # and no script appears in the run.
-    converted("jj")
-    marker_dir = tmp_path / "ws"
-    _write_nix_module(marker_dir / ".devbox" / "mods", "jj",
-                      "{ ... }: { }\n# no jj here\n")
-    workspace = _workspace(marker_dir=marker_dir)
-    payload = _payload_map(workspace, _global_config(pubkey))
-    assert payload["nix/modules/jj.nix"].content.endswith("# no jj here\n")
-    assert "mods/jj.sh" not in payload
-
-
-def test_the_box_playbook_never_resolves_a_module(converted, pubkey, capsys):
-    # The flake describes one agent's home; a box run has no agent, and a box
-    # mod is system work no generation could do. A converted box mod is
-    # therefore a missing mod, not a module.
-    converted("nix")
-    with pytest.raises(SystemExit):
-        devbox.build_box_payload("alice", _global_config(pubkey))
-    err = capsys.readouterr().err
-    assert "mod 'nix' not found" in err
-    # ... and the message does not offer the modules directory as a fix.
-    assert ".nix" not in err
-
-
-def test_an_unresolvable_mod_names_every_place_it_looked(converted, pubkey,
-                                                         tmp_path, capsys):
-    # A typo in a `mods` list names three DIRECTORIES and both suffixes, rather
-    # than six paths: one directory per level holds both halves, so there is no
-    # separate set of places the nix half could have been.
-    mods = converted()
-    marker_dir = tmp_path / "ws"
-    (marker_dir / ".devbox" / "mods").mkdir(parents=True)
-    workspace = _workspace(marker_dir=marker_dir, mods=["rustt"])
+def test_naming_a_module_in_mods_says_how_to_import_it(isolated_mods, pubkey,
+                                                        tmp_path, capsys):
+    workspace = _workspace(marker_dir=tmp_path, mods=["uv"])
     with pytest.raises(SystemExit):
         devbox.build_payload(workspace, _global_config(pubkey), "alice")
     err = capsys.readouterr().err
-    assert "rustt.sh or rustt.nix" in err
-    for expected in (str(marker_dir / ".devbox" / "mods"),
-                     "/nonexistent-global-mods",
-                     str(mods)):
-        assert expected in err
+    assert "'uv' is a home-manager module" in err
+    assert "devbox.builtinModules.uv" in err
 
 
-# ---- workspace-local and global nix modules (JIM-209) -----------------------
-def _write_nix_module(directory, name: str, text: str = "{ }\n") -> None:
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"{name}.nix").write_text(text)
-
-
-def test_a_workspace_own_nix_module_resolves_with_no_built_in_counterpart(
-        isolated_mods, pubkey, tmp_path):
-    # The motivating case: a mod that has nothing to do with devbox itself (a
-    # workspace's own rust toolchain, say) and so has no reason to live in
-    # devbox's own repo at all - not even as a "converted" built-in. It goes in
-    # the workspace's mods directory, the same one its `<name>.sh` scripts are
-    # in.
-    marker_dir = tmp_path / "ws"
-    _write_nix_module(marker_dir / ".devbox" / "mods", "rust",
-                      "{ config, lib, pkgs, ... }:\nlib.mkIf "
-                      "config.devbox.mods.rust.enable { home.packages = "
-                      "[ pkgs.cargo ]; }\n")
-    workspace = _workspace(marker_dir=marker_dir, mods=["rust"])
-    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
-                                       workspace.marker.mods_dir)
-    assert "rust" in playbook.modules
-    assert "rust" not in [s.name for s in playbook.specs]
-
-    payload = {pf.path: pf for pf in
-              devbox.build_payload(workspace, _global_config(pubkey), "alice")}
-    assert "mods/rust.sh" not in payload
-    # It travels to the payload's own `nix/modules/`, whatever directory it
-    # came from - that assembled layout is the only one the flake ever sees.
-    assert "pkgs.cargo" in payload["nix/modules/rust.nix"].content
-    assert "rust.enable = true;" in payload["nix/workspace.nix"].content
-
-
-def test_a_workspace_own_nix_module_shadows_the_built_in_one(isolated_mods,
-                                                              pubkey, tmp_path):
-    # Same precedence bash mods get: a workspace's own file of a built-in's
-    # name wins, exactly like test_a_workspace_script_shadows_a_converted_mod.
-    marker_dir = tmp_path / "ws"
-    _write_nix_module(marker_dir / ".devbox" / "mods", "neovim",
-                      "{ }\n# my own neovim\n")
-    workspace = _workspace(marker_dir=marker_dir)
-    module_path = devbox.find_nix_module("neovim", workspace.marker.mods_dir)
-    assert module_path.read_text().endswith("# my own neovim\n")
-    payload = {pf.path: pf for pf in
-              devbox.build_payload(workspace, _global_config(pubkey), "alice")}
-    assert payload["nix/modules/neovim.nix"].content.endswith("# my own neovim\n")
-
-
-def test_a_workspace_mod_with_both_halves_runs_both(isolated_mods, pubkey,
-                                                    tmp_path):
-    # Both halves in one directory, which is the point of putting them there:
-    # `<name>.sh` and `<name>.nix` sit next to each other, and the name gets
-    # both - a manifest line for the script and a true flag for the module.
-    marker_dir = tmp_path / "ws"
-    mods_dir = marker_dir / ".devbox" / "mods"
-    _write_nix_module(mods_dir, "neovim", "{ }\n# my own neovim module\n")
-    (mods_dir / "neovim.sh").write_text(
-        "#!/usr/bin/env bash\n: my own neovim script\n")
-    workspace = _workspace(marker_dir=marker_dir)
-    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
-                                       workspace.marker.mods_dir)
-    assert "neovim" in [s.name for s in playbook.specs]
-    assert "neovim" in playbook.modules
-    payload = {pf.path: pf for pf in
-              devbox.build_payload(workspace, _global_config(pubkey), "alice")}
-    assert "my own neovim script" in payload["mods/neovim.sh"].content
-    assert "neovim\tagent\t\n" in payload["manifest"].content
-    assert payload["nix/modules/neovim.nix"].content.endswith(
-        "# my own neovim module\n")
-    assert "neovim.enable = true;" in payload["nix/workspace.nix"].content
-
-
-def test_a_global_nix_module_resolves_and_is_shadowed_by_a_workspace_one(
-        monkeypatch, isolated_mods, pubkey, tmp_path):
-    # ~/.config/devbox/mods/ holds both halves too: shared across a user's
-    # workspaces, and itself shadowed by a workspace's own file of that name.
-    global_mods = tmp_path / "global-config" / "mods"
-    _write_nix_module(global_mods, "sccache", "{ }\n# global sccache\n")
-    monkeypatch.setattr(devbox.provision, "GLOBAL_MODS_DIR", global_mods)
-
-    marker_dir = tmp_path / "ws"
-    workspace = _workspace(marker_dir=marker_dir, mods=["sccache"])
-    assert "sccache" in devbox.nix_module_names(workspace.marker.mods_dir)
-    payload = {pf.path: pf for pf in
-              devbox.build_payload(workspace, _global_config(pubkey), "alice")}
-    assert payload["nix/modules/sccache.nix"].content.endswith("# global sccache\n")
-
-    # A second workspace shadows the same name with its own file.
-    _write_nix_module(marker_dir / ".devbox" / "mods", "sccache",
-                      "{ }\n# workspace sccache\n")
-    payload = {pf.path: pf for pf in
-              devbox.build_payload(workspace, _global_config(pubkey), "alice")}
-    assert payload["nix/modules/sccache.nix"].content.endswith("# workspace sccache\n")
+def test_a_nix_file_left_in_a_mods_directory_is_an_error(isolated_mods, pubkey,
+                                                          tmp_path, capsys):
+    _mods_dir(tmp_path).mkdir(parents=True)
+    (_mods_dir(tmp_path) / "rust.nix").write_text("{ }\n")
+    with pytest.raises(SystemExit):
+        devbox.build_payload(_workspace(marker_dir=tmp_path), _global_config(pubkey),
+                             "alice")
+    assert "no longer live in a mods directory" in capsys.readouterr().err
 
 
 # ---- one directory per level: the built-ins moved into the package ----------
-def test_the_builtin_mods_live_inside_the_package(tmp_path):
-    # Both halves of a built-in mod sit in devbox/mods/, INSIDE the package -
-    # which is what puts them in a wheel (pyproject's `packages = ["devbox"]`
-    # carries them, so there is no per-file build entry to keep in step).
+def test_the_builtin_mods_and_modules_live_inside_the_package():
+    # Inside the package is what puts them in a wheel.
     package_dir = devbox.Path(devbox.provision.__file__).parent
     assert devbox.BUILTIN_MODS_DIR.parent == package_dir
-    suffixes = {p.suffix for p in devbox.BUILTIN_MODS_DIR.iterdir()}
-    assert suffixes == {".sh", ".nix"}
+    assert devbox.BUILTIN_MODULES_DIR.parent == package_dir
+    assert {p.suffix for p in devbox.BUILTIN_MODS_DIR.iterdir()} == {".sh"}
+    assert {p.suffix for p in devbox.BUILTIN_MODULES_DIR.iterdir()} == {".nix"}
 
 
 def test_the_shipped_flake_is_a_skeleton_with_no_modules_directory():
@@ -1459,27 +1225,17 @@ def test_the_shipped_flake_is_a_skeleton_with_no_modules_directory():
 
 
 # ---- devbox nix check (assemble a payload flake, evaluate it on the host) ---
-def test_nix_check_files_enable_every_discovered_module(isolated_mods):
+def test_nix_check_files_import_every_module(isolated_mods):
     payload = {pf.path: pf for pf in devbox.nix_check_files()}
-    names = devbox.nix_module_names()
-    assert names, "the built-ins ship modules"
-    workspace_nix = payload["nix/workspace.nix"].content
-    for name in names:
-        assert f"nix/modules/{name}.nix" in payload
-        assert f"{devbox.nix_attr_name(name)}.enable = true;" in workspace_nix
-    # A false flag would leave that module's body inside an unforced `mkIf`, so
-    # a check that mirrored a real playbook would evaluate almost nothing.
-    assert "= false;" not in workspace_nix
+    for path in devbox.BUILTIN_MODULES_DIR.glob("*.nix"):
+        assert f"nix/devbox-modules/{path.name}" in payload
+    assert "checkAll = true;" in payload["nix/workspace.nix"].content
 
 
 def test_nix_check_files_include_a_workspaces_own_module(isolated_mods, tmp_path):
-    # Run inside a workspace, the check widens to that workspace's own modules -
-    # the only way to evaluate one before it reaches a box.
-    mods_dir = tmp_path / "ws" / ".devbox" / "mods"
-    _write_nix_module(mods_dir, "rust", "{ }\n# workspace rust\n")
-    payload = {pf.path: pf for pf in devbox.nix_check_files(mods_dir)}
-    assert payload["nix/modules/rust.nix"].content.endswith("# workspace rust\n")
-    assert "rust.enable = true;" in payload["nix/workspace.nix"].content
+    (tmp_path / "default.nix").write_text("{ }\n# workspace\n")
+    payload = {pf.path: pf for pf in devbox.nix_check_files(tmp_path)}
+    assert payload["nix/workspace/default.nix"].content.endswith("# workspace\n")
 
 
 def test_nix_check_files_carry_no_credentials(isolated_mods):
@@ -1519,26 +1275,25 @@ def test_cmd_nix_check_evaluates_the_assembled_flake(monkeypatch, tmp_path,
     # The flake it evaluated is a real one: skeleton + modules + workspace.nix.
     assert (out_dir / "nix" / "flake.nix").is_file()
     assert (out_dir / "nix" / "workspace.nix").is_file()
-    assert (out_dir / "nix" / "modules" / "neovim.nix").is_file()
+    assert (out_dir / "nix" / "devbox-modules" / "neovim.nix").is_file()
     assert "nix check passed" in capsys.readouterr().out
 
 
 def test_cmd_nix_check_clears_a_reused_out_dir(monkeypatch, tmp_path,
                                                isolated_mods):
-    # The flake readDirs `modules/`, so a module deleted since the last run must
-    # not survive in a reused --out-dir: it has no flag in the fresh
-    # workspace.nix, and nix would fail on it rather than on anything real.
+    # The flake readDirs the module directories, so a module deleted since the
+    # last run must not survive in a reused --out-dir.
     monkeypatch.setattr(devbox.cli.shutil, "which", lambda p: f"/usr/bin/{p}")
     monkeypatch.setattr(devbox.cli.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(devbox.cli, "find_workspace_opt", lambda start: None)
     monkeypatch.setattr(devbox.cli.subprocess, "run", lambda cmd, **kw: _cp(cmd))
     out_dir = tmp_path / "assembled"
-    stale = out_dir / "nix" / "modules" / "gone.nix"
+    stale = out_dir / "nix" / "devbox-modules" / "gone.nix"
     stale.parent.mkdir(parents=True)
     stale.write_text("{ }\n")
     devbox.cli.cmd_nix_check(_nix_check_args(out_dir=str(out_dir)), None, None)
     assert not stale.exists()
-    assert (out_dir / "nix" / "modules" / "neovim.nix").is_file()
+    assert (out_dir / "nix" / "devbox-modules" / "neovim.nix").is_file()
 
 
 def test_cmd_nix_check_builds_only_when_asked(monkeypatch, tmp_path,
@@ -1587,53 +1342,23 @@ def test_find_workspace_opt_is_none_outside_a_workspace(tmp_path):
     assert devbox.find_workspace_opt(tmp_path) == devbox.find_workspace(tmp_path)
 
 
-def test_uv_and_cargo_binstall_are_packages_in_the_generation(isolated_mods,
-                                                              tmp_path):
-    # Both are nix packages: no `<name>.sh` answers to either name, and the
-    # flake discovers the module of that name by file presence. `cargo-binstall`
-    # keeps its place in the base playbook and `uv` stays an opt-in a workspace
-    # names itself - both resolve to the generation.
+def test_uv_and_cargo_binstall_are_modules():
     for name in ("cargo-binstall", "uv"):
-        assert name in devbox.nix_module_names()
         assert devbox.find_mod_script(name, None) is None
-        assert (devbox.BUILTIN_MODS_DIR / f"{name}.nix").is_file()
-    marker_dir = tmp_path / "ws"
-    marker_dir.mkdir()
-    workspace = _workspace(marker_dir=marker_dir, mods=["uv"])
-    modules = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
-                                      workspace.marker.mods_dir).modules
-    assert "cargo-binstall" in modules
-    assert "uv" in modules
-    # cargo-binstall installs the crates it fetches into ~/.cargo/bin, and the
-    # generation is what puts that directory on PATH.
+        assert (devbox.BUILTIN_MODULES_DIR / f"{name}.nix").is_file()
+    assert "./cargo-binstall.nix" in (devbox.BUILTIN_MODULES_DIR / "default.nix").read_text()
+    # cargo-binstall installs into ~/.cargo/bin, which the module puts on PATH.
     assert 'home.sessionPath = [ "$HOME/.cargo/bin" ];' in \
-        (devbox.BUILTIN_MODS_DIR / "cargo-binstall.nix").read_text()
+        (devbox.BUILTIN_MODULES_DIR / "cargo-binstall.nix").read_text()
 
 
-def test_nodejs_is_an_opt_in_module_that_relocates_npms_global_prefix(
-        isolated_mods, tmp_path):
-    # A workspace that never names it gets no node at all, which is what
-    # keeping it out of WORKSPACE_BASE_MODS buys: it is a language runtime, and
-    # a box hosts workspaces that want nothing to do with one.
-    assert "nodejs" in devbox.nix_module_names()
-    assert devbox.find_mod_script("nodejs", None) is None
-    marker_dir = tmp_path / "ws"
-    marker_dir.mkdir()
-
-    def modules(mods):
-        workspace = _workspace(marker_dir=marker_dir, mods=mods)
-        return devbox.resolve_playbook(devbox.workspace_playbook(workspace),
-                                       workspace.marker.mods_dir).modules
-
-    assert "nodejs" not in modules([])
-    assert "nodejs" in modules(["nodejs"])
-    # npm's default prefix is the read-only store path node itself lives in, so
-    # `npm install -g` only works if the module moves it into the account - and
-    # only reaches a PATH if the same module puts the new bin directory on one.
-    body = (devbox.BUILTIN_MODS_DIR / "nodejs.nix").read_text()
+def test_nodejs_is_an_opt_in_module_that_relocates_npms_global_prefix():
+    assert "nodejs" not in (devbox.BUILTIN_MODULES_DIR / "default.nix").read_text()
+    body = (devbox.BUILTIN_MODULES_DIR / "nodejs.nix").read_text()
+    # npm's default prefix is the read-only store path node lives in.
     assert 'home.sessionVariables.NPM_CONFIG_PREFIX = "$HOME/.npm-global";' in body
     assert 'home.sessionPath = [ "$HOME/.npm-global/bin" ];' in body
-    # The LTS alias `pkgs.nodejs`, not the `pkgs.nodejs_latest` beside it.
+    # The LTS alias `pkgs.nodejs`, not `pkgs.nodejs_latest`.
     assert "home.packages = [ pkgs.nodejs ];" in body
 
 
@@ -1657,38 +1382,25 @@ def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():
 
 
 def test_the_flake_discovers_modules_by_file_presence_not_a_list():
-    # A module ships by file presence alone: the flake `readDir`s ./modules
-    # rather than importing a fixed list, so a new file - built-in, global, or
-    # a workspace's own - needs no second place to register it. (Whether that
-    # discovery actually evaluates correctly is a `nix flake check` question,
-    # which pytest does not run - see DEVELOPMENT.md.)
     flake = (devbox.NIX_DIR / "flake.nix").read_text()
-    assert "readDir ./modules" in flake
-    code = [line for line in flake.splitlines() if not line.strip().startswith("#")]
-    # No hardcoded per-module import should survive discovery - that would be
-    # a name devbox no longer needs to duplicate.
-    assert not any("./modules/" in line and ".nix" in line for line in code)
+    for subdir in ("devbox-modules", "my-modules"):
+        assert f"modulesIn ./{subdir}" in flake
+    assert "./workspace/default.nix" in flake
+    # The generation's fallback when a workspace has no default.nix.
+    assert "else builtinModules.default" in flake
 
 
-def test_jj_is_the_generations_and_repo_bootstrap_still_requires_it(isolated_mods):
-    # No script answers to `jj`, so the base playbook resolves the name to the
-    # module and the driver gets no line for it. `repo-bootstrap` still names it
-    # in `requires`, and a module satisfies that wherever it sits - the
-    # generation carrying it is switched by `home-manager`, first in the base.
-    workspace = _workspace(mode="clone", dir="r", url="https://x/y")
-    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace), None)
-    assert "jj" in playbook.modules
-    assert "jj" not in [s.name for s in playbook.specs]
-    assert "jj" in {s.name: s for s in playbook.specs}["repo-bootstrap"].requires
-    devbox.validate_playbooks(workspace)
+def test_jj_and_github_auth_are_always_in_the_generation():
+    # repo-bootstrap clones with them, so no workspace default.nix can drop them.
+    flake = (devbox.NIX_DIR / "flake.nix").read_text()
+    assert "builtinModules.jj\n" in flake
+    assert "builtinModules.github-auth\n" in flake
+    assert devbox.parse_mod_metadata(
+        (devbox.BUILTIN_MODS_DIR / "repo-bootstrap.sh").read_text()) == {}
 
 
-def test_the_jj_module_reads_its_flag_and_the_workspaces_identity():
-    # The two halves of the module contract: it is inert unless the generation
-    # provides it, and the author identity comes from the rendered workspace
-    # values rather than from anything a module could read off the box.
-    text = (devbox.BUILTIN_MODS_DIR / "jj.nix").read_text()
-    assert "config.devbox.mods.jj.enable" in text
+def test_the_jj_module_reads_the_workspaces_identity():
+    text = (devbox.BUILTIN_MODULES_DIR / "jj.nix").read_text()
     assert "config.devbox.workspace.jjName" in text
     assert "config.devbox.workspace.jjEmail" in text
 
@@ -1703,7 +1415,7 @@ def test_the_jj_module_stays_off_the_config_toml_dotfiles_owns():
     # `programs.jujutsu` is what would take the file - it writes config.toml
     # whenever its `settings` is non-empty, and its `ediff` default makes that
     # happen by itself once some other module enables emacs.
-    text = (devbox.BUILTIN_MODS_DIR / "jj.nix").read_text()
+    text = (devbox.BUILTIN_MODULES_DIR / "jj.nix").read_text()
     code = "\n".join(line for line in text.splitlines()
                      if not line.strip().startswith("#"))
     assert "programs.jujutsu" not in code
@@ -1746,26 +1458,14 @@ def test_the_agents_zshenv_is_the_generations_and_holds_no_creds():
     assert "/etc/profile.d/nix-daemon.sh" in code
 
 
-def test_dotfiles_is_the_generations_and_imports_configenv(isolated_mods):
-    # A base mod with no script anywhere, so the playbook resolves the name to
-    # the module and the driver gets no line for it: the shared configs are
-    # placed by the switch, out of the store, not by a clone in each account.
-    assert "dotfiles" in devbox.WORKSPACE_BASE_MODS
-    assert "dotfiles" in devbox.nix_module_names()
+def test_dotfiles_is_in_the_base_profile_and_imports_configenv():
+    assert "./dotfiles.nix" in (devbox.BUILTIN_MODULES_DIR / "default.nix").read_text()
     assert devbox.find_mod_script("dotfiles", None) is None
-    playbook = devbox.resolve_playbook(
-        devbox.workspace_playbook(_workspace()), None)
-    assert "dotfiles" in playbook.modules
-    assert "dotfiles" not in [s.name for s in playbook.specs]
-
-    text = (devbox.BUILTIN_MODS_DIR / "dotfiles.nix").read_text()
+    text = (devbox.BUILTIN_MODULES_DIR / "dotfiles.nix").read_text()
     code = "\n".join(line for line in text.splitlines()
                       if not line.strip().startswith("#"))
-    # `imports` cannot sit inside `mkIf`, so configenv carries its own enable
-    # option and this module drives it from the flag every module reads.
     assert "imports = [ configenv.outPath ];" in code
-    assert "configenv.enable = config.devbox.mods.dotfiles.enable;" in code
-    assert "mkIf" not in code
+    assert "configenv.enable = true;" in code
     # A workstation's editors and fonts are not a headless box's.
     assert "desktop" not in code
 
@@ -1780,7 +1480,7 @@ def test_the_flake_hands_configenv_to_the_modules(isolated_mods):
     assert "flake = false;" in code
     assert "follows" not in code.split("configenv = {")[1].split("};")[0]
     # extraSpecialArgs is how a module reaches an input at all.
-    assert "extraSpecialArgs = { inherit configenv; };" in code
+    assert "devbox = { inherit builtinModules globalModules; };" in code
 
 
 def test_the_shared_configs_are_placed_once_per_box_not_cloned_per_account():
@@ -1795,43 +1495,21 @@ def test_the_shared_configs_are_placed_once_per_box_not_cloned_per_account():
 
 # ---- cloudflared: a converted opt-in mod that ships a systemd user service ---
 def _cloudflared_module():
-    return (devbox.BUILTIN_MODS_DIR / "cloudflared.nix").read_text()
+    return (devbox.BUILTIN_MODULES_DIR / "cloudflared.nix").read_text()
 
 
-def test_cloudflared_is_a_module_and_no_longer_a_script(isolated_mods, pubkey,
-                                                        tmp_path):
-    # Opt-in, so no playbook tuple names it: a workspace asks for it in its own
-    # `mods`, and that config resolves to the generation now that no
-    # cloudflared.sh answers to the name.
-    assert "cloudflared" in devbox.nix_module_names()
+def test_cloudflared_is_an_opt_in_module():
     assert devbox.find_mod_script("cloudflared", None) is None
-    # The flake discovers every file under modules/ (see
-    # test_the_flake_discovers_modules_by_file_presence_not_a_list); this just
-    # confirms the file itself ships there.
-    assert (devbox.BUILTIN_MODS_DIR / "cloudflared.nix").is_file()
-
-    marker_dir = tmp_path / "ws"
-    marker_dir.mkdir()
-    workspace = _workspace(marker_dir=marker_dir, mods=["cloudflared"])
-    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace),
-                                       workspace.marker.mods_dir)
-    assert "cloudflared" in playbook.modules
-    payload = _payload_map(workspace, _global_config(pubkey))
-    assert "mods/cloudflared.sh" not in payload
-    assert "nix/modules/cloudflared.nix" in payload
-    assert "cloudflared.enable = true;" in payload["nix/workspace.nix"].content
+    assert (devbox.BUILTIN_MODULES_DIR / "cloudflared.nix").is_file()
+    assert "cloudflared" not in (devbox.BUILTIN_MODULES_DIR / "default.nix").read_text()
 
 
 def test_cloudflared_keeps_the_token_out_of_the_nix_expression(isolated_mods,
                                                                pubkey, tmp_path):
     # /nix/store is world-readable and shared by every attachment, so the module
-    # may name the PATH of the 0600 creds file and nothing more. The rendered
-    # workspace.nix carries no creds either.
-    module = _cloudflared_module()
-    assert ".config/devbox/env" in module
-    marker_dir = tmp_path / "ws"
-    marker_dir.mkdir()
-    workspace = _workspace(marker_dir=marker_dir, mods=["cloudflared"],
+    # may name the PATH of the 0600 creds file and nothing more.
+    assert ".config/devbox/env" in _cloudflared_module()
+    workspace = _workspace(marker_dir=tmp_path,
                            env={"CLOUDFLARE_TOKEN": devbox.EnvVar("cf_tok")})
     payload = _payload_map(workspace, _global_config(pubkey))
     for pf in payload.values():
@@ -1866,9 +1544,6 @@ def test_cloudflared_unit_uses_the_sections_home_manager_expects():
     for section in ("Unit = {", "Service = {", "Install.WantedBy"):
         assert section in module
     assert "serviceConfig" not in module
-    # A mod that is not asked for contributes nothing, and every module reads
-    # its own flag rather than declaring one.
-    assert "lib.mkIf config.devbox.mods.cloudflared.enable" in module
     # An unconfigured workspace must not crash-loop: ExecCondition exiting
     # non-zero skips the service and leaves the unit inactive, not failed.
     assert "ExecCondition" in module
@@ -1882,8 +1557,7 @@ def test_the_retired_cloudflared_tunnel_mod_says_where_it_went(isolated_mods,
     # "looked in four places" for a script nobody is going to write.
     marker_dir = tmp_path / "ws"
     marker_dir.mkdir()
-    workspace = _workspace(marker_dir=marker_dir,
-                           mods=["cloudflared", "cloudflared-tunnel"])
+    workspace = _workspace(marker_dir=marker_dir, mods=["cloudflared-tunnel"])
     with pytest.raises(SystemExit):
         devbox.build_payload(workspace, _global_config(pubkey), "alice")
     err = capsys.readouterr().err
@@ -1917,7 +1591,6 @@ def test_claude_code_installs_the_binary_that_updates_itself(isolated_mods, pubk
     # versions ship, between reconverges. Nothing in the generation provides a
     # `claude`, so PATH order has nothing to shadow.
     assert "claude-code" in devbox.WORKSPACE_BASE_MODS
-    assert "claude-code" not in devbox.nix_module_names()
     assert devbox.find_mod_script("claude-code", None) is not None
     body = _script_body("claude-code")
     assert "curl -fsSL https://claude.ai/install.sh | bash" in body
@@ -1929,7 +1602,6 @@ def test_claude_code_installs_the_binary_that_updates_itself(isolated_mods, pubk
     assert _metadata("claude-code")["packages"] == ["jq"]
     payload = _payload_map(_workspace(), _global_config(pubkey))
     assert "mods/claude-code.sh" in payload
-    assert "nix/modules/claude-code.nix" not in payload
     assert "claude-code" in [line.split("\t")[0] for line
                              in payload["manifest"].content.splitlines()]
 
@@ -1952,7 +1624,6 @@ def test_codex_is_an_opt_in_install_that_updates_itself(isolated_mods, pubkey,
     # installed at all.
     assert "codex" not in devbox.WORKSPACE_BASE_MODS
     assert "codex" not in devbox.box_playbook()
-    assert "codex" not in devbox.nix_module_names()
     body = _script_body("codex")
     # OpenAI's standalone installer, which is also what `codex update` re-runs
     # for a standalone install - so the account can update itself in place.
@@ -1967,10 +1638,10 @@ def test_codex_is_an_opt_in_install_that_updates_itself(isolated_mods, pubkey,
     marker_dir.mkdir()
     plain = _workspace(marker_dir=marker_dir)
     asked = _workspace(marker_dir=marker_dir, mods=["codex"])
-    assert "codex" not in [s.name for s in devbox.resolve_playbook(
-        devbox.workspace_playbook(plain), plain.marker.mods_dir).specs]
-    assert "codex" in [s.name for s in devbox.resolve_playbook(
-        devbox.workspace_playbook(asked), asked.marker.mods_dir).specs]
+    assert "codex" not in [s.name for s in devbox.load_mod_specs(
+        devbox.workspace_playbook(plain), plain.marker.mods_dir)]
+    assert "codex" in [s.name for s in devbox.load_mod_specs(
+        devbox.workspace_playbook(asked), asked.marker.mods_dir)]
     payload = _payload_map(asked, _global_config(pubkey))
     assert "mods/codex.sh" in payload
     assert "codex" in [line.split("\t")[0] for line
@@ -1989,7 +1660,6 @@ def test_the_mcp_mods_stay_two_opt_in_mods(isolated_mods, pubkey, tmp_path,
     assert name not in devbox.WORKSPACE_BASE_MODS
     assert name not in devbox.box_playbook()
     assert name not in devbox.provision.RETIRED_MODS
-    assert name not in devbox.nix_module_names()
     assert (devbox.BUILTIN_MODS_DIR / f"{name}.sh").is_file()
     # It registers the server with the agent's own `claude`, so claude-code has
     # to have run first - which the base playbook does, ahead of any workspace
@@ -2095,7 +1765,7 @@ def test_the_two_playbooks_split_the_apt_half_from_the_per_user_half():
     # in the base installs into somebody's home.
     assert "box-packages" in devbox.BOX_BASE_MODS
     assert "box-packages" not in devbox.WORKSPACE_BASE_MODS
-    for per_user in ("jj", "claude-code", "repo-bootstrap"):
+    for per_user in ("home-manager", "claude-code", "repo-bootstrap"):
         assert per_user in devbox.WORKSPACE_BASE_MODS
         assert per_user not in devbox.BOX_BASE_MODS
 
@@ -2135,37 +1805,6 @@ def test_resolve_mod_precedence_workspace_over_global_over_builtin(tmp_path):
     assert devbox.resolve_mod("dotfiles", proj, glob, built).read_text() == "proj"
     assert devbox.resolve_mod("shared", proj, glob, built).read_text() == "glob"
     assert devbox.resolve_mod("basic", proj, glob, built).read_text() == "built"
-
-
-def test_find_nix_module_precedence_workspace_over_global_over_builtin(tmp_path):
-    # The nix-module mirror of the bash-mod precedence test above (JIM-209):
-    # the same three directories, in the same order, differing only in the
-    # suffix looked for - one directory per level, both halves in it.
-    proj = tmp_path / "ws" / "mods"
-    glob = tmp_path / "global-mods"
-    built = tmp_path / "builtin-mods"
-    for d in (proj, glob, built):
-        d.mkdir(parents=True)
-    (proj / "vim.nix").write_text("proj")
-    (glob / "vim.nix").write_text("glob")
-    (built / "vim.nix").write_text("built")
-    (glob / "shared.nix").write_text("glob")
-    (built / "shared.nix").write_text("built")
-    (built / "basic.nix").write_text("built")
-
-    assert devbox.find_nix_module("vim", proj, glob, built).read_text() == "proj"
-    assert devbox.find_nix_module("shared", proj, glob, built).read_text() == "glob"
-    assert devbox.find_nix_module("basic", proj, glob, built).read_text() == "built"
-    assert devbox.find_nix_module("nope", proj, glob, built) is None
-
-    assert devbox.nix_module_names(proj, glob, built) == ["basic", "shared", "vim"]
-    # No workspace mods directory at all (a box-scope caller passes None): the
-    # global/built-in union still resolves - "vim" survives via those two, but
-    # a name only `proj` had would not.
-    assert devbox.nix_module_names(None, glob, built) == ["basic", "shared", "vim"]
-    (proj / "workspace-only.nix").write_text("proj")
-    assert "workspace-only" in devbox.nix_module_names(proj, glob, built)
-    assert "workspace-only" not in devbox.nix_module_names(None, glob, built)
 
 
 def test_resolve_mod_missing_dies(tmp_path):
@@ -2280,7 +1919,7 @@ def test_validate_playbooks_base_passes(isolated_mods):
 
 
 def test_validate_playbooks_workspace_mod_requiring_base_mod_passes(isolated_mods, tmp_path):
-    _write_workspace_mod(tmp_path, "rust", _mod('requires = ["jj"]'))
+    _write_workspace_mod(tmp_path, "rust", _mod('requires = ["claude-code"]'))
     devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["rust"]))
 
 
@@ -2303,28 +1942,6 @@ def test_validate_playbooks_dep_listed_after_dies(isolated_mods, tmp_path):
     _write_workspace_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
     with pytest.raises(SystemExit):
         devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["a", "b"]))
-
-
-def test_validate_playbooks_dep_with_both_halves_listed_after_dies(isolated_mods,
-                                                                  tmp_path):
-    # `b` has a module too, but a module satisfies a dependency in advance only
-    # when it has no script: `a` may need what `b.sh` makes, so `b`'s place in
-    # the playbook is still checked.
-    _write_workspace_mod(tmp_path, "a", _mod('requires = ["b"]'))
-    _write_workspace_mod(tmp_path, "b", "#!/bin/bash\nset -e\n")
-    (_mods_dir(tmp_path) / "b.nix").write_text("{ ... }: { }\n")
-    with pytest.raises(SystemExit):
-        devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["a", "b"]))
-    devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["b", "a"]))
-
-
-def test_validate_playbooks_dep_with_only_a_module_listed_after_passes(
-        isolated_mods, tmp_path):
-    # The same `b` with no script is not a step in the run, so it satisfies
-    # `a`'s dependency wherever it sits.
-    _write_workspace_mod(tmp_path, "a", _mod('requires = ["b"]'))
-    (_mods_dir(tmp_path) / "b.nix").write_text("{ ... }: { }\n")
-    devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["a", "b"]))
 
 
 def test_validate_playbooks_dep_listed_before_passes(isolated_mods, tmp_path):
@@ -2405,11 +2022,9 @@ def test_render_manifest_narrows_the_runas_column_to_the_scope():
 def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
     # Every shipped mod's `# /// mod` block parses, and its `runas` targets are
     # known. Guards the metadata itself, which nothing else type-checks.
-    specs = [*devbox.resolve_playbook(devbox.box_playbook(), None,
-                                      devbox.SCOPE_BOX).specs,
-             *devbox.resolve_playbook(devbox.workspace_playbook(_workspace()),
-                                      None).specs]
-    assert [s.name for s in specs] == [*devbox.box_playbook(), *_bash_base_mods()]
+    specs = [*devbox.load_mod_specs(devbox.box_playbook(), None),
+             *devbox.load_mod_specs(devbox.workspace_playbook(_workspace()), None)]
+    assert [s.name for s in specs] == [*devbox.box_playbook(), *devbox.WORKSPACE_BASE_MODS]
     for spec in specs:
         assert spec.runas, f"{spec.name} resolved to no runas target"
         for target in spec.runas:
@@ -2419,10 +2034,8 @@ def test_base_playbook_mods_declare_valid_metadata(isolated_mods):
 def test_shipped_mods_never_call_sudo(isolated_mods):
     # A mod body runs as an account without sudo. `sudo` in a mod is a bug now:
     # packages go through `packages`, and real privilege through `runas = ["root"]`.
-    specs = [*devbox.resolve_playbook(devbox.box_playbook(), None,
-                                      devbox.SCOPE_BOX).specs,
-             *devbox.resolve_playbook(devbox.workspace_playbook(_workspace()),
-                                      None).specs]
+    specs = [*devbox.load_mod_specs(devbox.box_playbook(), None),
+             *devbox.load_mod_specs(devbox.workspace_playbook(_workspace()), None)]
     for spec in specs:
         for line in spec.path.read_text().splitlines():
             stripped = line.strip()
@@ -2436,9 +2049,8 @@ def test_dotfiles_is_agent_only_and_the_box_playbook_stays_apt_only(isolated_mod
     # bash/vim, independent of any per-account setup that could itself need
     # fixing. The shared configs are a module, and a module is one agent's
     # generation, so the box playbook consults none of it.
-    box = devbox.resolve_playbook(devbox.box_playbook(), None,
-                                  devbox.SCOPE_BOX)
-    assert devbox.render_manifest(box.specs, devbox.SCOPE_BOX).splitlines() == [
+    box = devbox.load_mod_specs(devbox.box_playbook(), None)
+    assert devbox.render_manifest(box, devbox.SCOPE_BOX).splitlines() == [
         # The package list: once, as root, per box - and a `packages` column now,
         # since the mod has no body left to do anything else in.
         "box-packages\troot\tzsh,vim-enhanced,git,ca-certificates,rsync,unzip,"
@@ -2447,7 +2059,6 @@ def test_dotfiles_is_agent_only_and_the_box_playbook_stays_apt_only(isolated_mod
         "nix\troot\txz",
     ]
     assert "dotfiles" not in devbox.BOX_BASE_MODS
-    assert box.modules == []
 
 
 def test_box_packages_is_a_list_and_nothing_else():
@@ -2495,39 +2106,17 @@ def test_the_old_dotfiles_packages_name_says_where_it_went(isolated_mods, capsys
     assert "`box-packages`" in err
 
 
-def test_vim_is_configenvs_and_devbox_has_no_mod_of_that_name(isolated_mods):
-    # The editor and the ~/.vimrc that configures it are stated in one place,
-    # configenv's module, which `dotfiles` imports. devbox therefore ships
-    # neither half of a `vim` mod: a bare name in the playbook resolves to
-    # nothing, so the name is absent from the tuple as well as from the
-    # directory. The privileged account has no generation and no vim-plug
-    # either - it keeps stock, unconfigured apt vim.
-    assert "vim" not in devbox.WORKSPACE_BASE_MODS
-    assert "vim" not in devbox.nix_module_names()
+def test_vim_is_configenvs_and_devbox_has_no_mod_of_that_name():
+    # The editor is configenv's, through `dotfiles`; devbox ships no `vim` of
+    # its own, and the privileged account keeps stock dnf vim.
     assert devbox.find_mod_script("vim", None) is None
-    assert not (devbox.BUILTIN_MODS_DIR / "vim.nix").exists()
-    assert "vim-plug" not in devbox.box_playbook()
+    assert not (devbox.BUILTIN_MODULES_DIR / "vim.nix").exists()
     assert not (devbox.BUILTIN_MODS_DIR / "vim-plug.sh").exists()
-    # `dotfiles` is the entry that carries it, and it is agent-scoped.
-    assert "dotfiles" in devbox.WORKSPACE_BASE_MODS
-    assert "dotfiles" in devbox.resolve_playbook(
-        devbox.workspace_playbook(_workspace()), None).modules
 
 
-def test_github_auth_is_a_home_manager_module_now(isolated_mods):
-    # Moved off /etc/gitconfig (box-wide, root) onto ~/.config/git/config (per
-    # account, agent-scoped): `dotfiles`/configenv's setup.sh only ever
-    # overwrites ~/.gitconfig, never the XDG global config, so this file needs
-    # no privileged workaround to survive a reconverge.
-    assert "github-auth" not in devbox.BOX_BASE_MODS
-    assert "github-auth" not in devbox.box_playbook()
-    assert "github-auth" in devbox.WORKSPACE_BASE_MODS
-    assert "github-auth" in devbox.nix_module_names()
+def test_github_auth_is_a_home_manager_module():
     assert devbox.find_mod_script("github-auth", None) is None
-    assert "github-auth" in devbox.resolve_playbook(
-        devbox.workspace_playbook(_workspace()), None).modules
-    text = (devbox.BUILTIN_MODS_DIR / "github-auth.nix").read_text()
-    assert "config.devbox.mods.github-auth.enable" in text
+    text = (devbox.BUILTIN_MODULES_DIR / "github-auth.nix").read_text()
     assert ".config/git/config" in text
     assert "auth git-credential" in text
     code = [line for line in text.splitlines() if not line.strip().startswith("#")]
@@ -2553,21 +2142,6 @@ def test_nix_is_a_root_box_mod_that_trusts_only_the_privileged_account(isolated_
     # the workspace setup is built on.
     assert "--daemon" in text and "--yes" in text
     assert "experimental-features = nix-command flakes" in text
-
-
-def test_repo_bootstrap_still_requires_github_auth_now_a_module(isolated_mods):
-    # A private `jj git clone` still depends on github-auth. It is a module now,
-    # not a step in the run, so it satisfies the dependency wherever it sits -
-    # the generation carrying it is switched by `home-manager`, first in the
-    # base playbook - and `requires` keeps saying so rather than the fact going
-    # undocumented.
-    workspace = _workspace(mode="clone", dir="r", url="https://x/y")
-    playbook = devbox.resolve_playbook(devbox.workspace_playbook(workspace), None)
-    specs = {s.name: s for s in playbook.specs}
-    assert "github-auth" in specs["repo-bootstrap"].requires
-    assert "github-auth" not in specs
-    assert "github-auth" in playbook.modules
-    devbox.validate_playbooks(workspace)   # must not die on the module dependency
 
 
 def test_render_env_file_shell_quotes_values():

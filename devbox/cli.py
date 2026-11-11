@@ -53,8 +53,9 @@ from .config import (BoxSpec, DEFAULT_ADMIN_USER, DEFAULT_PROVIDER,
                      WorkspaceConfig, SSH_DIR, SSH_USER_CONFIG, find_workspace,
                      find_workspace_opt, known_hosts_path, parse_instance_name,
                      resolve_box_spec, resolve_instance, resolve_workspace)
-from .provision import (NIX_PAYLOAD_DIR, build_box_payload, build_payload,
-                        build_tarball, nix_check_files, nix_module_names,
+from .provision import (NIX_BUILTIN_SUBDIR, NIX_GLOBAL_SUBDIR, NIX_PAYLOAD_DIR,
+                        NIX_WORKSPACE_SUBDIR, build_box_payload, build_payload,
+                        build_tarball, nix_check_files,
                         provision_log, resolve_env)
 from .sync import run_envvars, run_sync
 from .providers import (AWS_PROVIDERS, AwsAuthError, InstanceSpec, all_providers,
@@ -1031,9 +1032,8 @@ def cmd_nix_check(args: argparse.Namespace, gc: GlobalConfig, workspace=None) ->
     This is the ONLY way to check a module without a box, and it is why the
     check has to assemble: `devbox/nix/` is a skeleton, not a working flake -
     its options.nix imports the `workspace.nix` that only a rendered payload
-    has - and a module's source may sit in any of the three mods directories.
-    Run inside a workspace, that workspace's own modules are checked too; run
-    anywhere else, the global and built-in ones are.
+    has. Every built-in and global module is imported, and inside a
+    workspace its default.nix too.
 
     Evaluating, not building, is the default: forcing the activation package's
     derivation catches every module error the nix module system can catch -
@@ -1051,25 +1051,23 @@ def cmd_nix_check(args: argparse.Namespace, gc: GlobalConfig, workspace=None) ->
             f"{', '.join(sorted(set(_NIX_SYSTEMS.values())))}.")
 
     marker = find_workspace_opt(args.workspace_dir or Path.cwd())
-    mods_dir = marker.mods_dir if marker is not None else None
-    files = nix_check_files(mods_dir)
-    modules = nix_module_names(mods_dir)
+    module_dir = marker.config_path.parent if marker is not None else None
+    files = nix_check_files(module_dir)
 
     with tempfile.TemporaryDirectory(prefix="devbox-nix-check.") as tmp:
         # Absolute, because the `path:` flakeref below is handed to nix as a
-        # bare string. `modules/` is cleared first because it is the one
-        # directory that accumulates - the flake readDirs it, so a module
-        # deleted since the last run into a reused --out-dir would still be
-        # discovered, with no flag for it in the fresh workspace.nix. Every
-        # other file this writes is overwritten in place, so nothing wider is
-        # removed: --out-dir is a directory the caller named.
+        # bare string. The module directories are cleared first: the flake
+        # readDirs them, so a module deleted since the last run into a reused
+        # --out-dir would still be imported. Only those, since --out-dir is a
+        # directory the caller named.
         out_dir = Path(args.out_dir).resolve() if args.out_dir else Path(tmp)
-        shutil.rmtree(out_dir / NIX_PAYLOAD_DIR / "modules", ignore_errors=True)
+        for sub in (NIX_BUILTIN_SUBDIR, NIX_GLOBAL_SUBDIR, NIX_WORKSPACE_SUBDIR):
+            shutil.rmtree(out_dir / NIX_PAYLOAD_DIR / sub, ignore_errors=True)
         _write_payload(files, out_dir)
         flake = f"path:{out_dir / NIX_PAYLOAD_DIR}"
-        where = "this workspace, the global config and the built-ins" \
-            if mods_dir is not None else "the global config and the built-ins"
-        print(f"Checking {len(modules)} modules from {where}, all enabled:")
+        modules = sorted(f.path.removeprefix(f"{NIX_PAYLOAD_DIR}/") for f in files
+                         if f.path.count("/") > 1)
+        print("Checking every devbox, global and workspace module:")
         print(f"  {', '.join(modules)}")
         if args.out_dir:
             print(f"Assembled flake: {out_dir / NIX_PAYLOAD_DIR}")

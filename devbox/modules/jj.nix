@@ -32,7 +32,7 @@
 # account shares it, which is the point of putting several repos in one
 # workspace.
 { config, lib, pkgs, ... }:
-lib.mkIf config.devbox.mods.jj.enable {
+{
   home.packages = [ pkgs.jujutsu ];
 
   home.file.".config/jj/conf.d/00-devbox.toml".source =

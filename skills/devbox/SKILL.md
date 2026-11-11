@@ -11,9 +11,9 @@ VMs), **ec2** (AWS EC2), **aws** (AWS Lightsail — flat-rate bundles, no
 security groups to configure), and **kubevirt** (`kube-NAME` VMs on a
 Kubernetes cluster). Every
 workspace gets the same base
-playbook of idempotent provisioning **mods** (jj, dotfiles, Claude Code, GitHub
-auth, repo bootstrap) that devbox owns, adding only what's different
-via its marker file. Full reference: `README.md` in this repo.
+home-manager generation (jj, dotfiles, GitHub auth, ...) and base playbook of
+idempotent provisioning **mods** (Claude Code, repo bootstrap) that devbox
+owns, adding only what's different via its `default.nix` and marker file. Full reference: `README.md` in this repo.
 
 **A box is not a workspace.** A *box* is a VM: provider, resources, image, and one
 privileged account. It is created on its own (`devbox box create dev [flags]`)
@@ -118,9 +118,11 @@ devbox box create dev --provider aws --bundle xlarge_3_0 [--blueprint amazon_lin
 Two spellings, and which one you use says what shape the directory has:
 
 - **`<repo>/.devbox/config.toml`** — the workspace IS one repo; the marker hides
-  in its tree. Mods go in `.devbox/mods/`.
+  in its tree. Mods go in `.devbox/mods/`, the home-manager module in
+  `.devbox/default.nix`.
 - **`<root>/devbox.toml`** — the workspace HOLDS repos, as children of the root.
-  Nothing to hide from, so the marker is visible. Mods go in `<root>/mods/`.
+  Nothing to hide from, so the marker is visible. Mods go in `<root>/mods/`,
+  the home-manager module in `<root>/default.nix`.
 
 devbox walks up for either, nearest level first; a directory with both errors.
 
@@ -129,7 +131,7 @@ devbox walks up for either, nearest level first; a directory with both errors.
 # box = "<name>"        # the box to attach to (canonical name, e.g. "ec2-dev");
 #                       #   default = the workspace's own name, i.e. a box of its own
 # agent_user = "<name>" # unprivileged account agents run as; default = workspace
-mods = ["rust"]          # workspace mods, appended after the base playbook
+mods = ["rust"]          # script mods, appended after the base playbook
 
 [env]                    # creds/vars into the box's shell env; overrides global per-key
 GITHUB_TOKEN = "github_pat_..."   # how the box gets GitHub auth (repo-scoped PAT)
@@ -188,14 +190,33 @@ src = ".claude/skills"
 
 ### Mods (provisioning)
 
-There are two built-in playbooks: the **box** one (`box-packages → kernel → nix`),
-which runs once per box as root, and the **workspace** one (`home-manager →
-github-auth → jj → dotfiles → neovim → claude-code → cargo-binstall →
-repo-bootstrap`), which runs once per attachment in that
-workspace's account. A workspace names anything else it needs in `mods`, which
-built-in opt-ins answer to as well as its own: `mods = ["nodejs"]` gets the
-Node.js LTS with npm from the generation. Add a mod of your own for tooling no
-built-in covers (`Cargo.toml` → a rust mod):
+**The home environment is nix.** The agent's home-manager generation is the
+workspace's `default.nix` (`.devbox/default.nix`, or beside `devbox.toml`), a
+plain home-manager module that imports what it wants:
+
+```nix
+{ devbox, pkgs, ... }: {
+  imports = with devbox; [
+    builtinModules.default builtinModules.nodejs globalModules.rust ./extra.nix
+  ];
+  home.packages = [ pkgs.htop ];
+}
+```
+
+`devbox.builtinModules` are devbox's own (`default` = dotfiles + neovim +
+cargo-binstall; opt-ins `uv`, `nodejs`, `cloudflared`); `devbox.globalModules` are
+`~/.config/devbox/modules/<name>.nix` or `<name>/default.nix`, shared across
+workspaces. No `default.nix` means `devbox.builtinModules.default`. `jj` and
+`github-auth` are always included. Only the `.nix` files beside `default.nix`
+travel to the box. Run `devbox nix check` after any `.nix` change. Prefer a
+module over a script for anything a nix package can provide.
+
+**Script mods** cover the rest. There are two built-in playbooks: the **box**
+one (`box-packages → kernel → nix`), which runs once per box as root, and the
+**workspace** one (`home-manager → claude-code → repo-bootstrap`), which runs
+once per attachment in that workspace's account. A workspace appends scripts in
+`mods` (built-in opt-ins: `codex`, `claude-github-mcp`, `claude-linear-mcp`).
+For tooling nix can't provide (`Cargo.toml` → a rustup-managed toolchain):
 
 1. List it: `mods = ["rust"]` in the marker file.
 2. Write `<mods dir>/rust.sh` (`.devbox/mods/` or `mods/`, matching the marker)
@@ -242,15 +263,8 @@ anything system-wide is shared with every other workspace on that box, and devbo
 prints a warning naming the mod.
 
 Resolution is **workspace > global (`~/.config/devbox/mods`) > built-in** by name.
-A nix module (a converted mod, or one that never was a script - see below)
-resolves by the same precedence out of the **same** directories, as a
-`<name>.nix` beside the `<name>.sh` scripts: `<workspace mods dir>/`, then
-`~/.config/devbox/mods/`, then devbox's own built-in `devbox/mods/`. One
-directory per level, holding both halves; a `<name>.sh` anywhere still wins
-over any module of that name. `devbox nix check` evaluates the modules on the
-host - it assembles a payload flake, since `devbox/nix/` is a skeleton that
-cannot be evaluated as it sits - and is the only way to check one without a
-box; run it on any `.nix` change.
+A name that is a home-manager module (`mods = ["uv"]`) is an error saying which
+import to add to `default.nix`.
 Every mod must be idempotent (it runs on `create` *and* every `devbox sync
 --mods`): overwrite unconditionally or guard on "already done". A mod is the
 *only* workspace-level extension point: devbox's first-boot layer is one fixed
@@ -258,7 +272,7 @@ init script it ships, and the old `.devbox/cloud-config.yaml` fragment no longer
 exists.
 
 A mod that needs another mod to run first declares it in its metadata block:
-`requires = ["jj", "github-auth"]`. devbox validates this statically at playbook
+`requires = ["claude-code"]`. devbox validates this statically at playbook
 resolution (before boot) and hard-errors if a required mod is missing or ordered
 after the mod needing it — it doesn't reorder, just enforces order. The box
 playbook is indexed first, so a workspace mod may depend on a box mod.

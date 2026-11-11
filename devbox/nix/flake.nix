@@ -7,13 +7,14 @@
 # WHAT SITS BESIDE THIS FILE DEPENDS ON WHERE YOU ARE LOOKING. In devbox's own
 # repo this directory is a SKELETON - flake.nix, options.nix, zshenv.nix - and
 # it cannot be evaluated: options.nix imports a `workspace.nix` that does not
-# exist yet, and there is no `modules/` at all. Both appear only in an
-# assembled payload, where devbox renders `workspace.nix` per attachment
-# (provision.render_workspace_nix) and writes one `modules/<name>.nix` per
-# module it resolved, out of the same mods directories the bash mods come from
-# (provision.nix_payload_files). `devbox nix check` assembles one on the host
-# and runs nix against it; that is the only way to evaluate a module without a
-# box.
+# exist yet. An assembled payload (provision.nix_payload_files) adds:
+#
+#   workspace.nix     rendered per attachment: agent user, home, jj identity
+#   devbox-modules/   devbox's own modules (devbox/modules/)
+#   my-modules/       the user's shared modules (~/.config/devbox/modules/)
+#   workspace/        the workspace's default.nix and its sibling .nix files
+#
+# `devbox nix check` assembles one on the host and runs nix against it.
 #
 # HOME-MANAGER IS AGENT-ONLY. The box's privileged account keeps its distro zsh
 # and vim, because that account is the machine's debugging entry point
@@ -47,124 +48,51 @@
 #
 # ---- MODULE CONVENTIONS (read this before adding a module) ------------------
 #
-# CONVERTING A MOD, end to end. Three steps, and the third is "nothing". All
-# of it happens in ONE directory - `devbox/mods/` for a built-in, a workspace's
-# own mods directory for its own, `~/.config/devbox/mods/` for a global one -
-# because that is where both halves of a mod live:
+# A MODULE IS A PLAIN HOME-MANAGER MODULE: importing it turns it on, and there
+# are no devbox enable flags. Every module gets a `devbox` argument holding two
+# attrsets of importable modules keyed by name (`<name>.nix`, or
+# `<name>/default.nix`). It is a module argument, not `config.devbox`:
 #
-#   1. Write `<mod-name>.nix` beside the script, named exactly as it (see the
-#      shape below).
-#   2. DELETE `<mod-name>.sh`, in the same commit. This step is NECESSARY, not
-#      tidy: a name can have both halves, so a script left in place still runs
-#      beside the new module, and the mod is installed twice.
-#   3. Leave `WORKSPACE_BASE_MODS` (provision.py) ALONE. The name stays in the
-#      playbook: that tuple lists what an attachment gets, not which half
-#      provides it, and devbox resolves each name by file presence -
-#      `<name>.sh` in a mods directory, else `<name>.nix` in the same
-#      directories. Removing the name would turn the module off. The same goes
-#      for a mod a workspace names in its own `mods = [...]`: that config keeps
-#      working untouched.
+#   devbox.builtinModules   devbox/modules/             e.g. .neovim
+#   devbox.globalModules    ~/.config/devbox/modules/   shared across workspaces
 #
-# Then run `devbox nix check` before you commit it. Nothing else on a host
-# evaluates a module.
+# The generation is options.nix, zshenv.nix, `jj` and `github-auth` (always:
+# repo-bootstrap clones with them), plus the workspace's own `default.nix` -
+# or `devbox.builtinModules.default`, the base profile, when it has none:
 #
-# THE OTHER DIRECTION IS THE SAME MOVE MIRRORED - write `<name>.sh`, delete
-# `<name>.nix`, leave the playbook tuples alone - and `claude-code` and `codex`
-# are deliberately on that side of the line. Both install a binary into
-# ~/.local/bin that replaces ITSELF as new versions ship, which a read-only
-# store path cannot do; a package would pin each to the version this file's
-# nixpkgs rev happens to name. Their MCP companions (`claude-github-mcp`,
-# `claude-linear-mcp`) are scripts for a plainer reason: they drive the
-# `claude` those installers put in the account's own home.
-#
-# THIS FILE NEVER LISTS MODULES BY NAME. `modules` below is every `.nix` file
-# `readDir` finds directly under `./modules`, which exists only in an assembled
-# payload - devbox writes one file there per name it resolves (built-in,
-# global, or a workspace's own - see provision.find_nix_module), whatever
-# directory it came from, and this flake imports whatever landed. That is what
-# lets a mod's two halves live side by side in one directory at every level,
-# and what makes a workspace's or a user's global `<mods dir>/<name>.nix` work
-# with zero changes here: a module never has to be in devbox's own repo, and
-# never has to sit in a directory shaped like a flake.
-#
-# Two consequences worth knowing. A mod that `requires` a converted one still
-# validates - a module is not a step in the run, so it satisfies a dependency
-# wherever it sits (a name that has a script as well is checked by the
-# script's position, since a mod may need what the script makes). And a converted name is no longer in the driver's manifest,
-# so it has no script of its own to run: the way to reconverge a converted mod
-# is `devbox sync --mods`, which re-switches the whole generation.
-#
-# `devbox.mods.<name>.enable` MEANS "the generation provides this mod". devbox
-# renders one flag per resolved module name (options.nix declares them
-# free-form), so:
-#
-#   * a mod the workspace's playbook names                               -> true
-#   * a mod the workspace never asked for                                -> false
-#
-# A `<name>.sh` does not change the flag. A name can have both halves: the
-# script is a step in the driver's manifest and the module is part of the
-# generation, and the switch (`home-manager`, the first workspace mod) comes
-# before any script runs - so a script can use what its module put on the
-# PATH, and a module cannot use what a script makes in the same run. Each
-# suffix shadows only its own: to replace a built-in module, a workspace
-# ships its own `<name>.nix` (an empty `{ ... }: { }` turns it off), never a
-# `<name>.sh`. A module READS its own flag and never declares
-# it. A module that needs more than a boolean declares its own options in its
-# own namespace (`options.devbox.<name>.<option>`), outside `devbox.mods`.
-#
-# Shape:
-#
-#     { config, lib, pkgs, ... }:
-#     lib.mkIf config.devbox.mods.<mod-name>.enable {
-#       home.packages = [ pkgs.<package> ];
+#     { devbox, pkgs, ... }: {
+#       imports = with devbox; [
+#         builtinModules.default builtinModules.uv globalModules.rust
+#       ];
+#       home.packages = [ pkgs.htop ];
 #     }
 #
+# A workspace's default.nix may import sibling `.nix` files (`./extra.nix`);
+# nothing else beside it travels to the box. A path outside the payload (an
+# absolute host path) evaluates on the host and fails on the box.
+#
 # The workspace's values are `config.devbox.workspace`: agentUser,
-# homeDirectory, jjName, jjEmail. Read them from there, never by importing
-# workspace.nix - options.nix is the one place that reads that file.
+# homeDirectory, jjName, jjEmail. A setting that is global rather than
+# per-module (`nixpkgs.config.allowUnfree`) goes in options.nix.
 #
-# A package goes into the profile with `home.packages`; a program's
-# configuration goes through home-manager's own `programs.<name>`. A setting
-# that is global rather than per-mod (`nixpkgs.config.allowUnfree`, say) goes
-# in options.nix's `config` block, so there is one place to look for it.
+# ONE OWNER PER FILE. Two modules defining the same `home.file` entry are an
+# evaluation conflict. `dotfiles.nix` imports configenv, which owns ~/.zshrc
+# (through `programs.zsh`), vim, ~/.vimrc, ~/.ideavimrc, ~/.tmux.conf,
+# ~/.gitconfig, ~/.config/jj/config.toml and ~/.config/nvim; zshenv.nix owns
+# ~/.zshenv through the same `programs.zsh`. A module wanting one of those
+# reaches for whatever keeps it off the path - `neovim.sideloadInitLua`,
+# jj's conf.d, ~/.config/git/config (github-auth.nix).
 #
-# EXCEPT WHERE ANOTHER MODULE ALREADY OWNS THE FILE. Two modules that define
-# the same `home.file` entry are an evaluation conflict, and a module that
-# claims a path some bash mod writes on the box is a switch that aborts on its
-# own stale `<file>.devbox-backup` the second time round. `dotfiles.nix`
-# imports configenv, which owns ~/.zshrc (through `programs.zsh`), vim
-# (through `programs.vim`), ~/.vimrc, ~/.ideavimrc, ~/.tmux.conf,
-# ~/.gitconfig, ~/.config/jj/config.toml and ~/.config/nvim; devbox's own
-# zshenv.nix owns ~/.zshenv through the same `programs.zsh`. A module wanting one of those reaches for whatever keeps it
-# off the path instead - a `programs.<name>` option that writes elsewhere
-# (`neovim.sideloadInitLua`), a config directory the program reads in addition
-# (`jj.nix`'s conf.d), or plain `home.packages` with no `programs.<name>` at
-# all. `github-auth.nix` is the same rule read forwards: it claims
-# ~/.config/git/config precisely because configenv owns ~/.gitconfig.
-#
-# THE PROFILE IS THE SAME PROBLEM ONE LEVEL DOWN. `home.packages` is a merged
-# list no module can take an entry out of, and `buildEnv` refuses two paths
-# that own one file - two packages both providing bin/vim, say. A priority
-# settles it where the duplicate is unavoidable: every path gets 5 unless its
-# meta says otherwise, so `lib.hiPrio` on the one that should win skips the
-# other rather than colliding. NEITHER of these two failures is an evaluation
-# error, so `devbox nix check` sees them only with `--build`.
+# THE PROFILE IS THE SAME PROBLEM ONE LEVEL DOWN: `buildEnv` refuses two
+# packages owning one file; `lib.hiPrio` settles it. Neither failure is an
+# evaluation error, so `devbox nix check` sees them only with `--build`.
 #
 # NO SECRETS, EVER. /nix/store is world-readable, on a box every attached
-# workspace shares, so nothing from a workspace's `[env]` may appear in a nix
-# expression - not as a value and not as a file an expression reads.
-# Credentials stay in the 0600 ~/.config/devbox/env that `devbox sync
-# --envvars` writes, and a mod that needs one reads it at run time.
+# workspace shares. Credentials stay in the 0600 ~/.config/devbox/env, and a
+# module that needs one reads that file at run time.
 #
-# WORKSPACE-LOCAL AND GLOBAL .nix MODULES ARE SUPPORTED, same
-# workspace > global > built-in precedence as a bash mod, and out of the same
-# three directories (provision.mods_dirs): a workspace's own
-# `<mods dir>/<name>.nix` (either marker spelling - see config.Marker), a
-# user's global `~/.config/devbox/mods/<name>.nix`, and devbox's own
-# `devbox/mods/<name>.nix`. Each resolves like the others and shadows the
-# levels below it. A module needing sibling files of its own (its own lib,
-# say) isn't supported yet - every shipped module today is one self-contained
-# file, and only `readDir`-discovered `.nix` files travel in the payload.
+# AGENT CLIs STAY SCRIPTS (`claude-code`, `codex`): their installers put a
+# binary in ~/.local/bin that updates itself, which a store path cannot do.
 {
   description = "devbox agent home environment";
 
@@ -198,31 +126,44 @@
       # fails at evaluation, and a single `agent` could only ever guess.
       systems = [ "aarch64-linux" "x86_64-linux" ];
 
-      # Every mod this payload ships a module for, whatever put it here -
-      # devbox's own built-in, a user's global config, or this workspace's
-      # own (see provision.nix_payload_files) - discovered rather than named,
-      # which is what lets a module live outside devbox's own repo. `readDir`
-      # on `./modules` is pure: by the time this evaluates, the flake (this
-      # whole directory) is already a realized store path (`path:` copies it
-      # there - see the note above), so this reads no more of the filesystem
-      # than importing a hardcoded list would.
-      moduleFiles = lib.filterAttrs (name: type: type == "regular" && lib.hasSuffix ".nix" name)
-        (builtins.readDir ./modules);
-      discoveredModules = map (name: ./modules + "/${name}") (builtins.attrNames moduleFiles);
+      # `<name>.nix` and `<name>/default.nix` under `dir`, keyed by name; {}
+      # when the payload has no such directory.
+      modulesIn = dir:
+        let
+          entries = lib.filterAttrs (name: type:
+            (type == "regular" && lib.hasSuffix ".nix" name)
+            || (type == "directory" && builtins.pathExists (dir + "/${name}/default.nix")))
+            (builtins.readDir dir);
+        in
+        if builtins.pathExists dir
+        then lib.mapAttrs' (name: _: lib.nameValuePair (lib.removeSuffix ".nix" name) (dir + "/${name}")) entries
+        else { };
+
+      builtinModules = modulesIn ./devbox-modules;
+      globalModules = modulesIn ./my-modules;
+
+      workspaceModule =
+        if builtins.pathExists ./workspace/default.nix
+        then ./workspace/default.nix
+        else builtinModules.default;
+
+      # `devbox nix check` imports every module it can find, so a typo in one
+      # no workspace uses still fails the check.
+      checkModules = lib.optionals ((import ./workspace.nix).checkAll or false)
+        (builtins.attrValues builtinModules ++ builtins.attrValues globalModules);
 
       mkAgent = system: home-manager.lib.homeManagerConfiguration {
         pkgs = nixpkgs.legacyPackages.${system};
-        # A module reaches an input through its own argument list. `configenv`
-        # is the only one worth handing over: it is a module a mod imports,
-        # not a package set.
-        extraSpecialArgs = { inherit configenv; };
+        extraSpecialArgs = {
+          inherit configenv;
+          devbox = { inherit builtinModules globalModules; };
+        };
         modules = [
-          # The option surface, and the rendered workspace values.
           ./options.nix
-          # devbox's own shell plumbing: the agent's ~/.zshenv. Not a mod, so
-          # it is always in the generation and reads no `devbox.mods` flag.
           ./zshenv.nix
-        ] ++ discoveredModules;
+          builtinModules.jj
+          builtinModules.github-auth
+        ] ++ checkModules ++ [ workspaceModule ];
       };
     in
     {

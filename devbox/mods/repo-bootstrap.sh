@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
 #
-# /// mod
-# requires = ["jj", "github-auth"]
-# ///
-#
 # mod: repo-bootstrap - get the workspace's checkouts onto the box, one per
 # [[repos]] entry. "clone" pulls an existing repo via jj; "push" leaves an empty
-# colocated jj+git repo ready to receive `jj git push` from the host. Ordered
-# last in the workspace playbook, after jj. `github-auth` is the other
-# dependency of a private clone; it is a home-manager module, not a step in
-# the run, so the generation (switched first, by `home-manager`) satisfies it
-# wherever it sits.
+# colocated jj+git repo ready to receive `jj git push` from the host. Runs after
+# `home-manager`, whose generation always carries jj and the github-auth
+# credential helper a private clone needs.
 #
 # Every checkout lands in this one account, which is what makes them share a set
 # of git/jj credentials - the point of putting several repos in one workspace.

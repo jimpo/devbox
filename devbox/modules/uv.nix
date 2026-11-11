@@ -2,6 +2,6 @@
 # Python projects and for installing Python CLIs as uv tools.
 { config, lib, pkgs, ... }:
 
-lib.mkIf config.devbox.mods.uv.enable {
+{
   home.packages = [ pkgs.uv ];
 }

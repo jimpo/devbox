@@ -18,11 +18,7 @@
 # CLI out of its own profile; `mods/home-manager.sh` runs a pinned one with
 # `nix run` instead, so the generation does not carry it.
 #
-# CONFIGENV CARRIES ITS OWN ENABLE OPTION, and this module sets it rather than
-# wrapping the import in `lib.mkIf`: `imports` cannot sit inside a conditional,
-# so the file is always imported and `configenv.enable` is what decides whether
-# it places anything. `config.devbox.mods.dotfiles.enable` is the flag every
-# other module reads, and it means the same here.
+# CONFIGENV CARRIES ITS OWN ENABLE OPTION; importing this module turns it on.
 #
 # `configenv` (the argument) is the input flake.nix hands over through
 # `extraSpecialArgs` - the repository itself, taken as a non-flake input.
@@ -48,9 +44,9 @@
 # the custom directory the module links, and it sources nothing when
 # ~/.config/base16-shell is absent, so the box's zsh keeps its terminal's own
 # colors.
-{ config, configenv, ... }:
+{ configenv, ... }:
 {
   imports = [ configenv.outPath ];
 
-  configenv.enable = config.devbox.mods.dotfiles.enable;
+  configenv.enable = true;
 }

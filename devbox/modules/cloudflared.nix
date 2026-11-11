@@ -51,7 +51,7 @@ let
     exec ${lib.getExe pkgs.cloudflared} tunnel --no-autoupdate run
   '';
 in
-lib.mkIf config.devbox.mods.cloudflared.enable {
+{
   home.packages = [ pkgs.cloudflared ];
 
   systemd.user.services.cloudflared = {

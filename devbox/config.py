@@ -42,11 +42,8 @@ from .util import die, warn
 # the two shapes stay symmetric. Which one was found is the `root_is_repo` bit,
 # and it is what supplies each repo's default host path (see `_resolve_repos`).
 #
-# That one directory holds BOTH halves of a mod: `<name>.sh` for a bash mod and
-# `<name>.nix` for a home-manager module (see provision.find_nix_module). A mod
-# can have either or both, and keeping them in one place is what makes that
-# visible - the two files sit next to each other, and which halves a name has
-# is a fact about one directory listing rather than about two.
+# The workspace's home-manager module, `default.nix`, sits beside its config
+# file either way (see provision.WORKSPACE_MODULE_FILE).
 WORKSPACE_MARKER_FILE = "devbox.toml"       # <root>/devbox.toml
 REPO_MARKER_DIR = ".devbox"                 # <repo>/.devbox/
 REPO_MARKER_CONFIG = "config.toml"          # <repo>/.devbox/config.toml
@@ -456,7 +453,7 @@ class Marker:
     is what the two spellings would otherwise force on every call site."""
     root: Path                   # the workspace root
     config_path: Path            # <root>/devbox.toml, or <root>/.devbox/config.toml
-    mods_dir: Path               # <root>/mods, or <root>/.devbox/mods - both halves
+    mods_dir: Path               # <root>/mods, or <root>/.devbox/mods
     root_is_repo: bool           # which spelling was found (see the constants above)
 
 

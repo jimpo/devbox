@@ -18,7 +18,7 @@ pytest never evaluates nix.
 ## Packaging
 
 Every data file devbox resolves through `Path(__file__).parent` lives inside
-`devbox/` (`init-script.sh`, `provision-driver.sh`, `mods/`, `nix/`), so
+`devbox/` (`init-script.sh`, `provision-driver.sh`, `mods/`, `modules/`, `nix/`), so
 `packages = ["devbox"]` ships them with no build entry. Keep it that way: a data
 file outside the package works under an editable install and is silently missing
 from a wheel.
@@ -30,10 +30,11 @@ from a wheel.
 - **Config**: global/workspace loading and merging, both marker spellings and
   walk-up, `[[repos]]` validation, `secrets.env`, box-spec resolution and the
   rejection of hardware keys, username defaults and validation.
-- **Provisioning**: mod resolution and precedence for both halves, `# /// mod`
+- **Provisioning**: mod resolution and precedence, `# /// mod`
   parsing, `requires` ordering, `scoped_runas`, the playbooks' exact contents,
   manifest/repos/env rendering, `RETIRED_MODS`.
-- **Nix rendering**: `render_workspace_nix`, `nix_payload_files`, the skeleton's
+- **Nix rendering**: `render_workspace_nix`, `nix_payload_files` (what of a
+  workspace's `default.nix` directory and the global modules ships), the skeleton's
   contents, pins agreeing between `flake.nix` and `home-manager.sh`, and per-mod
   invariants (e.g. no `[env]` value in any payload file, the MCP headers'
   unexpanded `${…}`).
@@ -67,12 +68,11 @@ Conventions:
 ## `devbox nix check`
 
 Assembles a payload flake in a temp dir (the skeleton, a placeholder
-`workspace.nix`, every resolvable module) and forces
-`homeConfigurations.agent-<system>.activationPackage`.
+`workspace.nix` with `checkAll = true`, every built-in and global module) and
+forces `homeConfigurations.agent-<system>.activationPackage`.
 
-- **Every module is enabled.** A false flag leaves a module's body in an unforced
-  `mkIf`, so mirroring a real playbook would evaluate almost nothing.
-- Inside a workspace it includes that workspace's own modules too.
+- **Every module is imported**, so a typo in one no workspace uses still fails.
+- Inside a workspace it imports that workspace's `default.nix` too.
 - It reaches the network: `configenv` is a branch, re-resolved each run.
 - `--build` realises the closure (minutes). Only a build catches two packages
   claiming one profile path, or two `home.file`s claiming one home path.

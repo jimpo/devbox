@@ -17,7 +17,7 @@
 # nothing and exits 1, git falls through, and public clones are unaffected.
 { config, lib, pkgs, ... }:
 
-lib.mkIf config.devbox.mods.github-auth.enable {
+{
   home.packages = [ pkgs.gh ];
 
   home.file.".config/git/config".text = ''

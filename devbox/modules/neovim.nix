@@ -27,7 +27,7 @@
 # call, because they belong to a different copy of the plugin (see above), so
 # the CLI goes in the profile the way the tarball used to go in /usr/local.
 { config, lib, pkgs, ... }:
-lib.mkIf config.devbox.mods.neovim.enable {
+{
   programs.neovim = {
     enable = true;
     sideloadInitLua = true;

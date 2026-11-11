@@ -104,7 +104,7 @@ or skipped:
 - `install_bash_env` writes each account's `~/.bash_env`, the only thing that puts
   nix on a **non-interactive** PATH (`ssh box '<cmd>'`, Claude Code's Bash tool):
   the store's profile script, `hm-session-vars.sh`, and `~/.nix-profile/bin`
-  ahead of `~/.local/bin`, so a stale binary from a since-converted mod can't
+  ahead of `~/.local/bin`, so a stale binary from a since-removed script mod can't
   shadow the generation.
 
 Then for each mod: dnf-install its `packages` as the privileged user (dnf
@@ -130,25 +130,20 @@ attachment. `trusted-users` holds only the privileged account, since a trusted
 user could push paths another workspace's agent would run. There's no GC timer;
 the daemon's `min-free`/`max-free` reclaim space under pressure.
 
-## Mods: two halves
+## Mods and modules
 
-A playbook name resolves (`resolve_playbook` → `Playbook(specs, modules)`) by file
-presence in the three `mods_dirs` (workspace > global > built-in):
-`<name>.sh` puts it in `specs` (a manifest line), `<name>.nix` in `modules` (part
-of the generation). A name can have both. Each suffix shadows only its own suffix
-at every level. There is no registry to keep in step, and `find_mod_script` and
-`find_nix_module` differ only in the suffix.
+A playbook name resolves to a `<name>.sh` in the three `mods_dirs` (workspace >
+global > built-in). Home-manager modules are not mods: they live in
+`devbox/modules/` and `~/.config/devbox/modules/`, and a workspace imports them
+from its `default.nix`. A `mods` entry naming a module dies with the import to
+write instead, and a `.nix` left in a mods dir dies (`_reject_nix_in_mods_dirs`)
+rather than being silently ignored. A retired script name goes in
+`RETIRED_MODS`.
 
 `home-manager` is the first workspace mod, so the generation is switched before
 any script runs and a script can use what a module put on PATH (`repo-bootstrap`
-runs `jj` from `jj.nix` through `github-auth.nix`'s credential helper). So
-`_validate_ordering` treats a module-only dependency as satisfied wherever it
-sits, but checks a dependency that has a script by its position.
-
-**Converting a mod** from script to module: write `<name>.nix`, delete
-`<name>.sh` (a leftover script still runs beside the module), leave the playbook
-alone. `flake.nix`'s conventions block spells out the recipe. A retired name goes
-in `RETIRED_MODS` so a config still naming it gets an error saying where it went.
+runs `jj` through `github-auth`'s credential helper, which is why the flake
+always imports those two).
 
 **Agent CLIs stay scripts** (`claude-code`, `codex`): their installers put a
 self-updating binary in the account's own `~/.local/bin`, which a read-only store
@@ -159,18 +154,24 @@ binary, so the PATH order has nothing to shadow.
 
 `devbox/nix/` is a **skeleton**, not a working flake: `flake.nix`, `options.nix`,
 `zshenv.nix`. `nix_payload_files` assembles a real one per attachment: the
-skeleton, a rendered `workspace.nix`, and one `modules/<name>.nix` per resolved
-module copied from whichever mods dir it came from. That assembled layout is all
-nix sees, so it can't be evaluated in place (`devbox nix check` assembles one).
+skeleton, a rendered `workspace.nix`, `devbox-modules/` (devbox/modules),
+`my-modules/` (the whole `~/.config/devbox/modules` tree) and `workspace/` (the
+workspace's `default.nix` and its sibling `.nix` files only - beside
+`devbox.toml` sit the repos, beside `.devbox/config.toml` the secrets). That
+assembled layout is all nix sees (`devbox nix check` assembles one).
 
-- `flake.nix` `readDir`s `./modules` rather than importing a list: adding a
-  module is one file. Every `.nix` in a mods dir is therefore a module.
-- `options.nix` declares `devbox.workspace.*` and free-form
-  `devbox.mods.<name>.enable`, and is the only importer of `workspace.nix`.
-- `render_workspace_nix` writes agent user, home, jj identity and **one flag per
-  shipped module**: true when this attachment's playbook names it, false otherwise
-  (a missing attribute is an evaluation error, not a false). Strings are escaped
-  for nix.
+- `flake.nix` `readDir`s `devbox-modules/` and `my-modules/` into the
+  `devbox.builtinModules` / `devbox.globalModules` attrsets (`<name>.nix` or `<name>/default.nix`)
+  and hands them to every module through `extraSpecialArgs`. Importing a module
+  turns it on; there are no enable flags.
+- The generation is `options.nix`, `zshenv.nix`, `jj`, `github-auth`, and
+  `workspace/default.nix` - or `devbox.builtinModules.default` when there is none. So
+  the base profile lives in devbox, and a workspace that imports it keeps
+  getting its updates.
+- `options.nix` declares `devbox.workspace.*` and is the only importer of
+  `workspace.nix` for those values. `render_workspace_nix` writes agent user,
+  home, jj identity (escaped for nix) and `checkAll`, which `devbox nix check`
+  sets to import every module.
 - nixpkgs and home-manager are pinned to exact revs. `configenv` (dotfiles) is a
   **non-flake** input on a rolling branch, so there is **no `flake.lock`**: a lock
   would freeze configenv, and the exact revs make nix's on-box lock deterministic
@@ -243,13 +244,13 @@ discard paths the box's other workspaces are about to reuse.
 - `config.py` — `GlobalConfig`, `WorkspaceConfig`, `Marker`/`find_workspace`,
   `[[repos]]`, `secrets.env` merge, `resolve_instance`/`parse_instance_name`,
   `resolve_box_spec`.
-- `provision.py` — mod resolution (both halves), the two playbooks, metadata
+- `provision.py` — mod resolution, the two playbooks, metadata
   parsing, `scoped_runas` + `render_manifest`, `render_repos`, context/env
   rendering, `render_workspace_nix`, payload assembly.
 - `provision-driver.sh` — the on-box driver (above).
 - `init-script.sh` + `initscript.py` — first boot.
-- `mods/` — built-in mods, both halves in one directory. `nix/` — the flake
-  skeleton.
+- `mods/` — built-in script mods. `modules/` — built-in home-manager modules
+  (`devbox.builtinModules`). `nix/` — the flake skeleton.
 - `sync.py` — `run_sync` and `run_envvars`.
 - `providers/` — the backend seam. `base.py` (`Provider`, `InstanceSpec`,
   `Instance`); `libvirt.py`, `ec2.py`, `lightsail.py` (the `aws` provider), `kubevirt.py`

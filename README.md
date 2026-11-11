@@ -151,21 +151,21 @@ box of its own, named after itself.
 devbox walks up from the working directory (or `-C PATH`) for either; nearest
 wins, and a directory holding both is an error.
 
-**Mods.** A workspace changes its account through **mods**, named in its
-`mods = [...]` list. Every workspace also runs a built-in base set: jj, dotfiles,
-Claude Code, GitHub auth, and repo bootstrap. A mod comes in one of two kinds,
-and a name can have both:
+**Home environment and mods.** A workspace configures its account two ways:
 
-- **Nix mods** (`<name>.nix`) are home-manager modules, built into the agent's
-  generation. They are declarative, pinned, shared through the box's nix store,
-  and can be reapplied safely. **Prefer them.**
-- **Script mods** (`<name>.sh`) are idempotent bash scripts the provisioning
-  driver runs. They are the escape hatch for what a package in the store can't
-  do: RPM packages, system state (`runas = ["root"]`), or a tool that has to
-  update itself in the account's home, like the Claude Code and Codex installers.
+- **`default.nix`**, a home-manager module beside the marker
+  (`.devbox/default.nix`, or `default.nix` next to `devbox.toml`). It imports
+  what it wants from `devbox.builtinModules` (devbox's own) and `devbox.globalModules`
+  (`~/.config/devbox/modules/`, shared across workspaces). Without one, the
+  workspace gets `devbox.builtinModules.default`: dotfiles, neovim, cargo-binstall.
+  Declarative, pinned, shared through the box's nix store. **Prefer it.**
+- **Script mods** (`<name>.sh`), named in `mods = [...]`, are idempotent bash
+  scripts the provisioning driver runs. They are the escape hatch for what a
+  package in the store can't do: RPM packages, system state
+  (`runas = ["root"]`), or a tool that has to update itself in the account's
+  home, like the Claude Code and Codex installers.
 
-Both kinds live in the workspace's mods directory (or a global or built-in one),
-and `devbox sync --mods` reapplies them to a live box. See [Mods](#mods).
+`devbox sync --mods` reapplies both to a live box. See [Mods](#mods).
 
 **Accounts.** Every box has one privileged account and one unprivileged account
 per attached workspace. Agents run as the latter.
@@ -293,7 +293,7 @@ Every key is optional; an empty file is a valid marker.
 # workspace = "my-workspace"  # default: the directory's basename
 # box = "dev"                 # default: the workspace's own name
 # agent_user = "my-workspace" # default: the workspace name; a legal, non-system username
-# mods = ["rust"]             # appended to the base playbook (see Mods)
+# mods = ["rust"]             # script mods, appended to the base playbook (see Mods)
 
 [[repos]]                     # one per checkout; none = no repo bootstrap
 name = "my-repo"              # omit only under .devbox/, meaning "the root is the repo"
@@ -409,13 +409,46 @@ dirty. Don't force it — check what the agent left uncommitted.
 
 ## Mods
 
-Everything after first boot is a **mod**: a home-manager module (preferred), an
-idempotent bash script, or both, under one name.
+Everything after first boot is either the agent's **home-manager generation**
+(preferred) or an idempotent bash **script mod**.
+
+### The generation: `default.nix`
+
+```nix
+# .devbox/default.nix  (or default.nix beside devbox.toml)
+{ devbox, pkgs, ... }: {
+  imports = with devbox; [
+    builtinModules.default    # the base profile: dotfiles, neovim, cargo-binstall
+    builtinModules.uv
+    globalModules.rust        # ~/.config/devbox/modules/rust.nix (or rust/default.nix)
+    ./extra.nix               # a sibling .nix file
+  ];
+  home.packages = [ pkgs.htop ];
+}
+```
+
+- With no `default.nix`, the generation is `devbox.builtinModules.default`. Leave that
+  import out to drop the base profile (and with it configenv's dotfiles).
+- `jj` and `github-auth` are always in the generation; `repo-bootstrap` clones
+  with them.
+- Built-in modules: `default`, `dotfiles`, `neovim`, `cargo-binstall`, `jj`,
+  `github-auth`, `uv`, `nodejs`, `cloudflared`.
+- What travels to the box: the whole `~/.config/devbox/modules/` tree, and the
+  `.nix` files beside `default.nix` (not subdirectories, not other files). An
+  import of an absolute host path fails on the box.
+- The workspace's values are `config.devbox.workspace.{agentUser,
+  homeDirectory, jjName, jjEmail}`.
+- Never put an `[env]` value in a module; read `~/.config/devbox/env` at run
+  time.
+
+`devbox nix check` evaluates every module, and this workspace's `default.nix`,
+on the host.
+
+### Script mods
 
 ```
 box playbook:        box-packages → kernel → nix
-workspace playbook:  home-manager → github-auth → jj → dotfiles → neovim →
-                     claude-code → cargo-binstall → repo-bootstrap
+workspace playbook:  home-manager → claude-code → repo-bootstrap
                      + your mods = [...]
 ```
 
@@ -427,13 +460,6 @@ A name resolves **workspace > global > built-in**, from
 devbox/mods/                   # built-in
 ```
 
-`<name>.sh` is a step the driver runs; `<name>.nix` is a module in the agent's
-home-manager generation, enabled by `config.devbox.mods.<name>.enable`. Each
-suffix overrides only its own suffix, so to replace a built-in module ship your
-own `<name>.nix` (`{ ... }: { }` turns it off). Every `.nix` file in a mods
-directory must be a home-manager module. Never put an `[env]` value in a module;
-read `~/.config/devbox/env` at run time.
-
 A script declares metadata in a fenced TOML block after the shebang. All keys
 are optional:
 
@@ -441,7 +467,7 @@ are optional:
 #!/usr/bin/env bash
 #
 # /// mod
-# requires = ["jj", "github-auth"]   # must appear earlier; validated, never reordered
+# requires = ["claude-code"]         # must appear earlier; validated, never reordered
 # runas = ["admin", "agent"]         # default ["agent"]; also "root"
 # packages = ["jq", "unzip"]         # RPM names, dnf-installed before the body
 # ///
@@ -463,13 +489,14 @@ per mod under `~/provision/<agent_user>/`.
 
 ### Example: a rust workspace
 
-```toml
-mods = ["rust"]
+```nix
+# .devbox/default.nix
+{ devbox, ... }: { imports = [ devbox.builtinModules.default ./rust.nix ]; }
 ```
 
 ```nix
-# .devbox/mods/rust.nix   (or mods/rust.nix beside devbox.toml)
-{ config, lib, pkgs, ... }:
+# .devbox/rust.nix
+{ lib, pkgs, ... }:
 
 let
   install = pkgs.writeShellScript "devbox-rust-install" ''
@@ -479,7 +506,7 @@ let
     rustup default stable
   '';
 in
-lib.mkIf config.devbox.mods.rust.enable {
+{
   home.packages = [ pkgs.rustup pkgs.sccache ];
 
   home.file.".cargo/config.toml".text = ''
@@ -496,13 +523,14 @@ lib.mkIf config.devbox.mods.rust.enable {
 
 Packages and config files come from the store. The activation hook covers what
 a store can't hold, here the toolchain rustup manages in `~/.rustup`. If the
-build also needs system libraries, add a small script mod with the same name
-next to it, for example `rust.sh` holding only
+build also needs system libraries, add a small script mod, for example
+`.devbox/mods/rust-deps.sh` (named in `mods`) holding only
 `# /// mod` / `# packages = ["clang", "openssl-devel"]` / `# ///`.
 
-`devbox sync --mods` applies it to a live box. The opt-in built-ins are `codex`,
-`nodejs`, `uv`, `cloudflared`, `claude-github-mcp` and `claude-linear-mcp`; each
-file's header says what it does.
+`devbox sync --mods` applies it to a live box. The opt-in built-in modules are
+`nodejs`, `uv` and `cloudflared`; the opt-in script mods are `codex`,
+`claude-github-mcp` and `claude-linear-mcp`. Each file's header says what it
+does.
 
 ## Documentation
 
@@ -512,9 +540,9 @@ file's header says what it does.
 ## Status
 
 devbox is a personal tool, published for reference. It is opinionated: the base
-`dotfiles` mod imports the author's own
-[configenv](https://github.com/jimpo/configenv). To turn it off, put an empty
-`dotfiles.nix` (`{ ... }: { }`) in your global or workspace mods directory.
+profile's `dotfiles` module imports the author's own
+[configenv](https://github.com/jimpo/configenv). To turn it off, write a
+`default.nix` that doesn't import `devbox.builtinModules.default`.
 Issues and pull requests aren't actively monitored.
 
 ## License

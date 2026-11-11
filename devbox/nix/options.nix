@@ -1,9 +1,8 @@
-# devbox: the option surface a converted mod's module reads, and the bridge
-# from the rendered `workspace.nix` into it.
+# devbox: the option surface a module reads, and the bridge from the rendered
+# `workspace.nix` into it.
 #
 # This is the ONE file that imports workspace.nix. A module reads
-# `config.devbox.workspace.<value>` and `config.devbox.mods.<name>.enable`
-# instead, so the shape of the rendered file stays devbox's business and a
+# `config.devbox.workspace.<value>` instead, so the shape of the rendered file stays devbox's business and a
 # module keeps working if it changes.
 { lib, ... }:
 
@@ -33,29 +32,6 @@ in
         description = "The jj/git author email for this workspace's checkouts.";
       };
     };
-
-    mods = lib.mkOption {
-      # Free-form in the NAME, declared in the shape: the names are the files in
-      # modules/, which devbox discovers rather than this file listing them. A
-      # module reads its own flag; nothing declares one.
-      type = lib.types.attrsOf (lib.types.submodule {
-        options.enable = lib.mkOption {
-          type = lib.types.bool;
-          default = false;
-          description = "Whether the generation provides this mod.";
-        };
-      });
-      default = { };
-      description = ''
-        One entry per module in `modules/`, as `<name>.enable`, rendered by
-        devbox into workspace.nix. The flag means "this attachment's playbook
-        resolves <name> to the generation". It is true whenever the playbook
-        names the mod, also when a bash `<name>.sh` answers to the name (then
-        the script runs as well), and false when the workspace never asked
-        for the mod. Every shipped module gets an entry either way, so a module
-        can read its own flag without the attribute being missing.
-      '';
-    };
   };
 
   config = {
@@ -74,7 +50,6 @@ in
     devbox.workspace = {
       inherit (workspace) agentUser homeDirectory jjName jjEmail;
     };
-    devbox.mods = workspace.mods;
 
     home.username = workspace.agentUser;
     home.homeDirectory = workspace.homeDirectory;

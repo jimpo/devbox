@@ -20,7 +20,7 @@
 # an agent has its own reasons to edit (registries, auth tokens).
 { config, lib, pkgs, ... }:
 
-lib.mkIf config.devbox.mods.nodejs.enable {
+{
   home.packages = [ pkgs.nodejs ];
 
   home.sessionVariables.NPM_CONFIG_PREFIX = "$HOME/.npm-global";

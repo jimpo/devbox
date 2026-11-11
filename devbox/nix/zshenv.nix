@@ -3,10 +3,8 @@
 # human at a shell reads it, and so does `ssh <box> '<cmd>'`, which runs the
 # login shell non-interactively and never reaches ~/.zshrc.
 #
-# ALWAYS PART OF THE GENERATION, and gated on no `devbox.mods.<name>.enable`
-# flag: this is devbox's own shell plumbing, not an optional mod. That is why it
-# sits beside options.nix rather than in modules/ - a file there is a mod NAME,
-# one devbox resolves against the playbook and renders a flag for.
+# ALWAYS PART OF THE GENERATION: devbox's own shell plumbing, not an optional
+# module, so it sits beside options.nix rather than in devbox/modules/.
 #
 # `programs.zsh` IS THE ONE WRITER OF ~/.zshenv, which is why this file enables
 # it and appends through `envExtra` rather than claiming the path with a

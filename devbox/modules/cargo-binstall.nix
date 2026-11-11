@@ -5,7 +5,7 @@
 # box has only if a workspace's own mod installed one.
 { config, lib, pkgs, ... }:
 
-lib.mkIf config.devbox.mods.cargo-binstall.enable {
+{
   home.packages = [ pkgs.cargo-binstall ];
 
   # Where cargo-binstall installs what it fetches ($CARGO_HOME/bin), which
