@@ -1,6 +1,6 @@
 # devbox mod: neovim - the editor in the agent's own profile, built from the
-# flake's nixpkgs pin (neovim-unwrapped 0.12.4), together with the tree-sitter
-# CLI its config compiles parsers with.
+# flake's nixpkgs pin, together with the tree-sitter CLI its config compiles
+# parsers with.
 #
 # THE ADMIN HAS NO nvim. Home-manager is agent-only, so `nvim` now exists in an
 # attachment's profile and nowhere else; the box's privileged account keeps the

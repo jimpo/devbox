@@ -58,7 +58,7 @@ set -euo pipefail
 # input (see nix/flake.nix); bump the two together. Named by its full flake URL
 # rather than the `home-manager/...` registry shorthand, so the switch does not
 # depend on the global flake registry resolving.
-HM_REV="65258d5c65a250189fde2e35f490d15e064c4c62"
+HM_REV="82ce401aa350502897c3f2e85f384d61cd3b0b6d"
 HM_FLAKE="github:nix-community/home-manager/$HM_REV"
 
 flake="${DEVBOX_PAYLOAD_DIR:?home-manager mod: DEVBOX_PAYLOAD_DIR is not set}/nix"

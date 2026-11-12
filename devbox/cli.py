@@ -919,7 +919,7 @@ def cmd_box_sync(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> 
 # sit inside the home: a non-root user's profiles live under
 # $XDG_STATE_HOME/nix/profiles (`home-manager`, `home-manager-<N>-link` and the
 # `profile` that `~/.nix-profile` points at, one link per generation), and
-# home-manager 26.05 keeps its "current generation" root in
+# home-manager keeps its "current generation" root in
 # $XDG_STATE_HOME/home-manager/gcroots. /nix/var/nix/{profiles,gcroots}/per-user
 # is the other place a profile or a root for a named account can sit, so detach
 # clears that too rather than trusting the layout to stay put.

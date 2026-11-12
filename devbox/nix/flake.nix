@@ -32,11 +32,12 @@
 # payload directory is read-only on the box, so nothing there could update it.
 # `nixpkgs` and `home-manager` are pinned to an exact 40-character rev instead,
 # which makes the lock nix writes on the box deterministic for them. To bump
-# them, resolve the two branch heads and paste the revs below (the nixpkgs
-# release and the home-manager branch must match):
+# them, resolve the two branch heads and paste the revs below (nixos-unstable
+# and home-manager master are the matching pair; a box is ephemeral enough not
+# to need a release branch):
 #
-#   curl -s https://api.github.com/repos/NixOS/nixpkgs/branches/nixos-26.05
-#   curl -s https://api.github.com/repos/nix-community/home-manager/branches/release-26.05
+#   curl -s https://api.github.com/repos/NixOS/nixpkgs/branches/nixos-unstable
+#   curl -s https://api.github.com/repos/nix-community/home-manager/branches/master
 #
 # `mods/home-manager.sh` pins its `nix run` of the home-manager CLI to the same
 # rev as the input below; bump both together.
@@ -97,9 +98,9 @@
   description = "devbox agent home environment";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/7dcdd87373d72e7a2173e4db02e20d3d7f495cfd";
+    nixpkgs.url = "github:NixOS/nixpkgs/177d0540942fb205af6993b1d5fa0b57799e09f8";
     home-manager = {
-      url = "github:nix-community/home-manager/65258d5c65a250189fde2e35f490d15e064c4c62";
+      url = "github:nix-community/home-manager/82ce401aa350502897c3f2e85f384d61cd3b0b6d";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # Jim's shared configuration files, as a home-manager module -

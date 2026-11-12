@@ -216,7 +216,7 @@ class _Box:
         generation profile and one link per generation it has had, the nix
         profile `~/.nix-profile` points at, and home-manager's own GC root -
         every one of them inside the account's own home, which is where nix
-        2.35 and home-manager 26.05 put a non-root user's. The per-user
+        2.35 and home-manager put a non-root user's. The per-user
         directories under the box's nix state are the other place a root for a
         named account can sit."""
         home = self.homes / (agent or self.agent)
