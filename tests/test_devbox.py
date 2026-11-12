@@ -3036,45 +3036,38 @@ def test_run_envvars_dies_on_failure(monkeypatch):
 
 
 # ---- payload delivery -------------------------------------------------------
-def _captured_driver_run(monkeypatch, *args, **kw):
-    """Run `_run_driver` against a fake subprocess and return what it sent.
-    `remote` is the command the box's shell will actually see - argv[4] is that
-    string shlex-quoted for ssh, so it gets unwrapped here."""
-    import shlex
-    captured = {}
-
-    def fake_run(argv, **k):
-        captured["argv"] = argv
-        captured["remote"] = shlex.split(argv[4])[0]
-        captured["input"] = k.get("input")
-        return _cp(argv, 0)
-
-    monkeypatch.setattr(devbox.subprocess, "run", fake_run)
-    devbox.cli._run_driver(*args, **kw)
-    return captured
+def _remote(*args, **kw):
+    """The command the box's shell sees for one driver run."""
+    return devbox.cli._driver_remote(*args, **kw)
 
 
-def test_run_driver_makes_the_payload_readable_by_the_agent(monkeypatch):
+@pytest.mark.parametrize("log", ["", "provision-botty.log"])
+def test_run_driver_makes_the_payload_readable_by_the_agent(log):
     # The driver drops into the unprivileged agent to run a mod, so the payload
     # has to be readable by it. mktemp -d is always 0700 whatever the umask, and
     # tar applies the umask to what it creates - including the `mods/` directory,
     # which the archive only implies. Both need pinning or every mod EACCESes.
-    c = _captured_driver_run(monkeypatch, "devbox-foo-admin", b"tar", [], log=True)
-    remote = c["remote"]
+    remote = _remote([], log=log, run_id="r1")
     assert "umask 022" in remote
     assert 'chmod 0755 "$d"' in remote
     assert remote.index("umask 022") < remote.index("tar -xzf")
-    assert c["input"] == b"tar"
 
 
-def test_run_driver_tees_only_when_asked(monkeypatch):
+@pytest.mark.parametrize("log", ["", "provision-botty.log"])
+def test_run_driver_locks_the_box_before_unpacking(log):
+    remote = _remote([], log=log, run_id="r1")
+    assert devbox.cli.PROVISION_LOCK in remote
+    assert remote.index("flock") < remote.index("tar -xzf")
+
+
+def test_run_driver_logs_only_when_asked():
     # The full run's log is what `devbox status` tails; the --ensure-agent
     # preamble must not clobber it with its own two lines of output.
-    with_log = _captured_driver_run(monkeypatch, "a", b"", [],
-                                    log=devbox.provision_log("botty"))["remote"]
-    without = _captured_driver_run(monkeypatch, "a", b"", ["--ensure-agent"])["remote"]
+    with_log = _remote([], log=devbox.provision_log("botty"), run_id="r1")
+    without = _remote(["--ensure-agent"])
     assert "provision-botty.log" in with_log
-    assert "tee" not in without                # nothing tee'd, so nothing clobbered
+    assert ".log" not in without               # nothing logged, so nothing clobbered
+    assert "setsid" not in without             # the short preamble stays attached
     assert "--ensure-agent" in without
 
 
@@ -3085,17 +3078,16 @@ def test_provision_log_is_per_attachment():
     assert devbox.provision_log() == "provision.log"      # the box's own
 
 
-def test_run_driver_passes_adopt_through_the_environment(monkeypatch):
+def test_run_driver_passes_adopt_through_the_environment():
     # Not argv: the driver's own argv is "which mods to run", and nothing else.
-    remote = _captured_driver_run(monkeypatch, "a", b"", ["--ensure-agent"],
-                                  env={"DEVBOX_ATTACH_ADOPT": "1"})["remote"]
+    remote = _remote(["--ensure-agent"], env={"DEVBOX_ATTACH_ADOPT": "1"})
     assert "export DEVBOX_ATTACH_ADOPT=1" in remote
     assert remote.index("export DEVBOX_ATTACH_ADOPT=1") < remote.index("provision-driver.sh")
 
 
-def test_run_driver_quotes_mod_names(monkeypatch):
-    remote = _captured_driver_run(monkeypatch, "a", b"", ["rust", "a b"], log=True)["remote"]
-    assert "rust 'a b'" in remote
+def test_run_driver_quotes_mod_names():
+    assert "rust 'a b'" in _remote(["rust", "a b"])
+    assert "rust 'a b'" in _remote(["rust", "a b"], log="provision.log", run_id="r1")
 
 
 # ---- SSH aliases (one per attachment) ---------------------------------------

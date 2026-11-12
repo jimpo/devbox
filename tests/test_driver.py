@@ -786,3 +786,135 @@ def test_detaching_one_workspace_leaves_the_others_profile_intact(box, tmp_path)
         assert os.path.lexists(path), path
     assert "workspace=web" in second.marker("webbot")
     assert (second.homes / "webbot" / ".bash_env").exists()
+
+
+# ---- detached runs (cli._run_driver end to end) ------------------------------
+# `_run_driver` with a log runs the driver detached on the box and follows its
+# log over fresh SSH connections. Here `ssh` is a fake that runs the remote
+# command locally (in a temp $HOME), so the real launcher, lock, runner and
+# status poll all execute; the payload's driver is a stand-in script.
+_FAKE_SSH = r"""#!/usr/bin/env bash
+while [ "$1" = "-o" ]; do shift 2; done
+shift   # the alias
+cmd="$*"
+n=$(cat "$HOME/ssh-count" 2>/dev/null || echo 0); echo $((n + 1)) >"$HOME/ssh-count"
+# A flaky link: while $HOME/flaky holds a number, that many follow/status
+# connections fail - each `tail` after streaming for a moment, as a dropped
+# connection would.
+if [ -s "$HOME/flaky" ] && [[ "$cmd" == *"tail -c"* ]]; then
+  left=$(cat "$HOME/flaky")
+  if [ "$left" -gt 0 ]; then
+    echo $((left - 1)) >"$HOME/flaky"
+    [[ "$cmd" == exec\ tail* ]] && timeout 0.3 bash -c "$cmd"
+    exit 255
+  fi
+fi
+exec bash -c "$cmd"
+"""
+
+
+def _have(*tools):
+    import shutil
+    return all(shutil.which(t) for t in tools)
+
+
+@pytest.fixture
+def remote(tmp_path, monkeypatch):
+    if not _have("flock", "setsid", "timeout"):
+        pytest.skip("needs util-linux flock/setsid and coreutils timeout")
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "ssh").write_text(_FAKE_SSH)
+    (bindir / "ssh").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(devbox.cli, "FOLLOW_RETRY_INTERVAL", 0)
+    return home
+
+
+def _payload(driver: str) -> bytes:
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        data = driver.encode()
+        info = tarfile.TarInfo("provision-driver.sh")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _drive(driver: str, args=(), log="provision-agentbot.log"):
+    return devbox.cli._run_driver("devbox-box-admin", _payload(driver), list(args), log=log)
+
+
+def test_detached_run_returns_the_driver_status_and_shows_its_output(remote, capfd):
+    rc = _drive('echo "args: $*"; echo oops >&2; exit 3', ["jj", "a b"])
+    assert rc == 3
+    out = capfd.readouterr().out
+    assert "args: jj a b" in out and "oops" in out
+    # The log `devbox status` tails is the run's whole output, and the status
+    # file names the run.
+    assert (remote / "provision-agentbot.log").read_text() == "args: jj a b\noops\n"
+    assert (remote / "provision-agentbot.log.rc").read_text().split()[1] == "3"
+    # The payload dir is cleaned up by the detached runner, not the session.
+    assert not [p for p in (remote / "provision-agentbot.log").parent.iterdir()
+                if p.name.startswith("tmp")]
+
+
+def test_detached_run_outlives_a_dropped_connection(remote, capfd):
+    # The follow connection drops twice mid-run, and a status poll fails once
+    # in between: every line still shows exactly once, in order, and the
+    # run's real status comes back.
+    (remote / "flaky").write_text("3")
+    rc = _drive('for i in $(seq 1 8); do echo "line $i"; sleep 0.2; done; exit 0')
+    assert rc == 0
+    cap = capfd.readouterr()
+    assert cap.out == "".join(f"line {i}\n" for i in range(1, 9))
+    assert "lost the connection" in cap.err
+    assert (remote / "flaky").read_text().strip() == "0"
+
+
+def test_detached_run_waits_for_another_run_on_the_box(remote, capfd):
+    holder = subprocess.Popen(["flock", str(remote / devbox.cli.PROVISION_LOCK),
+                               "sleep", "1"])
+    try:
+        import time
+        time.sleep(0.2)
+        assert _drive("echo second") == 0
+    finally:
+        holder.wait()
+    cap = capfd.readouterr()
+    assert "waiting for it to finish" in cap.err
+    assert "second" in cap.out
+
+
+def test_detached_run_holds_the_lock_until_it_finishes(remote):
+    # A run that outlives its connection must still keep a second run out.
+    lock = remote / devbox.cli.PROVISION_LOCK
+    assert _drive(f'flock -n {lock} true && echo free || echo held') == 0
+    assert (remote / "provision-agentbot.log").read_text() == "held\n"
+    # ...but not past its end, even if a mod left a background process behind.
+    pidfile = remote / "leftover.pid"
+    assert _drive(f"sleep 30 >/dev/null 2>&1 & echo $! >{pidfile}") == 0
+    try:
+        assert subprocess.run(["flock", "-n", str(lock), "true"]).returncode == 0
+    finally:
+        os.kill(int(pidfile.read_text()), 9)
+
+
+def test_detached_run_that_dies_without_a_status_is_an_error(remote):
+    # The runner killed outright (as a reboot would): no status is recorded,
+    # and the follower must not wait forever or invent a success.
+    with pytest.raises(SystemExit):
+        _drive("echo partial; kill -9 $PPID; sleep 5")
+
+
+def test_foreground_run_returns_the_driver_status(remote, capfd):
+    rc = devbox.cli._run_driver("devbox-box-admin", _payload('echo "pre $*"; exit 4'),
+                                ["--ensure-agent"])
+    assert rc == 4
+    assert "pre --ensure-agent" in capfd.readouterr().out
+    assert not list(remote.glob("*.log"))

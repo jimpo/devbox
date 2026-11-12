@@ -486,6 +486,9 @@ sourced. The checkouts are in `$DEVBOX_PAYLOAD_DIR/repos`, one
 
 Logs land in the privileged account's home: `~/provision-<agent_user>.log`, and
 per mod under `~/provision/<agent_user>/`.
+The run is detached on the box: `create` and `sync --mods` follow it until it
+finishes, reconnecting if the connection drops, and Ctrl-C stops only the
+following. Runs on one box are serialized; a second waits for the first.
 
 ### Example: a rust workspace
 
