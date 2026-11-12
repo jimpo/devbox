@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -341,33 +342,193 @@ def _wait_ready(provider, name: str, admin_user: str,
     return (agent_alias, admin_alias) if workspace is not None else admin_alias
 
 
-def _run_driver(alias: str, tarball: bytes, driver_args: list, log: str = "",
-                env: dict = None) -> int:
-    """Deliver the provisioning payload over SSH and run the driver with
-    `driver_args`: pipe the tarball into a per-run temp dir (extracted as the SSH
-    user, then made world-readable so the driver can drop into an unprivileged
-    agent to run a mod - the payload carries no secrets), optionally teeing to
-    `~/<log>` (what `devbox status` tails). Returns the driver's status.
+# One provisioning run per box at a time, whichever workspace (or the box
+# playbook) it is for: a flock(1) on this file in the privileged user's $HOME.
+# A detached run holds it until it has recorded its exit status, so a second
+# `create` / `sync --mods` waits rather than racing the first one's accounts,
+# package installs and generation.
+PROVISION_LOCK = ".devbox-provision.lock"
 
-    `alias` is always the PRIVILEGED user's: the driver needs sudo to create an
-    agent account, install each mod's packages and drop privilege per mod."""
+# The detached half of a logged run, as `bash -c RUNNER devbox-provision ID DIR
+# LOG ARGS...`. It writes the driver's output to LOG, removes the payload, and
+# only then records `ID RC` in LOG.rc (renamed into place, so a reader never
+# sees half a line) - so once LOG.rc names this run, LOG is complete. The run
+# id is on its argv so `/proc/PID/cmdline` can tell this run from a recycled
+# pid. The driver gets the lock fd closed: a mod that leaves a background
+# process behind must not keep the box locked after the run.
+_DRIVER_RUNNER = (
+    'id=$1 d=$2 log=$3; shift 3; rc=0; '
+    'bash "$d/provision-driver.sh" "$@" >"$log" 2>&1 9>&- || rc=$?; '
+    'rm -rf "$d"; printf "%s %s\\n" "$id" "$rc" >"$log.rc.tmp"; mv -f "$log.rc.tmp" "$log.rc"'
+)
+
+# A follow connection should notice a dead link (laptop asleep, network
+# changed) in under a minute rather than wait for TCP to give up.
+_SSH_KEEPALIVE = ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
+# How long to keep trying to reach a box that has stopped answering before
+# giving up on following the run (the run itself carries on regardless).
+# Monotonic time, which doesn't advance while the laptop is suspended.
+FOLLOW_RECONNECT_TIMEOUT = 15 * 60
+FOLLOW_RETRY_INTERVAL = 5
+
+
+def _driver_remote(driver_args: list, log: str = "", env: dict = None,
+                   run_id: str = "") -> str:
+    """The shell command `_run_driver` hands the box: take the box's provisioning
+    lock, unpack the payload from stdin into a per-run temp dir, then run the
+    driver. Without `log` the driver runs in this SSH session and its status is
+    the command's. With `log` it runs detached (see `_DRIVER_RUNNER`) and the
+    command prints the runner's pid and returns at once."""
     selected = " ".join(shlex.quote(a) for a in driver_args)
-    tee = f' 2>&1 | tee "$HOME/{log}"' if log else ""
     # Flags for the driver that aren't per-mod data go through the environment
     # rather than argv, so the driver's own argv stays "which mods to run".
     exports = "".join(f"export {k}={shlex.quote(v)}; " for k, v in (env or {}).items())
+    # The lock is taken before the payload is unpacked, so a waiting run leaves
+    # nothing behind if it is abandoned. fd 9 stays open into the detached
+    # runner, which is what keeps the box locked after this session returns.
+    #
     # `umask 022` before extracting: tar applies the extracting user's umask to
     # the modes it creates (including the `mods/` directory, which the archive
     # only implies), so a restrictive umask on the box would leave the payload
     # unreadable to the agent and fail every mod with a confusing EACCES.
     # `mktemp -d` ignores umask and is always 0700, hence the explicit chmod.
-    remote = (
-        'set -e; umask 022; d="$(mktemp -d)"; chmod 0755 "$d"; tar -xzf - -C "$d"; '
-        f'{exports}bash "$d/provision-driver.sh" {selected}{tee}; '
-        'rc=${PIPESTATUS[0]}; rm -rf "$d"; exit "$rc"'
+    prologue = (
+        f'set -e; umask 022; exec 9>>"$HOME/{PROVISION_LOCK}"; '
+        'flock -n 9 || { echo "==> another provisioning run is in progress on this box;'
+        ' waiting for it to finish ..." >&2; flock 9; }; '
+        'd="$(mktemp -d)"; chmod 0755 "$d"; tar -xzf - -C "$d"; '
+        f'{exports}'
     )
-    return subprocess.run(
-        ["ssh", alias, "bash", "-c", shlex.quote(remote)], input=tarball).returncode
+    if not log:
+        # `|| rc=$?`, not a bare call: under `set -e` a failing driver would
+        # exit before the payload is removed.
+        return prologue + (f'rc=0; bash "$d/provision-driver.sh" {selected} 9>&- || rc=$?; '
+                           'rm -rf "$d"; exit "$rc"')
+    # setsid: its own session, so nothing tied to this SSH session (a hangup,
+    # the session's process group) reaches it. Every standard fd is pointed
+    # away from the connection, or sshd would wait on it - and a write to a
+    # dropped connection is exactly what used to kill the run. The stale .rc
+    # goes first, so the follower can't mistake a previous run's status for
+    # this one's.
+    return prologue + (
+        f'log="$HOME/{log}"; rm -f "$log.rc"; : >"$log"; '
+        f'setsid bash -c {shlex.quote(_DRIVER_RUNNER)} devbox-provision '
+        f'{shlex.quote(run_id)} "$d" "$log" {selected} </dev/null >/dev/null 2>&1 & '
+        'echo "$!"'
+    )
+
+
+def _run_driver(alias: str, tarball: bytes, driver_args: list, log: str = "",
+                env: dict = None) -> int:
+    """Deliver the provisioning payload over SSH and run the driver with
+    `driver_args`: pipe the tarball into a per-run temp dir (extracted as the SSH
+    user, then made world-readable so the driver can drop into an unprivileged
+    agent to run a mod - the payload carries no secrets). Returns the driver's
+    status. Runs are serialized per box (`PROVISION_LOCK`).
+
+    With `log`, the driver runs detached on the box, writing `~/<log>` (what
+    `devbox status` tails), and this follows that log to completion: it still
+    blocks until the run ends, but a dropped connection only interrupts the
+    following, never the run. Without `log` (the short `--ensure-agent`
+    preamble) it runs in the foreground of one SSH session.
+
+    `alias` is always the PRIVILEGED user's: the driver needs sudo to create an
+    agent account, install each mod's packages and drop privilege per mod."""
+    if not log:
+        return subprocess.run(["ssh", alias, "bash", "-c",
+                               shlex.quote(_driver_remote(driver_args, env=env))],
+                              input=tarball).returncode
+    run_id = secrets.token_hex(8)
+    r = subprocess.run(
+        ["ssh", alias, "bash", "-c",
+         shlex.quote(_driver_remote(driver_args, log=log, env=env, run_id=run_id))],
+        input=tarball, stdout=subprocess.PIPE)
+    if r.returncode != 0:
+        return r.returncode
+    try:
+        pid = int(r.stdout.decode().strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        die(f"could not start the provisioning driver on the box "
+            f"(got {r.stdout!r} instead of its pid)")
+    return _follow_run(alias, log, run_id, pid)
+
+
+def _run_status_remote(log: str, run_id: str, pid: int, offset: int) -> str:
+    """One status poll of a detached run: a first line of `done RC`, `running`
+    or `lost` (neither finished nor alive - the box rebooted, or the runner was
+    killed), then whatever the log holds past byte `offset`. `done` is checked
+    first and is only written once the log is complete, so the bytes after a
+    `done` line are the rest of the run's output."""
+    rid = shlex.quote(run_id)
+    return (
+        f'st=lost; if read -r rid rc <"$HOME/{log}.rc" 2>/dev/null && [ "$rid" = {rid} ]; '
+        'then st="done $rc"; '
+        f'elif grep -qaF -- {rid} /proc/{pid}/cmdline 2>/dev/null; then st=running; fi; '
+        f'echo "$st"; tail -c +{offset + 1} "$HOME/{log}" 2>/dev/null; true'
+    )
+
+
+def _follow_run(alias: str, log: str, run_id: str, pid: int) -> int:
+    """Stream a detached run's log to stdout until the run finishes, and return
+    its exit status. The log is followed with `tail -F --pid`, which ends when
+    the runner does; each time it ends - finished or the connection dropped - a
+    status poll decides whether to return, give up, or reconnect and pick up
+    from the last byte shown, so nothing is shown twice or skipped."""
+    offset = 0
+    out = sys.stdout.buffer
+    reconnect_deadline = None
+
+    def emit(data: bytes) -> None:
+        nonlocal offset
+        if data:
+            out.write(data)
+            out.flush()
+            offset += len(data)
+
+    try:
+        while True:
+            tail = subprocess.Popen(
+                ["ssh", *_SSH_KEEPALIVE, alias,
+                 f'exec tail -c +{offset + 1} -F --pid={pid} "$HOME/{log}" 2>/dev/null'],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            for chunk in iter(lambda: tail.stdout.read1(65536), b""):
+                emit(chunk)
+            tail.wait()
+
+            r = subprocess.run(["ssh", *_SSH_KEEPALIVE, alias,
+                                _run_status_remote(log, run_id, pid, offset)],
+                               stdin=subprocess.DEVNULL, capture_output=True)
+            if r.returncode != 0:
+                if reconnect_deadline is None:
+                    print("\n==> lost the connection to the box; provisioning carries on "
+                          "there. Reconnecting ...", file=sys.stderr, flush=True)
+                    reconnect_deadline = time.monotonic() + FOLLOW_RECONNECT_TIMEOUT
+                elif time.monotonic() >= reconnect_deadline:
+                    die(f"could not reconnect to the box to follow provisioning; it may "
+                        f"still be running there - check `devbox status` or ~/{log} on "
+                        f"the box, and re-run `devbox sync --mods` if it did not finish")
+                time.sleep(FOLLOW_RETRY_INTERVAL)
+                continue
+            if reconnect_deadline is not None:
+                print("==> reconnected; following the provisioning log again.",
+                      file=sys.stderr, flush=True)
+                reconnect_deadline = None
+
+            state, _, rest = r.stdout.partition(b"\n")
+            emit(rest)
+            state = state.decode(errors="replace").split()
+            if state[:1] == ["done"] and len(state) == 2:
+                return int(state[1])
+            if state != ["running"]:
+                die(f"the provisioning run stopped without recording an exit status "
+                    f"(was the box rebooted?); see ~/{log} on the box, and re-run "
+                    f"`devbox sync --mods`")
+            # Still running, but `tail` returned: the connection blipped. Brief
+            # pause so a link that fails instantly doesn't spin.
+            time.sleep(1)
+    except KeyboardInterrupt:
+        die(f"\nstopped following; provisioning carries on on the box. "
+            f"`devbox status` tails ~/{log}.")
 
 
 def _ensure_agent_account(alias: str, tarball: bytes, adopt: bool = False) -> None:

@@ -148,7 +148,7 @@ SCOPE_WORKSPACE = "workspace"
 
 def provision_log(agent_user: str = "") -> str:
     """The combined provisioning log for one run, under the privileged user's
-    $HOME - written (tee'd) when the driver runs over SSH, and tailed by
+    $HOME - written by the detached driver run, followed by the host, and tailed by
     `devbox status`. Per attachment (the driver keeps its per-mod logs in a
     matching `provision/<agent|box>/` directory), so two workspaces reconverging
     on one box don't overwrite each other's."""

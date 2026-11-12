@@ -80,8 +80,24 @@ reconverge: devbox tars the driver, the resolved `mods/*.sh`, `context.env`, a
 manifest, a `repos` file and (for a workspace) the `nix/` flake, pipes it over the
 `devbox-<box>-admin` alias, extracts it to a temp dir and runs
 `provision-driver.sh` as the privileged user. `box create` runs the box playbook;
-`create` and `sync --mods` run the workspace playbook. The host must stay
-connected; a dropped run is fixed by re-running `devbox sync --mods`.
+`create` and `sync --mods` run the workspace playbook.
+
+**Runs are detached from the connection.** The driver runs under `setsid` with
+its output going only to `~/provision-<agent_user>.log`, and records `<run-id>
+<status>` in `<log>.rc` when it ends. The host follows the log (`tail -F
+--pid`) and polls the status file, so `create` still blocks until the run is
+done, but a dropped connection (sleep, network change) only interrupts the
+following: devbox reconnects and resumes from the last byte it showed. Ctrl-C
+stops following, not the run. A runner that dies with no status (a reboot) is
+reported as such. The short `--ensure-agent` preamble stays in the foreground.
+This is something only a guest-side driver can offer: a loop driven from the
+host can't outlive its own process.
+
+**One run per box.** Every run takes a `flock` on `~/.devbox-provision.lock`
+before unpacking, and a detached run keeps holding it until its status is
+written (the driver itself gets the fd closed, so a background process left by
+a mod can't keep the box locked). A second `create` / `sync --mods`, from any
+workspace, waits and says so.
 
 **Host-side resolution.** `provision.py` parses each mod's `# /// mod` block
 (`tomllib`; unknown keys, bad values, duplicate or mislabeled fences are errors),
@@ -111,8 +127,7 @@ Then for each mod: dnf-install its `packages` as the privileged user (dnf
 refreshes its own metadata and waits for its own lock), and run the body via `sudo -u` per
 target. Context and creds are re-sourced inside the target shell, never passed
 on `sudo`'s argv. The run stops at the first failure, naming the mod and account.
-Logs are per attachment so concurrent workspaces don't clobber each other, but
-nothing serializes two full runs on one box.
+Logs are per attachment, and runs are serialized by the box's lock.
 
 **Mod bodies have no sudo**, and the payload has no secrets. Both follow from the
 driver dropping to the agent: the payload has to be readable by that account.

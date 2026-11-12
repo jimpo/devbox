@@ -53,7 +53,9 @@ from a wheel.
   for real, so control flow is genuine and only privilege is simulated. It covers
   manifest parsing, runas dispatch, ownership markers, lingering, `~/.bash_env`,
   per-attachment logs, two workspaces sharing one box, and `cli._detach_script`'s
-  teardown. It renders the manifest with the real `render_manifest`, pinning the
+  teardown. It also runs `cli._run_driver` end to end against a fake `ssh`
+  that executes locally: the detached runner, the box lock, the status file,
+  and reconnecting after dropped follow connections. It renders the manifest with the real `render_manifest`, pinning the
   Python→bash format.
 
 Conventions:
@@ -97,6 +99,12 @@ repos.
 - **Shared closure**: detach one, `sudo nix-collect-garbage` as admin, then the
   other's `home-manager generations` still resolve, its tools are on PATH, and
   `devbox sync --mods` is a no-op.
+
+**Detached provisioning** — during `devbox create`, drop the host's network
+(or suspend it) for a minute mid-playbook. `create` prints that it lost the
+connection, then reconnects and finishes with the run's real status; the log
+shows no gap or repeat. Ctrl-C mid-run leaves the driver running (`devbox
+status`), and a second `sync --mods` started meanwhile waits for it.
 
 **Kernel** — on an AL2023 box (`box create --provider aws`), `uname -r` is 6.18
 after `box create`, `rpm -q kernel` finds nothing and a second `box sync --mods`
