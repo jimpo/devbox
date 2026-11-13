@@ -1608,36 +1608,29 @@ def _metadata(name):
     return devbox.parse_mod_metadata(path.read_text(), path)
 
 
-def test_codex_is_an_opt_in_install_that_updates_itself(isolated_mods, pubkey,
-                                                        tmp_path):
-    # The OpenAI Codex CLI, and a workspace's own to ask for: Claude Code is the
-    # base playbook's agent CLI, so `codex` is named in `mods` or it is not
-    # installed at all.
+def test_codex_is_an_opt_in_module_that_installs_the_self_updating_binary(
+        isolated_mods, tmp_path, capsys):
+    # Opt-in, so not in `default` and not in any base playbook.
     assert "codex" not in devbox.WORKSPACE_BASE_MODS
     assert "codex" not in devbox.box_playbook()
-    body = _script_body("codex")
-    # OpenAI's standalone installer, which is also what `codex update` re-runs
-    # for a standalone install - so the account can update itself in place.
-    assert "https://chatgpt.com/codex/install.sh" in body
-    assert "CODEX_NON_INTERACTIVE=1" in body
+    assert "codex" not in (devbox.BUILTIN_MODULES_DIR / "default.nix").read_text()
+    module = (devbox.BUILTIN_MODULES_DIR / "codex.nix").read_text()
+    # OpenAI's standalone installer, which is also what `codex update` re-runs,
+    # so the account can update itself in place.
+    assert "https://chatgpt.com/codex/install.sh" in module
+    assert "CODEX_NON_INTERACTIVE=1" in module
+    assert "command -v codex" in module
     # The installer appends an `export PATH=...` block to a shell profile only
-    # when its install directory is absent from PATH. The agent's ~/.zshenv is a
-    # symlink into the read-only store, so the directory goes on PATH first.
-    assert 'export PATH="$HOME/.local/bin:$PATH"' in body
-
-    marker_dir = tmp_path / "ws"
-    marker_dir.mkdir()
-    plain = _workspace(marker_dir=marker_dir)
-    asked = _workspace(marker_dir=marker_dir, mods=["codex"])
-    assert "codex" not in [s.name for s in devbox.load_mod_specs(
-        devbox.workspace_playbook(plain), plain.marker.mods_dir)]
-    assert "codex" in [s.name for s in devbox.load_mod_specs(
-        devbox.workspace_playbook(asked), asked.marker.mods_dir)]
-    payload = _payload_map(asked, _global_config(pubkey))
-    assert "mods/codex.sh" in payload
-    assert "codex" in [line.split("\t")[0] for line
-                       in payload["manifest"].content.splitlines()]
-    assert "mods/codex.sh" not in _payload_map(plain, _global_config(pubkey))
+    # when its install directory is absent from PATH, and ~/.zshenv is a
+    # read-only store symlink, so the directory goes on PATH first.
+    assert ".local/bin" in module
+    assert "codex mcp add" in module and "codex mcp remove" in module
+    assert "mcpServers = lib.mkOption" in module
+    # Naming it as a mod now says to import the module instead.
+    assert devbox.find_mod_script("codex", None) is None
+    with pytest.raises(SystemExit):
+        devbox.resolve_mod("codex", None)
+    assert "devbox.builtinModules.codex" in capsys.readouterr().err
 
 
 # ---- resolve_env (global + workspace [env], workspace overrides per-key) --------

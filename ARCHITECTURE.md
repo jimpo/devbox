@@ -163,9 +163,9 @@ always imports those two).
 
 **Agent CLIs are installed, not packaged** (`claude-code`, `codex`): their
 installers put a self-updating binary in the account's own `~/.local/bin`, which
-a read-only store path pinned to one nixpkgs can't do. `codex` is a script;
-`claude-code` is a module whose activation step runs the installer (skipped once
-`claude` exists) and then drives the `claude` CLI for MCP servers and plugins.
+a read-only store path pinned to one nixpkgs can't do. both are
+modules whose activation step runs the installer (skipped once the binary
+exists) and then drives the CLI for MCP servers (and, for `claude`, plugins).
 
 ## The home-manager flake
 

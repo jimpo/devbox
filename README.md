@@ -532,13 +532,14 @@ build also needs system libraries, add a small script mod, for example
 `# /// mod` / `# packages = ["clang", "openssl-devel"]` / `# ///`.
 
 `devbox sync --mods` applies it to a live box. The opt-in built-in modules are
-`nodejs`, `uv` and `cloudflared`; the opt-in script mod is `codex`. Each file's header says what it
+`nodejs`, `uv`, `cloudflared` and `codex`. Each file's header says what it
 does.
 
 Claude Code is a module (in `builtinModules.default`). Other modules and your
 `default.nix` add to it with `devbox.claudeCode.plugins = [ "name@marketplace" ]`
 and `devbox.claudeCode.mcpServers.<name> = { url = ...; headers.Authorization =
-"Bearer \${TOKEN}"; }`; both go through the `claude` CLI.
+"Bearer \${TOKEN}"; }`; both go through the `claude` CLI. `codex` works the same
+way for `devbox.codex.mcpServers.<name> = { url = ...; bearerTokenEnvVar = "TOKEN"; }`.
 
 ## Documentation
 

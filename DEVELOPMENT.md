@@ -137,8 +137,9 @@ notice; follow it with `box stop`/`box up`/`box sync --mods`.
   `devbox.claudeCode.mcpServers`: `claude mcp list` shows them connected, and
   `~/.claude.json` holds the literal `${…}`. With `devbox.claudeCode.plugins`:
   `claude plugin list` shows them.
-- `codex`: `codex update` re-runs the standalone installer, and `~/.zshenv` stays
-  a store symlink.
+- `codex` (`builtinModules.codex`): `codex update` re-runs the standalone
+  installer, and `~/.zshenv` stays a store symlink. With `devbox.codex.mcpServers`:
+  `codex mcp list` shows them.
 - `nodejs`: `node` is the LTS, and `npm install -g <cli>` succeeds and lands on the
   non-interactive PATH.
 - `cloudflared`: with a token the user unit is active and no token is visible in

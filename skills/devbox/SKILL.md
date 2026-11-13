@@ -216,9 +216,11 @@ module over a script for anything a nix package can provide.
 one (`box-packages → kernel → nix`), which runs once per box as root, and the
 **workspace** one (`home-manager → repo-bootstrap`), which runs
 once per attachment in that workspace's account. A workspace appends scripts in
-`mods` (built-in opt-in: `codex`). Claude Code is a module: set
+`mods`. Claude Code is a module: set
 `devbox.claudeCode.mcpServers.<name> = { url; headers; }` and
-`devbox.claudeCode.plugins = [ "name@marketplace" ]` in `default.nix`.
+`devbox.claudeCode.plugins = [ "name@marketplace" ]` in `default.nix`. The opt-in
+`builtinModules.codex` installs Codex and takes
+`devbox.codex.mcpServers.<name> = { url; bearerTokenEnvVar; }`.
 For tooling nix can't provide (`Cargo.toml` → a rustup-managed toolchain):
 
 1. List it: `mods = ["rust"]` in the marker file.
