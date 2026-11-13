@@ -6,5 +6,5 @@
 # generation, since `repo-bootstrap` clones with them.
 { ... }:
 {
-  imports = [ ./dotfiles.nix ./neovim.nix ./cargo-binstall.nix ];
+  imports = [ ./dotfiles.nix ./neovim.nix ./cargo-binstall.nix ./claude-code.nix ];
 }

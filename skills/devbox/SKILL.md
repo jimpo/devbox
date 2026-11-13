@@ -213,9 +213,11 @@ module over a script for anything a nix package can provide.
 
 **Script mods** cover the rest. There are two built-in playbooks: the **box**
 one (`box-packages → kernel → nix`), which runs once per box as root, and the
-**workspace** one (`home-manager → claude-code → repo-bootstrap`), which runs
+**workspace** one (`home-manager → repo-bootstrap`), which runs
 once per attachment in that workspace's account. A workspace appends scripts in
-`mods` (built-in opt-ins: `codex`, `claude-github-mcp`, `claude-linear-mcp`).
+`mods` (built-in opt-in: `codex`). Claude Code is a module: set
+`devbox.claudeCode.mcpServers.<name> = { url; headers; }` and
+`devbox.claudeCode.plugins = [ "name@marketplace" ]` in `default.nix`.
 For tooling nix can't provide (`Cargo.toml` → a rustup-managed toolchain):
 
 1. List it: `mods = ["rust"]` in the marker file.
@@ -272,7 +274,7 @@ init script it ships, and the old `.devbox/cloud-config.yaml` fragment no longer
 exists.
 
 A mod that needs another mod to run first declares it in its metadata block:
-`requires = ["claude-code"]`. devbox validates this statically at playbook
+`requires = ["home-manager"]`. devbox validates this statically at playbook
 resolution (before boot) and hard-errors if a required mod is missing or ordered
 after the mod needing it — it doesn't reorder, just enforces order. The box
 playbook is indexed first, so a workspace mod may depend on a box mod.

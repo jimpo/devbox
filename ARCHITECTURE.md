@@ -145,10 +145,11 @@ any script runs and a script can use what a module put on PATH (`repo-bootstrap`
 runs `jj` through `github-auth`'s credential helper, which is why the flake
 always imports those two).
 
-**Agent CLIs stay scripts** (`claude-code`, `codex`): their installers put a
-self-updating binary in the account's own `~/.local/bin`, which a read-only store
-path pinned to one nixpkgs can't do. Nothing in the generation provides either
-binary, so the PATH order has nothing to shadow.
+**Agent CLIs are installed, not packaged** (`claude-code`, `codex`): their
+installers put a self-updating binary in the account's own `~/.local/bin`, which
+a read-only store path pinned to one nixpkgs can't do. `codex` is a script;
+`claude-code` is a module whose activation step runs the installer (skipped once
+`claude` exists) and then drives the `claude` CLI for MCP servers and plugins.
 
 ## The home-manager flake
 

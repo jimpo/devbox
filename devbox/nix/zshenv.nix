@@ -38,7 +38,7 @@
 # before it exists simply has no creds.
 { ... }:
 {
-  # Where the bash mods install their binaries (claude, codex), and where the
+  # Where the agent CLI installers put their binaries (claude, codex), and where the
   # codex installer looks before deciding whether to edit a shell profile.
   # home.sessionPath lands in hm-session-vars.sh, which ~/.zshenv sources - as
   # does any module's home.sessionVariables.

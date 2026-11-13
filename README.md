@@ -157,7 +157,7 @@ wins, and a directory holding both is an error.
   (`.devbox/default.nix`, or `default.nix` next to `devbox.toml`). It imports
   what it wants from `devbox.builtinModules` (devbox's own) and `devbox.globalModules`
   (`~/.config/devbox/modules/`, shared across workspaces). Without one, the
-  workspace gets `devbox.builtinModules.default`: dotfiles, neovim, cargo-binstall.
+  workspace gets `devbox.builtinModules.default`: dotfiles, neovim, cargo-binstall, claude-code.
   Declarative, pinned, shared through the box's nix store. **Prefer it.**
 - **Script mods** (`<name>.sh`), named in `mods = [...]`, are idempotent bash
   scripts the provisioning driver runs. They are the escape hatch for what a
@@ -418,7 +418,7 @@ Everything after first boot is either the agent's **home-manager generation**
 # .devbox/default.nix  (or default.nix beside devbox.toml)
 { devbox, pkgs, ... }: {
   imports = with devbox; [
-    builtinModules.default    # the base profile: dotfiles, neovim, cargo-binstall
+    builtinModules.default    # the base profile: dotfiles, neovim, cargo-binstall, claude-code
     builtinModules.uv
     globalModules.rust        # ~/.config/devbox/modules/rust.nix (or rust/default.nix)
     ./extra.nix               # a sibling .nix file
@@ -448,7 +448,7 @@ on the host.
 
 ```
 box playbook:        box-packages → kernel → nix
-workspace playbook:  home-manager → claude-code → repo-bootstrap
+workspace playbook:  home-manager → repo-bootstrap
                      + your mods = [...]
 ```
 
@@ -467,7 +467,7 @@ are optional:
 #!/usr/bin/env bash
 #
 # /// mod
-# requires = ["claude-code"]         # must appear earlier; validated, never reordered
+# requires = ["home-manager"]         # must appear earlier; validated, never reordered
 # runas = ["admin", "agent"]         # default ["agent"]; also "root"
 # packages = ["jq", "unzip"]         # RPM names, dnf-installed before the body
 # ///
@@ -528,9 +528,13 @@ build also needs system libraries, add a small script mod, for example
 `# /// mod` / `# packages = ["clang", "openssl-devel"]` / `# ///`.
 
 `devbox sync --mods` applies it to a live box. The opt-in built-in modules are
-`nodejs`, `uv` and `cloudflared`; the opt-in script mods are `codex`,
-`claude-github-mcp` and `claude-linear-mcp`. Each file's header says what it
+`nodejs`, `uv` and `cloudflared`; the opt-in script mod is `codex`. Each file's header says what it
 does.
+
+Claude Code is a module (in `builtinModules.default`). Other modules and your
+`default.nix` add to it with `devbox.claudeCode.plugins = [ "name@marketplace" ]`
+and `devbox.claudeCode.mcpServers.<name> = { url = ...; headers.Authorization =
+"Bearer \${TOKEN}"; }`; both go through the `claude` CLI.
 
 ## Documentation
 

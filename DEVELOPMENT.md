@@ -124,9 +124,11 @@ notice; follow it with `box stop`/`box up`/`box sync --mods`.
 - `github-auth`: with `GITHUB_TOKEN`, a private `git clone` needs no prompt as the
   agent and prompts as admin.
 - `claude-code`: `claude doctor` shows the auto-updater on;
-  `permissions.defaultMode` is `bypassPermissions` and survives a reconverge. The
-  MCP mods: `claude mcp list` shows both connected, and `~/.claude.json` holds the
-  literal `${…}`.
+  `permissions.defaultMode` is `bypassPermissions` and survives a reconverge;
+  `claude plugin marketplace list` shows the official marketplace. With
+  `devbox.claudeCode.mcpServers`: `claude mcp list` shows them connected, and
+  `~/.claude.json` holds the literal `${…}`. With `devbox.claudeCode.plugins`:
+  `claude plugin list` shows them.
 - `codex`: `codex update` re-runs the standalone installer, and `~/.zshenv` stays
   a store symlink.
 - `nodejs`: `node` is the LTS, and `npm install -g <cli>` succeeds and lands on the

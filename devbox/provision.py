@@ -138,7 +138,7 @@ BOX_BASE_MODS = ("box-packages", "kernel", "nix")
 # as scripts. `home-manager` runs first, so a script after it can use what the
 # generation put on the PATH (repo-bootstrap clones with the generation's jj
 # and github-auth credential helper). A workspace's `mods` are appended.
-WORKSPACE_BASE_MODS = ("home-manager", "claude-code", "repo-bootstrap")
+WORKSPACE_BASE_MODS = ("home-manager", "repo-bootstrap")
 
 # Which playbook a provisioning run is executing. The scope decides which
 # `runas` targets of each mod run (see scoped_runas); it is resolved entirely
@@ -270,6 +270,12 @@ RETIRED_MODS = {
     "cloudflared-tunnel":
         "`cloudflared`, which now installs the binary and runs the tunnel as a "
         "systemd user service",
+    "claude-code":
+        "the `claude-code` home-manager module (`builtinModules.claude-code`)",
+    "claude-github-mcp":
+        "`devbox.claudeCode.mcpServers` in your `default.nix`",
+    "claude-linear-mcp":
+        "`devbox.claudeCode.mcpServers` in your `default.nix`",
 }
 
 

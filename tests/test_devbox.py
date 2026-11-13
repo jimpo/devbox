@@ -1566,6 +1566,30 @@ def test_the_retired_cloudflared_tunnel_mod_says_where_it_went(isolated_mods,
     assert "`cloudflared`" in err
 
 
+def test_claude_code_is_a_default_module_that_installs_the_self_updating_binary():
+    # A module, not a mod: the activation step runs the native installer (once)
+    # so the binary updates itself, and settings/MCP/plugins go via the CLI.
+    assert "claude-code" not in devbox.WORKSPACE_BASE_MODS
+    assert "./claude-code.nix" in (devbox.BUILTIN_MODULES_DIR / "default.nix").read_text()
+    module = (devbox.BUILTIN_MODULES_DIR / "claude-code.nix").read_text()
+    assert "curl -fsSL https://claude.ai/install.sh | bash" in module
+    assert "command -v claude" in module
+    assert "DISABLE_AUTOUPDATER" not in module
+    assert "bypassPermissions" in module
+    for cmd in ("claude mcp add --scope user", "claude mcp remove --scope user",
+                "claude plugin install", "claude plugin marketplace add"):
+        assert cmd in module
+    for opt in ("mcpServers", "plugins"):
+        assert f"{opt} = lib.mkOption" in module
+
+
+@pytest.mark.parametrize("name", ["claude-code", "claude-github-mcp",
+                                  "claude-linear-mcp"])
+def test_the_claude_mods_are_retired_into_the_module(isolated_mods, name):
+    assert name in devbox.provision.RETIRED_MODS
+    assert devbox.find_mod_script(name, None) is None
+
+
 # ---- the agent CLIs: installs that keep themselves current ------------------
 def _script_source(name):
     return (devbox.BUILTIN_MODS_DIR / f"{name}.sh").read_text()
@@ -1582,39 +1606,6 @@ def _script_body(name):
 def _metadata(name):
     path = devbox.BUILTIN_MODS_DIR / f"{name}.sh"
     return devbox.parse_mod_metadata(path.read_text(), path)
-
-
-def test_claude_code_installs_the_binary_that_updates_itself(isolated_mods, pubkey):
-    # A base mod, and a script rather than a module, for the one property a
-    # store path cannot have: the native installer puts ~/.local/bin/claude in
-    # the agent's own home, where the running binary replaces itself as new
-    # versions ship, between reconverges. Nothing in the generation provides a
-    # `claude`, so PATH order has nothing to shadow.
-    assert "claude-code" in devbox.WORKSPACE_BASE_MODS
-    assert devbox.find_mod_script("claude-code", None) is not None
-    body = _script_body("claude-code")
-    assert "curl -fsSL https://claude.ai/install.sh | bash" in body
-    # Nothing switches the auto-updater off, which is the whole point of the
-    # account owning the binary.
-    assert "DISABLE_AUTOUPDATER" not in _script_source("claude-code")
-    # The settings merge needs jq, which the driver dnf-installs as the
-    # privileged user before this body runs.
-    assert _metadata("claude-code")["packages"] == ["jq"]
-    payload = _payload_map(_workspace(), _global_config(pubkey))
-    assert "mods/claude-code.sh" in payload
-    assert "claude-code" in [line.split("\t")[0] for line
-                             in payload["manifest"].content.splitlines()]
-
-
-def test_claude_code_merges_its_setting_into_whatever_claude_wrote():
-    # Claude Code writes ~/.claude/settings.json itself - `/config` in a live
-    # session edits that file - so the one setting devbox needs is merged into
-    # what is already there rather than the file being written whole. That is
-    # what makes a reconverge leave a live session's edits alone.
-    body = _script_body("claude-code")
-    assert '.permissions.defaultMode = "bypassPermissions"' in body
-    assert "$HOME/.claude/settings.json" in body
-    assert "jq " in body
 
 
 def test_codex_is_an_opt_in_install_that_updates_itself(isolated_mods, pubkey,
@@ -1647,66 +1638,6 @@ def test_codex_is_an_opt_in_install_that_updates_itself(isolated_mods, pubkey,
     assert "codex" in [line.split("\t")[0] for line
                        in payload["manifest"].content.splitlines()]
     assert "mods/codex.sh" not in _payload_map(plain, _global_config(pubkey))
-
-
-@pytest.mark.parametrize("name,server,url", [
-    ("claude-github-mcp", "github", "https://api.githubcopilot.com/mcp/"),
-    ("claude-linear-mcp", "linear", "https://mcp.linear.app/mcp"),
-])
-def test_the_mcp_mods_stay_two_opt_in_mods(isolated_mods, pubkey, tmp_path,
-                                           name, server, url):
-    # Two names, two scripts - so a config that names one of them and not the
-    # other keeps working exactly as it did, and neither is retired.
-    assert name not in devbox.WORKSPACE_BASE_MODS
-    assert name not in devbox.box_playbook()
-    assert name not in devbox.provision.RETIRED_MODS
-    assert (devbox.BUILTIN_MODS_DIR / f"{name}.sh").is_file()
-    # It registers the server with the agent's own `claude`, so claude-code has
-    # to have run first - which the base playbook does, ahead of any workspace
-    # mod appended after it.
-    assert _metadata(name)["requires"] == ["claude-code"]
-
-    marker_dir = tmp_path / "ws"
-    marker_dir.mkdir()
-    workspace = _workspace(marker_dir=marker_dir, mods=[name])
-    devbox.validate_playbooks(workspace)
-    payload = _payload_map(workspace, _global_config(pubkey))
-    assert f"mods/{name}.sh" in payload
-    other = ("claude-linear-mcp" if name == "claude-github-mcp"
-             else "claude-github-mcp")
-    assert f"mods/{other}.sh" not in payload
-
-    body = _script_body(name)
-    assert url in body
-    assert f"mcp add --scope user --transport http {server}" in body
-    # `mcp add` on a name that is already registered is an error, and this runs
-    # on every reconverge.
-    assert f"mcp remove --scope user {server}" in body
-
-
-@pytest.mark.parametrize("name,var", [
-    ("claude-github-mcp", "GITHUB_TOKEN"),
-    ("claude-linear-mcp", "LINEAR_API_KEY"),
-])
-def test_the_mcp_header_reaches_the_box_unexpanded(isolated_mods, pubkey,
-                                                   tmp_path, name, var):
-    # The header is a LITERAL `${VAR}` that Claude Code resolves from the
-    # environment when it calls the server. Single quotes are what keep the mod's
-    # own shell from expanding it, so the two words reach `claude mcp add`.
-    body = _script_body(name)
-    assert f"'Authorization: Bearer ${{{var}}}'" in body
-
-    marker_dir = tmp_path / "ws"
-    marker_dir.mkdir()
-    workspace = _workspace(marker_dir=marker_dir, mods=[name],
-                           env={var: devbox.EnvVar("s3cret")})
-    payload = _payload_map(workspace, _global_config(pubkey))
-    assert payload[f"mods/{name}.sh"].content == _script_source(name)
-    # The value is in no payload file at all: creds travel separately, into the
-    # 0600 ~/.config/devbox/env of the account that owns them, which is what
-    # keeps the payload safe to make agent-readable.
-    for pf in payload.values():
-        assert "s3cret" not in pf.content
 
 
 # ---- resolve_env (global + workspace [env], workspace overrides per-key) --------
@@ -1765,7 +1696,7 @@ def test_the_two_playbooks_split_the_apt_half_from_the_per_user_half():
     # in the base installs into somebody's home.
     assert "box-packages" in devbox.BOX_BASE_MODS
     assert "box-packages" not in devbox.WORKSPACE_BASE_MODS
-    for per_user in ("home-manager", "claude-code", "repo-bootstrap"):
+    for per_user in ("home-manager", "repo-bootstrap"):
         assert per_user in devbox.WORKSPACE_BASE_MODS
         assert per_user not in devbox.BOX_BASE_MODS
 
@@ -1919,7 +1850,7 @@ def test_validate_playbooks_base_passes(isolated_mods):
 
 
 def test_validate_playbooks_workspace_mod_requiring_base_mod_passes(isolated_mods, tmp_path):
-    _write_workspace_mod(tmp_path, "rust", _mod('requires = ["claude-code"]'))
+    _write_workspace_mod(tmp_path, "rust", _mod('requires = ["home-manager"]'))
     devbox.validate_playbooks(_workspace(marker_dir=tmp_path, mods=["rust"]))
 
 
