@@ -184,6 +184,34 @@ class KubevirtProvider(Provider):
     def stop(self, name: str) -> None:
         self._set_run_strategy(name, "Halted")
 
+    def resize(self, name: str, changes: dict) -> None:
+        """Patch cpu.cores / memory.guest on the (stopped) VM; it takes effect at
+        the next start. The disk is not resizable here."""
+        if "disk" in changes:
+            die("resizing the disk is not supported on kubevirt (it would mean "
+                "growing the PVC); use --vcpus and/or --memory")
+        other = sorted(set(changes) - {"vcpus", "memory"})
+        if other:
+            die("kubevirt boxes can only be resized with --vcpus and --memory, not "
+                + ", ".join("--" + k.replace("_", "-") for k in other))
+        domain = {}
+        if "vcpus" in changes:
+            domain["cpu"] = {"cores": changes["vcpus"]}
+        if "memory" in changes:
+            domain["memory"] = {"guest": f"{changes['memory']}Mi"}
+        patch = {"spec": {"template": {"spec": {"domain": domain}}}}
+        try:
+            kubectl(self.cfg, "patch", "vm", self._require(name), "--type", "merge",
+                    "-p", json.dumps(patch))
+        except KubectlError as err:
+            if "quota" in str(err).lower():
+                die(f"{err}\nthe namespace's ResourceQuota denies this size; ask the "
+                    f"cluster admin to raise it, or pick a smaller size")
+            raise
+        print(f"resized '{name}'; takes effect at the next `devbox box up`. If the "
+              f"namespace's ResourceQuota denies the new size, the start will fail "
+              f"with an 'exceeded quota' error (see `kubectl describe vm`).")
+
     def destroy(self, name: str) -> None:
         vm = self._vm(name)
         if vm is None:
