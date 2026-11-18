@@ -103,13 +103,25 @@ def build_vm(cfg: KubevirtConfig, spec: InstanceSpec) -> dict:
     }
 
 
+_QUANTITY_MIB = {"Ki": 1 / 1024, "Mi": 1, "Gi": 1024, "Ti": 1024 * 1024}
+
+
+def _guest_mib(guest: str) -> Optional[float]:
+    """MiB in a Kubernetes binary-suffix quantity like `12288Mi` or `12Gi`."""
+    for suffix, factor in _QUANTITY_MIB.items():
+        num = guest[:-2]
+        if guest.endswith(suffix) and num.isdigit():
+            return int(num) * factor
+    return None
+
+
 def _resources(vm: dict) -> str:
     dom = vm.get("spec", {}).get("template", {}).get("spec", {}).get("domain", {})
     cores = dom.get("cpu", {}).get("cores")
-    guest = dom.get("memory", {}).get("guest", "")
-    if cores is None or not guest.endswith("Mi") or not guest[:-2].isdigit():
+    mib = _guest_mib(str(dom.get("memory", {}).get("guest", "")))
+    if cores is None or mib is None:
         return "?"
-    return f"{cores} vCPU / {int(guest[:-2]) / 1024:g} GiB"
+    return f"{cores} vCPU / {mib / 1024:g} GiB"
 
 
 class KubevirtProvider(Provider):

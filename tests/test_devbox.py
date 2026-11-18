@@ -4753,3 +4753,16 @@ def test_get_provider_kubevirt_needs_its_section(monkeypatch):
     gc.kubevirt = devbox.KubevirtConfig()
     assert devbox.get_provider("kubevirt", gc).name == "kubevirt"
     assert [p.name for p in devbox.all_providers(gc)] == ["libvirt", "kubevirt"]
+
+
+def test_kubevirt_resources_quantity_suffixes():
+    from devbox.providers.kubevirt import _resources
+
+    def vm(guest):
+        return {"spec": {"template": {"spec": {"domain": {
+            "cpu": {"cores": 6}, "memory": {"guest": guest}}}}}}
+
+    assert _resources(vm("12Gi")) == "6 vCPU / 12 GiB"
+    assert _resources(vm("12288Mi")) == "6 vCPU / 12 GiB"
+    assert _resources(vm("1572864Ki")) == "6 vCPU / 1.5 GiB"
+    assert _resources(vm("lots")) == "?"
