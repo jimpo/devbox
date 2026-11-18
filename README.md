@@ -198,6 +198,7 @@ An existing account with no devbox ownership record is refused; claim it with
 | Command | Behavior |
 |---|---|
 | `devbox box create NAME [flags]` | Launch a box (bare name for libvirt, `<prefix>-NAME` for `--provider ec2\|aws\|kubevirt`) and run the box playbook. Idempotent. Flags: `--provider --user --vcpus --memory --disk --instance-type --arch --ami --spot/--on-demand --bundle --blueprint --zone`. |
+| `devbox box resize NAME [flags]` | Change a stopped box's size. Flags: `--vcpus --memory --disk --instance-type --bundle` (each provider rejects those that don't apply). Refused while the box is running; run `devbox box stop NAME` first. |
 | `devbox box list [--attached]` (= `devbox list`) | All devbox boxes across providers. `--attached` adds a WORKSPACES column (one SSH per box). |
 | `devbox box up NAME` / `box stop NAME` | Start / gracefully shut down. |
 | `devbox box ssh NAME [-- args]` | SSH in as the privileged user — the box's only sudo shell. |

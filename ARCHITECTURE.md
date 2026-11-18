@@ -8,8 +8,9 @@ A **box** is a machine; a **workspace** is the content that attaches to it, as
 one unprivileged account. The VM provides the security boundary; accounts mostly
 provide organization.
 
-**No box config file.** A box's resources are fixed at create time and readable
-from the provider afterwards, so a stored spec could only disagree with the
+**No box config file.** A box's resources are set at create time (changed only by
+`devbox box resize`, which needs a stopped box and routes to `Provider.resize`;
+the default dies "not supported") and readable from the provider afterwards, so a stored spec could only disagree with the
 machine. `config.resolve_box_spec` assembles one from `devbox box create` flags
 plus the global `[defaults]` and never persists it. Hardware keys in a workspace
 config are a hard error naming the flag to use instead. The one fact devbox

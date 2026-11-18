@@ -1263,8 +1263,8 @@ def cmd_nix_check(args: argparse.Namespace, gc: GlobalConfig, workspace=None) ->
 
 def _add_box_create_flags(parser: argparse.ArgumentParser) -> None:
     """The shape of a box, as flags. There is no box config file: resources are
-    fixed at create and readable from the provider afterwards, so a persisted
-    spec could only ever disagree with the machine."""
+    set at create (and changed with `box resize`) and readable from the provider
+    afterwards, so a persisted spec could only ever disagree with the machine."""
     parser.add_argument("--provider", choices=PROVIDERS, default=None,
                         help=f"provider to launch on (default: {DEFAULT_PROVIDER})")
     parser.add_argument("--user", default=None,
@@ -1288,6 +1288,37 @@ def _add_box_create_flags(parser: argparse.ArgumentParser) -> None:
                         help="EC2: force an on-demand instance")
 
 
+RESIZE_FLAGS = ("vcpus", "memory", "disk", "instance_type", "bundle")
+
+
+def _add_box_resize_flags(parser: argparse.ArgumentParser) -> None:
+    """The subset of the create flags that change the size of an existing box.
+    One flat set; each provider rejects the ones that don't apply to it."""
+    parser.add_argument("--vcpus", type=int, default=None, help="vCPUs (kubevirt)")
+    parser.add_argument("--memory", type=int, default=None, metavar="MIB",
+                        help="memory in MiB (kubevirt)")
+    parser.add_argument("--disk", type=int, default=None, metavar="GB",
+                        help="disk size in GB (kubevirt, ec2)")
+    parser.add_argument("--instance-type", default=None, help="EC2: instance type")
+    parser.add_argument("--bundle", default=None, help="Lightsail: bundle id")
+
+
+def cmd_box_resize(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
+    """Resize a stopped box. devbox never stops the box itself."""
+    changes = {f: getattr(args, f) for f in RESIZE_FLAGS
+               if getattr(args, f, None) is not None}
+    if not changes:
+        die("nothing to resize; pass at least one of "
+            + ", ".join("--" + f.replace("_", "-") for f in RESIZE_FLAGS))
+    name, _, provider = _resolve_box(args.name, gc)
+    state = provider.state(name)
+    if state is None:
+        die(f"box '{name}' is not defined; run `devbox box create` first")
+    if state in ("running",):
+        die(f"box '{name}' is running; run `devbox box stop {name}` first")
+    provider.resize(name, changes)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Manage shared dev-sandbox VMs (libvirt or AWS) and the "
@@ -1307,6 +1338,10 @@ def main() -> None:
     bc.add_argument("name", help="the box's name (a provider prefix is added for cloud boxes)")
     _add_box_create_flags(bc)
     bc.set_defaults(func=cmd_box_create, needs_workspace=False)
+    br = box_sub.add_parser("resize", help="change the size of a stopped box")
+    br.add_argument("name", help="the box's canonical name")
+    _add_box_resize_flags(br)
+    br.set_defaults(func=cmd_box_resize, needs_workspace=False)
     bl = box_sub.add_parser("list", help="list devbox-managed boxes")
     bl.add_argument("--attached", action="store_true",
                     help="also show which workspaces are attached (one SSH per box)")
