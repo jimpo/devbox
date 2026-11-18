@@ -4766,3 +4766,58 @@ def test_kubevirt_resources_quantity_suffixes():
     assert _resources(vm("12288Mi")) == "6 vCPU / 12 GiB"
     assert _resources(vm("1572864Ki")) == "6 vCPU / 1.5 GiB"
     assert _resources(vm("lots")) == "?"
+
+
+# ---- box resize -------------------------------------------------------------
+
+class _ResizeProvider(devbox.providers.base.Provider):
+    name = "fake"
+
+    def __init__(self, state):
+        self._state = state
+
+    def create(self, spec): ...
+    def start(self, name): ...
+    def stop(self, name): ...
+    def destroy(self, name): ...
+    def state(self, name): return self._state
+    def address(self, name): return None
+    def list(self): return []
+
+
+def _resize_args(**flags):
+    f = dict(name="kube-dev", vcpus=None, memory=None, disk=None,
+             instance_type=None, bundle=None)
+    f.update(flags)
+    return argparse.Namespace(**f)
+
+
+def test_box_resize_requires_a_flag(monkeypatch):
+    monkeypatch.setattr(devbox.cli, "_resolve_box",
+                        lambda n, gc: (n, "kubevirt", _ResizeProvider("stopped")))
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_box_resize(_resize_args(), None)
+
+
+def test_box_resize_refuses_a_running_box(monkeypatch, capsys):
+    p = _ResizeProvider("running")
+    p.resize = lambda n, c: pytest.fail("resize must not be called")
+    monkeypatch.setattr(devbox.cli, "_resolve_box", lambda n, gc: (n, "kubevirt", p))
+    with pytest.raises(SystemExit):
+        devbox.cli.cmd_box_resize(_resize_args(vcpus=4), None)
+    assert "devbox box stop kube-dev" in capsys.readouterr().err
+
+
+def test_box_resize_passes_only_given_flags_to_the_provider(monkeypatch):
+    p = _ResizeProvider("stopped")
+    got = []
+    p.resize = lambda n, c: got.append((n, c))
+    monkeypatch.setattr(devbox.cli, "_resolve_box", lambda n, gc: (n, "kubevirt", p))
+    devbox.cli.cmd_box_resize(_resize_args(vcpus=4, memory=8192), None)
+    assert got == [("kube-dev", {"vcpus": 4, "memory": 8192})]
+
+
+def test_provider_resize_defaults_to_unsupported(capsys):
+    with pytest.raises(SystemExit):
+        _ResizeProvider("stopped").resize("x", {"vcpus": 2})
+    assert "resize is not supported on fake" in capsys.readouterr().err

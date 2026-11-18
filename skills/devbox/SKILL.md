@@ -41,6 +41,7 @@ dir) and `--box NAME` go *before* the subcommand.
 | Command | Behavior |
 |---|---|
 | `devbox box create NAME [flags]` | Boot + provision a box. Flags (all optional): `--provider ec2\|aws --user --vcpus --memory --disk --instance-type --arch --ami --spot/--on-demand --bundle --blueprint --zone`. Idempotent; prints the canonical name to put in a workspace's `box =`. |
+| `devbox box resize NAME [--vcpus --memory --disk --instance-type --bundle]` | Change a **stopped** box's size (run `box stop` first; devbox never stops it for you). At least one flag; the provider is taken from the name and rejects flags that don't apply to it. |
 | `devbox box list [--attached]` | All devbox-managed boxes (libvirt on this host + EC2/Lightsail account-wide): name, provider, state, resources; `--attached` also shows which workspaces are on each. `devbox list` is the same command. |
 | `devbox box up\|stop\|status\|destroy NAME` | Start / graceful-shutdown / cloud-init + the box's provision log / tear down (destroy deletes the disk, and names the attached workspaces first). |
 | `devbox box ssh NAME` | SSH in as the privileged user — the box's only sudo shell. |
@@ -87,8 +88,8 @@ bare name to `box create`.
 
 ### Per-box — command-line flags only
 
-There is **no box config file**: a box's resources are fixed at create and
-readable from the provider afterwards, so a stored spec could only disagree with
+There is **no box config file**: a box's resources are set at create (changed with
+`devbox box resize`) and readable from the provider afterwards, so a stored spec could only disagree with
 the machine. Anything not passed falls back to the global `[defaults]`.
 
 ```bash

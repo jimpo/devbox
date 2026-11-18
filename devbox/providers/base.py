@@ -10,6 +10,7 @@ import dataclasses
 from typing import Optional
 
 from ..config import Ec2BoxConfig, LightsailBoxConfig
+from ..util import die
 
 
 @dataclasses.dataclass
@@ -87,6 +88,14 @@ class Provider(abc.ABC):
     @abc.abstractmethod
     def list(self) -> list:
         """Instances this provider manages, as Instance rows."""
+
+    def resize(self, name: str, changes: dict) -> None:
+        """Change the size of an existing, *stopped* box (the CLI checks that
+        before calling). `changes` maps the resize flag names given (`vcpus`,
+        `memory`, `disk`, `instance_type`, `bundle`) to their values. A provider
+        that supports resizing overrides this and rejects keys that don't apply to
+        it; the default is for providers that don't."""
+        die(f"resize is not supported on {self.name}")
 
     def get(self, name: str) -> Optional[Instance]:
         """One instance by canonical name, or None. Filters `list()`; a backend
