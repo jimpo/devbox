@@ -4821,3 +4821,24 @@ def test_provider_resize_defaults_to_unsupported(capsys):
     with pytest.raises(SystemExit):
         _ResizeProvider("stopped").resize("x", {"vcpus": 2})
     assert "resize is not supported on fake" in capsys.readouterr().err
+
+
+def test_kubevirt_resize_patches_cpu_and_memory(monkeypatch):
+    fake, provider = _kube_create(monkeypatch, **{"get vm": ('{"items": [{"metadata": {"name": "dev"}}]}', 0)})
+    provider.resize("kube-dev", {"vcpus": 8, "memory": 16384})
+    patches = [(a, i) for a, i in fake.calls if a[0] == "patch"]
+    assert len(patches) == 1
+    args = patches[0][0]
+    assert args[:5] == ("patch", "vm", "dev", "--type", "merge")
+    assert json.loads(args[6]) == {"spec": {"template": {"spec": {"domain": {
+        "cpu": {"cores": 8}, "memory": {"guest": "16384Mi"}}}}}}
+
+
+def test_kubevirt_resize_rejects_disk_and_foreign_flags(monkeypatch, capsys):
+    fake, provider = _kube_create(monkeypatch)
+    for changes, msg in [({"disk": 200}, "disk is not supported"),
+                         ({"vcpus": 2, "bundle": "x"}, "--bundle")]:
+        with pytest.raises(SystemExit):
+            provider.resize("kube-dev", changes)
+        assert msg in capsys.readouterr().err
+    assert not [a for a, _ in fake.calls if a[0] == "patch"]
