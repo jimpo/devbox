@@ -1704,6 +1704,9 @@ def test_codex_is_an_opt_in_module_that_installs_the_self_updating_binary(
     # when its install directory is absent from PATH, and ~/.zshenv is a
     # read-only store symlink, so the directory goes on PATH first.
     assert ".local/bin" in module
+    # Yolo defaults go through the mergeable settings option.
+    assert "settings = lib.mkOption" in module
+    assert "danger-full-access" in module and '"never"' in module
     assert "codex mcp add" in module and "codex mcp remove" in module
     assert "mcpServers = lib.mkOption" in module
     # Naming it as a mod now says to import the module instead.

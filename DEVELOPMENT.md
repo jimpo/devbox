@@ -138,7 +138,9 @@ notice; follow it with `box stop`/`box up`/`box sync --mods`.
   `~/.claude.json` holds the literal `${…}`. With `devbox.claudeCode.plugins`:
   `claude plugin list` shows them.
 - `codex` (`builtinModules.codex`): `codex update` re-runs the standalone
-  installer, and `~/.zshenv` stays a store symlink. With `devbox.codex.mcpServers`:
+  installer, `~/.zshenv` stays a store symlink, and `~/.codex/config.toml` holds
+  `approval_policy = "never"` and `sandbox_mode = "danger-full-access"` plus any
+  `devbox.codex.settings`, and keeps keys codex wrote itself (`[projects]`). With `devbox.codex.mcpServers`:
   `codex mcp list` shows them.
 - `nodejs`: `node` is the LTS, and `npm install -g <cli>` succeeds and lands on the
   non-interactive PATH.

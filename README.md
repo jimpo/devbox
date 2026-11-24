@@ -548,7 +548,9 @@ Claude Code is a module (in `builtinModules.default`). Other modules and your
 `default.nix` add to it with `devbox.claudeCode.plugins = [ "name@marketplace" ]`
 and `devbox.claudeCode.mcpServers.<name> = { url = ...; headers.Authorization =
 "Bearer \${TOKEN}"; }`; both go through the `claude` CLI. `codex` works the same
-way for `devbox.codex.mcpServers.<name> = { url = ...; bearerTokenEnvVar = "TOKEN"; }`.
+way for `devbox.codex.mcpServers.<name> = { url = ...; bearerTokenEnvVar = "TOKEN"; }`, and `devbox.codex.settings.<key> = ...` merges
+into `~/.codex/config.toml` (by default `approval_policy = "never"` and
+`sandbox_mode = "danger-full-access"`).
 
 ## Documentation
 

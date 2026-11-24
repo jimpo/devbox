@@ -21,6 +21,19 @@
 # directory on PATH for every later shell (nix/zshenv.nix), so the block would
 # be redundant as well as unwritable.
 #
+# SETTINGS are one nix attrset, `devbox.codex.settings`, merged across modules
+# like mcpServers and written into ~/.codex/config.toml on every switch:
+#
+#   devbox.codex.settings.model = "gpt-5";
+#
+# The module itself sets `approval_policy = "never"` and `sandbox_mode =
+# "danger-full-access"` (what `codex --yolo` sets), like claude-code's
+# bypassPermissions: the box is a disposable VM and the agent has no sudo, so
+# the prompts are pure friction. They are `mkDefault`, so a module can override
+# them. The attrset is merged over the existing file (remarshal and jq), so what
+# codex wrote itself, such as `[projects]` trust entries, stays; a key in the
+# attrset wins over the same key in the file. Comments in the file are lost.
+#
 # Authentication is the account's: `codex login`, or an OPENAI_API_KEY in the
 # workspace's `[env]`, which reaches the shell from the 0600
 # ~/.config/devbox/env.
@@ -48,8 +61,25 @@ let
       lib.optionalString (s.bearerTokenEnvVar != null)
         " --bearer-token-env-var ${lib.escapeShellArg s.bearerTokenEnvVar}"}
   '';
+
+  json = pkgs.formats.json { };
+  settingsFile = json.generate "codex-settings.json" cfg.settings;
 in
 {
+  options.devbox.codex.settings = lib.mkOption {
+    description = ''
+      Settings merged into ~/.codex/config.toml on every switch. Any TOML
+      value, so tables are nested attrsets.
+    '';
+    default = { };
+    type = json.type;
+  };
+
+  config.devbox.codex.settings = {
+    approval_policy = lib.mkDefault "never";
+    sandbox_mode = lib.mkDefault "danger-full-access";
+  };
+
   options.devbox.codex.mcpServers = lib.mkOption {
     description = ''
       Streamable-HTTP MCP servers registered with `codex mcp add`. Re-added on
@@ -70,11 +100,19 @@ in
   };
 
   config.home.activation.devboxCodex = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-    # Activation starts with a minimal PATH: the installer needs curl and sh.
-    export PATH="${lib.makeBinPath [ pkgs.curl pkgs.coreutils ]}:${config.home.homeDirectory}/.local/bin:$PATH"
+    # Activation starts with a minimal PATH: the installer needs curl and sh,
+    # the settings merge needs jq and remarshal.
+    export PATH="${lib.makeBinPath [ pkgs.curl pkgs.coreutils pkgs.jq pkgs.remarshal ]}:${config.home.homeDirectory}/.local/bin:$PATH"
 
     command -v codex >/dev/null \
       || run sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh'
+
+    cfgfile="$HOME/.codex/config.toml"
+    run mkdir -p "$HOME/.codex"
+    run touch "$cfgfile"
+    tmp="$(mktemp)"
+    toml2json "$cfgfile" | jq --slurpfile s ${settingsFile} '. * $s[0]' | json2toml >"$tmp" \
+      && run mv "$tmp" "$cfgfile"
 
     ${lib.concatStringsSep "\n" (lib.mapAttrsToList addServer cfg.mcpServers)}
   '';
