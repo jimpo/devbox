@@ -789,12 +789,37 @@ def _list_boxes(gc: GlobalConfig) -> tuple:
     return listed, unreachable
 
 
+def _prune_ssh_confs(listed: list) -> list:
+    """Delete SSH alias and known-hosts files for boxes that no longer exist, and
+    return the boxes they belonged to. Only providers that were listed
+    successfully are consulted, so an unreachable provider never costs its boxes'
+    files; a file whose provider can't be told is left alone."""
+    live = {inst.name for _, insts in listed for inst in insts}
+    listed_providers = {provider.name for provider, _ in listed}
+    stale = {}
+    for path in SSH_DIR.glob("*.conf") if SSH_DIR.is_dir() else ():
+        stale.setdefault(path.name.split(".", 1)[0], []).append(path)
+    for path in SSH_DIR.glob("known_hosts.*") if SSH_DIR.is_dir() else ():
+        stale.setdefault(path.name.split(".", 1)[1], []).append(path)
+    removed = []
+    for box, paths in sorted(stale.items()):
+        if box in live or parse_instance_name(box)[0] not in listed_providers:
+            continue
+        for path in paths:
+            path.unlink(missing_ok=True)
+        removed.append(box)
+    return removed
+
+
 def cmd_box_list(args: argparse.Namespace, gc: GlobalConfig, workspace=None) -> None:
     # Global view: every devbox-managed box, unioned across providers. EC2 is
     # account-wide; libvirt is this-host-only.
     listed, unreachable = _list_boxes(gc)
     for name, message in unreachable:
         print(f"warning: could not list {name} boxes: {message}")
+    if getattr(args, "refresh_ssh_conf", False):
+        for box in _prune_ssh_confs(listed):
+            print(f"removed stale SSH config for '{box}'")
     boxes = sorted((inst for _, insts in listed for inst in insts),
                    key=lambda i: i.name)
     if not boxes:
@@ -1361,6 +1386,8 @@ def main() -> None:
     bl = box_sub.add_parser("list", help="list devbox-managed boxes")
     bl.add_argument("--attached", action="store_true",
                     help="also show which workspaces are attached (one SSH per box)")
+    bl.add_argument("--refresh-ssh-conf", action="store_true",
+                    help="remove SSH alias files of boxes that no longer exist")
     bl.set_defaults(func=cmd_box_list, needs_workspace=False)
     for verb, fn, helptext in (
             ("up", cmd_box_up, "start an already-defined, shut-off box"),
@@ -1445,6 +1472,8 @@ def main() -> None:
     ls = sub.add_parser("list", help="list devbox-managed boxes")
     ls.add_argument("--attached", action="store_true",
                     help="also show which workspaces are attached (one SSH per box)")
+    ls.add_argument("--refresh-ssh-conf", action="store_true",
+                    help="remove SSH alias files of boxes that no longer exist")
     ls.set_defaults(func=cmd_box_list, needs_workspace=False)
 
     args = p.parse_args()

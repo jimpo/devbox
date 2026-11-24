@@ -199,7 +199,7 @@ An existing account with no devbox ownership record is refused; claim it with
 |---|---|
 | `devbox box create NAME [flags]` | Launch a box (bare name for libvirt, `<prefix>-NAME` for `--provider ec2\|aws\|kubevirt`) and run the box playbook. Idempotent. Flags: `--provider --user --vcpus --memory --disk --instance-type --arch --ami --spot/--on-demand --bundle --blueprint --zone`. |
 | `devbox box resize NAME [flags]` | Change a stopped box's size. Flags: `--vcpus --memory --disk --instance-type --bundle` (each provider rejects those that don't apply; kubevirt takes only `--vcpus --memory`, effective at the next start). Refused while the box is running; run `devbox box stop NAME` first. |
-| `devbox box list [--attached]` (= `devbox list`) | All devbox boxes across providers. `--attached` adds a WORKSPACES column (one SSH per box). |
+| `devbox box list [--attached]` (= `devbox list`) | All devbox boxes across providers. `--attached` adds a WORKSPACES column (one SSH per box). `--refresh-ssh-conf` deletes SSH alias files of boxes that no longer exist (only for providers that could be listed). |
 | `devbox box up NAME` / `box stop NAME` | Start / gracefully shut down. |
 | `devbox box ssh NAME [-- args]` | SSH in as the privileged user — the box's only sudo shell. |
 | `devbox box status NAME` | cloud-init status and the tail of the box's provision log. |
