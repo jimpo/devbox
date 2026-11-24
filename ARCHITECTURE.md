@@ -189,10 +189,16 @@ assembled layout is all nix sees (`devbox nix check` assembles one).
   `workspace.nix` for those values. `render_workspace_nix` writes agent user,
   home, jj identity (escaped for nix) and `checkAll`, which `devbox nix check`
   sets to import every module.
-- nixpkgs and home-manager are pinned to exact revs. `configenv` (dotfiles) is a
-  **non-flake** input on a rolling branch, so there is **no `flake.lock`**: a lock
-  would freeze configenv, and the exact revs make nix's on-box lock deterministic
-  for the rest. `home-manager.sh` passes `--refresh` to re-resolve the branch.
+- nixpkgs tracks `nixos-unstable` and home-manager its `master`, both
+  re-resolved on every provision, so two boxes provisioned on different days can
+  differ. The optional `nixpkgs_rev` / `home_manager_rev` config keys (global,
+  overridden by the workspace; validated as git refs at load) pin them. Flake
+  inputs must be literals, so a key travels as `DEVBOX_NIXPKGS_REV` /
+  `DEVBOX_HOME_MANAGER_REV` and `home-manager.sh` applies it as
+  `--override-input` on the switch, and runs the home-manager CLI from that same
+  ref so the two never differ. `configenv` (dotfiles) is a **non-flake** input on
+  a rolling branch, so there is **no `flake.lock`**; `home-manager.sh` passes
+  `--refresh` to re-resolve the branches.
 - `zshenv.nix` is always in the generation. It enables `programs.zsh` (the one
   writer of `~/.zshenv` — a second `home.file` claiming it would fail the build),
   sources the nix profile script and the 0600 env file from `envExtra`, and adds

@@ -246,6 +246,8 @@ Optional; every key has a default.
 libvirt_uri = "qemu:///system"
 network = "default"
 cache_dir = "/var/tmp/devbox"   # base image cache; not $HOME (qemu must read it)
+# nixpkgs_rev = "..."           # git ref (commit/tag/branch); default: latest nixos-unstable
+# home_manager_rev = "..."      # same for home-manager; default: its latest master
 
 [base_image]
 url = "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
@@ -295,6 +297,8 @@ Every key is optional; an empty file is a valid marker.
 # box = "dev"                 # default: the workspace's own name
 # agent_user = "my-workspace" # default: the workspace name; a legal, non-system username
 # mods = ["rust"]             # script mods, appended to the base playbook (see Mods)
+# nixpkgs_rev = "..."         # overrides the global pin (below)
+# home_manager_rev = "..."
 
 [[repos]]                     # one per checkout; none = no repo bootstrap
 name = "my-repo"              # omit only under .devbox/, meaning "the root is the repo"
@@ -306,6 +310,11 @@ url = "https://github.com/<org>/my-repo"   # clone mode only
 # [env]                       # overrides the global [env] per key
 # GITHUB_TOKEN = "github_pat_..."
 ```
+
+Every provision uses the latest `nixos-unstable` nixpkgs and `master`
+home-manager, so boxes made on different days can differ. To get a fixed result,
+set `nixpkgs_rev` / `home_manager_rev` (a commit, tag or branch) in the global
+or workspace config; the workspace value wins. `devbox nix check` honours them.
 
 All of a workspace's repos land in one account and share its credentials. Adding
 one to a live workspace is a `devbox sync --mods`.

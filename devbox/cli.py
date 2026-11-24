@@ -56,7 +56,7 @@ from .config import (BoxSpec, DEFAULT_ADMIN_USER, DEFAULT_PROVIDER,
                      resolve_box_spec, resolve_instance, resolve_workspace)
 from .provision import (NIX_BUILTIN_SUBDIR, NIX_GLOBAL_SUBDIR, NIX_PAYLOAD_DIR,
                         NIX_WORKSPACE_SUBDIR, build_box_payload, build_payload,
-                        build_tarball, nix_check_files,
+                        build_tarball, nix_check_files, CHECK_CONTEXT,
                         provision_log, resolve_env)
 from .sync import run_envvars, run_sync
 from .providers import (AWS_PROVIDERS, AwsAuthError, InstanceSpec, all_providers,
@@ -1213,7 +1213,16 @@ def cmd_nix_check(args: argparse.Namespace, gc: GlobalConfig, workspace=None) ->
 
     marker = find_workspace_opt(args.workspace_dir or Path.cwd())
     module_dir = marker.config_path.parent if marker is not None else None
-    files = nix_check_files(module_dir)
+    # The pin keys apply here too: the workspace's (over the global's) if there
+    # is one, else the global's.
+    ctx = dict(CHECK_CONTEXT)
+    cfg = gc
+    if marker is not None and gc is not None:
+        cfg = resolve_workspace(marker.root, gc)
+    if cfg is not None:
+        ctx["DEVBOX_NIXPKGS_REV"] = cfg.nixpkgs_rev
+        ctx["DEVBOX_HOME_MANAGER_REV"] = cfg.home_manager_rev
+    files = nix_check_files(module_dir, ctx)
 
     with tempfile.TemporaryDirectory(prefix="devbox-nix-check.") as tmp:
         # Absolute, because the `path:` flakeref below is handed to nix as a
@@ -1226,6 +1235,13 @@ def cmd_nix_check(args: argparse.Namespace, gc: GlobalConfig, workspace=None) ->
             shutil.rmtree(out_dir / NIX_PAYLOAD_DIR / sub, ignore_errors=True)
         _write_payload(files, out_dir)
         flake = f"path:{out_dir / NIX_PAYLOAD_DIR}"
+        overrides = []
+        if ctx.get("DEVBOX_NIXPKGS_REV"):
+            overrides += ["--override-input", "nixpkgs",
+                          f"github:NixOS/nixpkgs/{ctx['DEVBOX_NIXPKGS_REV']}"]
+        if ctx.get("DEVBOX_HOME_MANAGER_REV"):
+            overrides += ["--override-input", "home-manager",
+                          f"github:nix-community/home-manager/{ctx['DEVBOX_HOME_MANAGER_REV']}"]
         modules = sorted(f.path.removeprefix(f"{NIX_PAYLOAD_DIR}/") for f in files
                          if f.path.count("/") > 1)
         print("Checking every devbox, global and workspace module:")
@@ -1245,11 +1261,11 @@ def cmd_nix_check(args: argparse.Namespace, gc: GlobalConfig, workspace=None) ->
         # push to that branch would evaluate the old tree and miss an option
         # the push just added.
         attr = f"{flake}#homeConfigurations.agent-{system}.activationPackage"
-        steps = [(["eval", "--raw", "--refresh", f"{attr}.drvPath"],
+        steps = [(["eval", "--raw", "--refresh", *overrides, f"{attr}.drvPath"],
                   f"evaluate agent-{system}", False)]
         if args.build:
             steps.append((["build", "--no-link", "--print-out-paths", "--refresh",
-                           attr], f"build agent-{system}", True))
+                           *overrides, attr], f"build agent-{system}", True))
         for argv, label, show in steps:
             cmd = ["nix", "--extra-experimental-features", "nix-command flakes",
                    *argv]
