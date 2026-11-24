@@ -43,8 +43,8 @@
 # cached answer for up to `tarball-ttl` (an hour by default). `configenv` is
 # the one input named by branch rather than by rev (see nix/flake.nix), and
 # without this a shared-configs edit would reach the box an hour late, with no
-# way to hurry it from here. The pinned inputs are content-addressed, so it
-# costs one branch lookup and no re-download. home-manager passes the flag
+# way to hurry it from here. It also re-resolves nixpkgs and home-manager when
+# they track a branch. home-manager passes the flag
 # through to the `nix build` that evaluates `--flake`, which is why it sits
 # after the `--`.
 #
@@ -54,12 +54,23 @@
 # Context (from the environment): DEVBOX_PAYLOAD_DIR.
 set -euo pipefail
 
-# The home-manager CLI, pinned to the same rev as the flake's `home-manager`
-# input (see nix/flake.nix); bump the two together. Named by its full flake URL
-# rather than the `home-manager/...` registry shorthand, so the switch does not
-# depend on the global flake registry resolving.
-HM_REV="82ce401aa350502897c3f2e85f384d61cd3b0b6d"
-HM_FLAKE="github:nix-community/home-manager/$HM_REV"
+# The home-manager CLI and the flake's `home-manager` input are one version: both
+# come from DEVBOX_HOME_MANAGER_REV (a git ref), or home-manager's default branch
+# when it is empty, and the flake's input is overridden below to match. Named by
+# its full flake URL rather than the `home-manager/...` registry shorthand, so
+# the switch does not depend on the global flake registry resolving.
+HM_FLAKE="github:nix-community/home-manager"
+[ -z "${DEVBOX_HOME_MANAGER_REV:-}" ] || HM_FLAKE="$HM_FLAKE/$DEVBOX_HOME_MANAGER_REV"
+
+# A configured ref reaches the flake as --override-input: flake inputs must be
+# literals, so a config value cannot be written into flake.nix.
+overrides=()
+if [ -n "${DEVBOX_NIXPKGS_REV:-}" ]; then
+  overrides+=(--override-input nixpkgs "github:NixOS/nixpkgs/$DEVBOX_NIXPKGS_REV")
+fi
+if [ -n "${DEVBOX_HOME_MANAGER_REV:-}" ]; then
+  overrides+=(--override-input home-manager "$HM_FLAKE")
+fi
 
 flake="${DEVBOX_PAYLOAD_DIR:?home-manager mod: DEVBOX_PAYLOAD_DIR is not set}/nix"
 [ -f "$flake/flake.nix" ] || {
@@ -85,13 +96,12 @@ case "$(uname -m)" in
   *) echo "home-manager mod: unsupported architecture $(uname -m)" >&2; exit 1 ;;
 esac
 
-# `--no-write-lock-file` is safe because both of the flake's inputs are pinned
-# to an exact rev (see nix/flake.nix): resolution is already deterministic, so a
-# lock file would record only what the pins already say. It sits AFTER the `--`
-# because it is home-manager's flag, not `nix run`'s - home-manager recognizes
-# it by name and passes it through to the `nix build` that evaluates the
-# `--flake` argument. Before the `--` it would apply to resolving $HM_FLAKE,
-# which is a different flake with a lock of its own.
+# `--no-write-lock-file`: the payload directory is read-only here and carries no
+# lock (see nix/flake.nix), so nix resolves the inputs fresh on each run and
+# records nothing. It sits AFTER the `--` because it is home-manager's flag, not
+# `nix run`'s - home-manager recognizes it by name and passes it through to the
+# `nix build` that evaluates the `--flake` argument, as it does --override-input.
+# Before the `--` it would apply to resolving $HM_FLAKE, a different flake.
 echo "==> home-manager switch (agent-$system)"
 nix run "$HM_FLAKE" -- switch -b devbox-backup --no-write-lock-file --refresh \
-  --flake "path:$flake#agent-$system"
+  --flake "path:$flake#agent-$system" "${overrides[@]}"

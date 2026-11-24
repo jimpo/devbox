@@ -35,7 +35,7 @@ from a wheel.
   manifest/repos/env rendering, `RETIRED_MODS`.
 - **Nix rendering**: `render_workspace_nix`, `nix_payload_files` (what of a
   workspace's `default.nix` directory and the global modules ships), the skeleton's
-  contents, pins agreeing between `flake.nix` and `home-manager.sh`, and per-mod
+  contents, the flake's rolling refs and `home-manager.sh`'s arguments (run against a fake `nix`), and per-mod
   invariants (e.g. no `[env]` value in any payload file, the MCP headers'
   unexpanded `${…}`).
 - **First boot**: `init-script.sh` rendering, and its `useradd` against fake

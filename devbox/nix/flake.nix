@@ -26,21 +26,14 @@
 # the payload directory is not a repo. `path:` copies the directory to the
 # store as it is on disk.
 #
-# NO flake.lock, and none is wanted: a lock pins EVERY input, `configenv`
-# included, and that is the one input meant to roll (see below) - a locked
-# payload would freeze the branch `--refresh` exists to re-resolve, and the
-# payload directory is read-only on the box, so nothing there could update it.
-# `nixpkgs` and `home-manager` are pinned to an exact 40-character rev instead,
-# which makes the lock nix writes on the box deterministic for them. To bump
-# them, resolve the two branch heads and paste the revs below (nixos-unstable
-# and home-manager master are the matching pair; a box is ephemeral enough not
-# to need a release branch):
-#
-#   curl -s https://api.github.com/repos/NixOS/nixpkgs/branches/nixos-unstable
-#   curl -s https://api.github.com/repos/nix-community/home-manager/branches/master
-#
-# `mods/home-manager.sh` pins its `nix run` of the home-manager CLI to the same
-# rev as the input below; bump both together.
+# NO flake.lock, and none is wanted: the inputs are meant to roll. `nixpkgs`
+# tracks nixos-unstable and `home-manager` its default branch (master), both
+# re-resolved on each provision; a box is ephemeral enough not to need a release
+# branch. Flake inputs must be literals, so the `nixpkgs_rev` and
+# `home_manager_rev` config keys reach nix as `--override-input` in
+# `mods/home-manager.sh`, which also runs the home-manager CLI from the same ref.
+# The payload directory is read-only on the box, so no lock could be written
+# there anyway.
 #
 # `configenv` IS THE EXCEPTION: it rolls with its own `main`, deliberately, so
 # an edit to the shared configs reaches every box without a devbox release.
@@ -99,9 +92,9 @@
   description = "devbox agent home environment";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/177d0540942fb205af6993b1d5fa0b57799e09f8";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     home-manager = {
-      url = "github:nix-community/home-manager/82ce401aa350502897c3f2e85f384d61cd3b0b6d";
+      url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # Jim's shared configuration files, as a home-manager module -

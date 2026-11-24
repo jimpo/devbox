@@ -273,6 +273,10 @@ class GlobalConfig:
     # since there is no repo to anchor [[repo.sync]] against at this scope.
     sync: list = dataclasses.field(default_factory=list)
     base_image_gpg_key: Path = Path(DEFAULT_BASE_IMAGE_GPG_KEY)
+    # Optional git refs pinning the home-manager flake's inputs; "" = track
+    # nixos-unstable / home-manager master. A workspace's value wins.
+    nixpkgs_rev: str = ""
+    home_manager_rev: str = ""
 
     @classmethod
     def load(cls, path: Path = GLOBAL_CONFIG_PATH) -> "GlobalConfig":
@@ -282,7 +286,8 @@ class GlobalConfig:
                 data = tomllib.load(f)
         _warn_unknown_keys(
             data,
-            known_top={"libvirt_uri", "network", "cache_dir"},
+            known_top={"libvirt_uri", "network", "cache_dir", "nixpkgs_rev",
+                       "home_manager_rev"},
             known_sections={
                 "base_image": {"url", "gpg_key"},
                 "defaults": {"vcpus", "memory_mib", "disk_gb"},
@@ -324,6 +329,8 @@ class GlobalConfig:
             sync=_resolve_global_sync(data, path),
             base_image_gpg_key=Path(
                 base_image.get("gpg_key", DEFAULT_BASE_IMAGE_GPG_KEY)).expanduser(),
+            nixpkgs_rev=_resolve_rev(data, "nixpkgs_rev", "", path),
+            home_manager_rev=_resolve_rev(data, "home_manager_rev", "", path),
         )
 
     def read_ssh_pubkey(self) -> str:
@@ -564,6 +571,10 @@ class WorkspaceConfig:
     # box, overriding the global [env] per-key (see sync.py). The marker file is
     # git-excluded, so hardcoding scoped creds here is acceptable.
     env: dict = dataclasses.field(default_factory=dict)
+    # Git refs for the home-manager flake's inputs (workspace value, else the
+    # global one); "" = the flake's rolling default.
+    nixpkgs_rev: str = ""
+    home_manager_rev: str = ""
 
     @property
     def root(self) -> Path:
@@ -836,7 +847,8 @@ def resolve_workspace(start: Path, global_config: GlobalConfig) -> WorkspaceConf
 
     _warn_unknown_keys(
         data,
-        known_top={"workspace", "box", "agent_user", "mods"},
+        known_top={"workspace", "box", "agent_user", "mods", "nixpkgs_rev",
+                   "home_manager_rev"},
         known_sections={
             "repos": _ANY_KEYS,  # array-of-tables, validated by _resolve_repos
             "sync": _ANY_KEYS,   # array-of-tables, validated by _parse_sync_entry
@@ -857,7 +869,27 @@ def resolve_workspace(start: Path, global_config: GlobalConfig) -> WorkspaceConf
         sync=[*global_config.sync, *_resolve_sync(data, marker, repos)],
         env=_merge_secrets_env(_resolve_env(data, config_path),
                                config_path.parent / SECRETS_ENV_FILE),
+        nixpkgs_rev=_resolve_rev(data, "nixpkgs_rev", global_config.nixpkgs_rev,
+                                 config_path),
+        home_manager_rev=_resolve_rev(data, "home_manager_rev",
+                                      global_config.home_manager_rev, config_path),
     )
+
+
+_REV_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+
+def _resolve_rev(data: dict, key: str, default: str, config_path: Path) -> str:
+    """A git ref (commit, tag or branch) for a flake input. It ends up in a flake
+    URL on the box, so only a git-ref charset is accepted."""
+    if key not in data:
+        return default
+    rev = data[key]
+    if not isinstance(rev, str) or not _REV_RE.match(rev):
+        die(f"{config_path}: {key} {rev!r} is not a valid git ref (a commit, tag "
+            f"or branch: letters, digits, '.', '_', '-' and '/', starting with a "
+            f"letter or digit)")
+    return rev
 
 
 def _resolve_box_name(data: dict, workspace_name: str, config_path: Path) -> str:

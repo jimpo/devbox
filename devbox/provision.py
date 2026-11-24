@@ -547,6 +547,9 @@ def _workspace_context(workspace: WorkspaceConfig, gc: GlobalConfig, admin_user:
         "DEVBOX_JJ_NAME": jj_name,
         "DEVBOX_JJ_EMAIL": jj_email,
         "DEVBOX_REPO_DIRS": ",".join(r.dir for r in workspace.repos),
+        # Git refs pinning the flake's inputs; empty = the flake's rolling default.
+        "DEVBOX_NIXPKGS_REV": workspace.nixpkgs_rev,
+        "DEVBOX_HOME_MANAGER_REV": workspace.home_manager_rev,
     }
 
 
@@ -667,11 +670,12 @@ CHECK_CONTEXT = {
 }
 
 
-def nix_check_files(module_dir: Optional[Path] = None) -> list:
+def nix_check_files(module_dir: Optional[Path] = None,
+                    context: Optional[dict] = None) -> list:
     """The payload flake as `devbox nix check` evaluates it: the workspace's
     own module (if any) plus EVERY devbox and global module, so a typo in a
     module no workspace imports still fails the check."""
-    return nix_payload_files(CHECK_CONTEXT, module_dir, check_all=True)
+    return nix_payload_files(context or CHECK_CONTEXT, module_dir, check_all=True)
 
 
 # ---- payload assembly -------------------------------------------------------

@@ -1362,23 +1362,103 @@ def test_nodejs_is_an_opt_in_module_that_relocates_npms_global_prefix():
     assert "home.packages = [ pkgs.nodejs ];" in body
 
 
-def test_the_home_manager_cli_is_pinned_to_the_flakes_own_input():
-    # The CLI that runs the switch and the flake it switches to are one
-    # version, so a bump cannot half-land.
+def test_the_flake_tracks_unstable_and_master_with_no_exact_revs():
     flake = (devbox.NIX_DIR / "flake.nix").read_text()
-    mod = (devbox.BUILTIN_MODS_DIR / "home-manager.sh").read_text()
-    revs = re.findall(r"github:nix-community/home-manager/([0-9a-f]{40})", flake)
-    assert len(revs) == 1
-    assert f'HM_REV="{revs[0]}"' in mod
-    # nixpkgs and home-manager are pinned to an exact rev, so the lock nix
-    # writes on the box is deterministic for them without one being checked in.
-    assert re.search(r"github:NixOS/nixpkgs/[0-9a-f]{40}", flake)
-    # configenv is the deliberate exception: it rolls with its own `main`, so
-    # the switch has to re-resolve that branch rather than reuse nix's cached
-    # answer for up to `tarball-ttl`.
+    assert 'nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";' in flake
+    assert 'url = "github:nix-community/home-manager";' in flake
+    assert not re.search(r"github:[\w-]+/[\w-]+/[0-9a-f]{40}", flake)
+    # configenv rolls with its own `main`; the switch re-resolves it.
     assert re.search(r'url = "github:jimpo/configenv";', flake)
-    assert not re.search(r"github:jimpo/configenv/[0-9a-f]{40}", flake)
-    assert "--refresh" in mod
+    assert "--refresh" in (devbox.BUILTIN_MODS_DIR / "home-manager.sh").read_text()
+
+
+def _run_hm_mod(tmp_path, env):
+    """Run home-manager.sh against a fake `nix` that records its argv."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (tmp_path / "payload" / "nix").mkdir(parents=True)
+    (tmp_path / "payload" / "nix" / "flake.nix").write_text("")
+    nix = bindir / "nix"
+    nix.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$@" > {tmp_path}/argv\n')
+    nix.chmod(0o755)
+    full = {"PATH": f"{bindir}:{os.environ['PATH']}",
+            "DEVBOX_PAYLOAD_DIR": str(tmp_path / "payload"), **env}
+    subprocess.run(["bash", str(devbox.BUILTIN_MODS_DIR / "home-manager.sh")],
+                   env=full, check=True, capture_output=True)
+    return (tmp_path / "argv").read_text().split("\n")[:-1]
+
+
+def test_home_manager_sh_defaults_to_the_rolling_refs(tmp_path):
+    argv = _run_hm_mod(tmp_path, {})
+    assert argv[1] == "github:nix-community/home-manager"
+    assert "--override-input" not in argv
+
+
+def test_home_manager_sh_uses_one_ref_for_the_cli_and_the_input(tmp_path):
+    argv = _run_hm_mod(tmp_path, {"DEVBOX_HOME_MANAGER_REV": "release-25.11",
+                                  "DEVBOX_NIXPKGS_REV": "abc1234"})
+    hm = "github:nix-community/home-manager/release-25.11"
+    assert argv[1] == hm
+    assert argv[-6:] == ["--override-input", "nixpkgs", "github:NixOS/nixpkgs/abc1234",
+                         "--override-input", "home-manager", hm]
+
+
+def test_rev_keys_parse_with_workspace_over_global(tmp_path):
+    gcfg = tmp_path / "config.toml"
+    gcfg.write_text('nixpkgs_rev = "global-np"\nhome_manager_rev = "global-hm"\n')
+    gc = devbox.GlobalConfig.load(gcfg)
+    assert (gc.nixpkgs_rev, gc.home_manager_rev) == ("global-np", "global-hm")
+    _write_marker(tmp_path, 'nixpkgs_rev = "ws-np"\n')
+    ws = devbox.resolve_workspace(tmp_path, gc)
+    assert (ws.nixpkgs_rev, ws.home_manager_rev) == ("ws-np", "global-hm")
+
+
+def test_rev_keys_default_to_empty(tmp_path, global_config, monkeypatch):
+    monkeypatch.setattr(global_config, "read_ssh_pubkey", lambda: "ssh-ed25519 AAA")
+    _write_marker(tmp_path, "")
+    ws = devbox.resolve_workspace(tmp_path, global_config)
+    assert (ws.nixpkgs_rev, ws.home_manager_rev) == ("", "")
+    ctx = devbox.provision._workspace_context(ws, global_config, "alice")
+    assert ctx["DEVBOX_NIXPKGS_REV"] == ctx["DEVBOX_HOME_MANAGER_REV"] == ""
+
+
+def test_rev_keys_reach_the_context(tmp_path, global_config, monkeypatch):
+    monkeypatch.setattr(global_config, "read_ssh_pubkey", lambda: "ssh-ed25519 AAA")
+    _write_marker(tmp_path, 'nixpkgs_rev = "v1.2/x"\nhome_manager_rev = "abc"\n')
+    ws = devbox.resolve_workspace(tmp_path, global_config)
+    ctx = devbox.provision._workspace_context(ws, global_config, "alice")
+    assert ctx["DEVBOX_NIXPKGS_REV"] == "v1.2/x"
+    assert ctx["DEVBOX_HOME_MANAGER_REV"] == "abc"
+
+
+@pytest.mark.parametrize("bad", ['"a b"', '"-x"', '"a;b"', '""', "3", '"a$(x)"'])
+def test_an_invalid_rev_fails_at_load(tmp_path, global_config, bad):
+    _write_marker(tmp_path, f"home_manager_rev = {bad}\n")
+    with pytest.raises(SystemExit):
+        devbox.resolve_workspace(tmp_path, global_config)
+
+
+def test_an_invalid_global_rev_fails_at_load(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('nixpkgs_rev = "a b"\n')
+    with pytest.raises(SystemExit):
+        devbox.GlobalConfig.load(cfg)
+
+
+def test_cmd_nix_check_passes_the_rev_overrides(monkeypatch, tmp_path, isolated_mods,
+                                               global_config):
+    runs = []
+    global_config.nixpkgs_rev = "np-ref"
+    monkeypatch.setattr(devbox.cli.shutil, "which", lambda p: f"/usr/bin/{p}")
+    monkeypatch.setattr(devbox.cli.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(devbox.cli, "find_workspace_opt", lambda start: None)
+    monkeypatch.setattr(devbox.cli.subprocess, "run",
+                        lambda cmd, **kw: runs.append(cmd) or _cp(cmd))
+    devbox.cli.cmd_nix_check(_nix_check_args(out_dir=str(tmp_path / "o")),
+                             global_config, None)
+    i = runs[0].index("--override-input")
+    assert runs[0][i:i + 3] == ["--override-input", "nixpkgs", "github:NixOS/nixpkgs/np-ref"]
+    assert runs[0].count("--override-input") == 1
 
 
 def test_the_flake_discovers_modules_by_file_presence_not_a_list():
