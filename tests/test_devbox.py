@@ -4835,3 +4835,22 @@ def test_kubevirt_resize_rejects_disk_and_foreign_flags(monkeypatch, capsys):
             provider.resize("kube-dev", changes)
         assert msg in capsys.readouterr().err
     assert not [a for a, _ in fake.calls if a[0] == "patch"]
+
+
+def test_list_refresh_ssh_conf_prunes_only_dead_boxes_of_listed_providers(
+        monkeypatch, ssh_dir, capsys):
+    ssh_dir.mkdir()
+    for f in ("dev.admin.conf", "dev.web.conf", "known_hosts.dev",
+              "old.admin.conf", "known_hosts.old",
+              "ec2-gone.admin.conf", "known_hosts.ec2-gone"):
+        (ssh_dir / f).write_text("")
+    local = _StubListProvider("libvirt", boxes=[_instance("dev")])
+    stale = _StubListProvider("ec2", error=devbox.AwsAuthError("expired"))
+    monkeypatch.setattr(devbox.cli, "all_providers", lambda gc: [local, stale])
+    args = _list_args()
+    args.refresh_ssh_conf = True
+    devbox.cli.cmd_box_list(args, _ec2_gc())
+    assert sorted(p.name for p in ssh_dir.iterdir()) == [
+        "dev.admin.conf", "dev.web.conf", "ec2-gone.admin.conf",
+        "known_hosts.dev", "known_hosts.ec2-gone"]
+    assert "removed stale SSH config for 'old'" in capsys.readouterr().out
