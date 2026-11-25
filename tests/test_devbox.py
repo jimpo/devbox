@@ -1716,6 +1716,18 @@ def test_codex_is_an_opt_in_module_that_installs_the_self_updating_binary(
     assert "devbox.builtinModules.codex" in capsys.readouterr().err
 
 
+def test_gemini_is_an_opt_in_module_that_installs_via_npm_with_yolo_settings():
+    assert "gemini" not in devbox.WORKSPACE_BASE_MODS
+    assert "gemini" not in (devbox.BUILTIN_MODULES_DIR / "default.nix").read_text()
+    module = (devbox.BUILTIN_MODULES_DIR / "gemini.nix").read_text()
+    assert "npm install -g @google/gemini-cli" in module
+    assert "command -v gemini" in module
+    assert "NPM_CONFIG_PREFIX" in module
+    assert "settings = lib.mkOption" in module
+    assert 'defaultApprovalMode = lib.mkDefault "yolo"' in module
+    assert "mcpServers = lib.mkOption" in module
+
+
 # ---- resolve_env (global + workspace [env], workspace overrides per-key) --------
 def test_resolve_env_merges_global_and_workspace():
     gc = _global_config(devbox.Path("/nonexistent"),

@@ -85,7 +85,7 @@
 # workspace shares. Credentials stay in the 0600 ~/.config/devbox/env, and a
 # module that needs one reads that file at run time.
 #
-# AGENT CLIs ARE INSTALLED, NOT PACKAGED (`claude-code`, `codex`): their
+# AGENT CLIs ARE INSTALLED, NOT PACKAGED (`claude-code`, `codex`, `gemini`): their
 # installers put a binary in ~/.local/bin that updates itself, which a store
 # path cannot do. Each is a module whose activation step runs the installer.
 {

@@ -161,7 +161,7 @@ any script runs and a script can use what a module put on PATH (`repo-bootstrap`
 runs `jj` through `github-auth`'s credential helper, which is why the flake
 always imports those two).
 
-**Agent CLIs are installed, not packaged** (`claude-code`, `codex`): their
+**Agent CLIs are installed, not packaged** (`claude-code`, `codex`, `gemini`): their
 installers put a self-updating binary in the account's own `~/.local/bin`, which
 a read-only store path pinned to one nixpkgs can't do. both are
 modules whose activation step runs the installer (skipped once the binary
