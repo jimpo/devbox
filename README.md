@@ -541,7 +541,7 @@ build also needs system libraries, add a small script mod, for example
 `# /// mod` / `# packages = ["clang", "openssl-devel"]` / `# ///`.
 
 `devbox sync --mods` applies it to a live box. The opt-in built-in modules are
-`nodejs`, `uv`, `cloudflared` and `codex`. Each file's header says what it
+`nodejs`, `uv`, `cloudflared`, `codex` and `gemini`. Each file's header says what it
 does.
 
 Claude Code is a module (in `builtinModules.default`). Other modules and your
@@ -550,7 +550,10 @@ and `devbox.claudeCode.mcpServers.<name> = { url = ...; headers.Authorization =
 "Bearer \${TOKEN}"; }`; both go through the `claude` CLI. `codex` works the same
 way for `devbox.codex.mcpServers.<name> = { url = ...; bearerTokenEnvVar = "TOKEN"; }`, and `devbox.codex.settings.<key> = ...` merges
 into `~/.codex/config.toml` (by default `approval_policy = "never"` and
-`sandbox_mode = "danger-full-access"`).
+`sandbox_mode = "danger-full-access"`). `gemini` (npm-installed, self-updating)
+takes `devbox.gemini.mcpServers.<name> = { url = ...; headers.Authorization =
+"Bearer \${TOKEN}"; }` and `devbox.gemini.settings.<key> = ...`, merged into
+`~/.gemini/settings.json` (by default `general.defaultApprovalMode = "yolo"`).
 
 ## Documentation
 

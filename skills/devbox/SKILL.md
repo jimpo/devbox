@@ -220,7 +220,8 @@ once per attachment in that workspace's account. A workspace appends scripts in
 `devbox.claudeCode.mcpServers.<name> = { url; headers; }` and
 `devbox.claudeCode.plugins = [ "name@marketplace" ]` in `default.nix`. The opt-in
 `builtinModules.codex` installs Codex and takes
-`devbox.codex.mcpServers.<name> = { url; bearerTokenEnvVar; }`.
+`devbox.codex.mcpServers.<name> = { url; bearerTokenEnvVar; }`; likewise
+`builtinModules.gemini` for Gemini CLI (`devbox.gemini.mcpServers`, `devbox.gemini.settings`).
 For tooling nix can't provide (`Cargo.toml` → a rustup-managed toolchain):
 
 1. List it: `mods = ["rust"]` in the marker file.

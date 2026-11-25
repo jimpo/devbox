@@ -142,6 +142,9 @@ notice; follow it with `box stop`/`box up`/`box sync --mods`.
   `approval_policy = "never"` and `sandbox_mode = "danger-full-access"` plus any
   `devbox.codex.settings`, and keeps keys codex wrote itself (`[projects]`). With `devbox.codex.mcpServers`:
   `codex mcp list` shows them.
+- `gemini` (`builtinModules.gemini`): `gemini` is in `~/.npm-global/bin`, and
+  `~/.gemini/settings.json` holds `general.defaultApprovalMode = "yolo"` plus any
+  `devbox.gemini.settings` / `mcpServers`, keeping keys gemini wrote itself.
 - `nodejs`: `node` is the LTS, and `npm install -g <cli>` succeeds and lands on the
   non-interactive PATH.
 - `cloudflared`: with a token the user unit is active and no token is visible in
